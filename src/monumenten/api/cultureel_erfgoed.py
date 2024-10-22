@@ -6,7 +6,7 @@ from loguru import logger
 CULTUREEL_ERFGOED_SPARQL_ENDPOINT = (
     "https://api.linkeddata.cultureelerfgoed.nl/datasets/rce/cho/sparql"
 )
-CULTUREEL_ERFGOED_SEMAPHORE = asyncio.Semaphore(2)
+CULTUREEL_ERFGOED_SEMAPHORE = asyncio.Semaphore(10)
 
 RIJKSMONUMENTEN_QUERY_TEMPLATE = """
 PREFIX ceo:<https://linkeddata.cultureelerfgoed.nl/def/ceo#>

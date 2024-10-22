@@ -6,7 +6,7 @@ from loguru import logger
 KADASTER_SPARQL_ENDPOINT = (
     "https://api.labs.kadaster.nl/datasets/dst/kkg/services/default/sparql"
 )
-KADASTER_SEMAPHORE = asyncio.Semaphore(2)
+KADASTER_SEMAPHORE = asyncio.Semaphore(10)
 
 VERBLIJFSOBJECTEN_QUERY_TEMPLATE = """
 PREFIX sor: <https://data.kkg.kadaster.nl/sor/model/def/>
