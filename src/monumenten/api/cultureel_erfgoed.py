@@ -6,21 +6,22 @@ from loguru import logger
 CULTUREEL_ERFGOED_SPARQL_ENDPOINT = (
     "https://api.linkeddata.cultureelerfgoed.nl/datasets/rce/cho/sparql"
 )
-CULTUREEL_ERFGOED_SEMAPHORE = asyncio.Semaphore(10)
+CULTUREEL_ERFGOED_SEMAPHORE = asyncio.Semaphore(4)
 
 RIJKSMONUMENTEN_QUERY_TEMPLATE = """
 PREFIX ceo:<https://linkeddata.cultureelerfgoed.nl/def/ceo#>
 PREFIX bag:<http://bag.basisregistraties.overheid.nl/bag/id/>
 PREFIX rn:<https://data.cultureelerfgoed.nl/term/id/rn/>
-SELECT DISTINCT ?identificatie ?rijksmonument_nummer
+SELECT ?identificatie (MAX(?nummer) as ?rijksmonument_nummer)
 WHERE {{
     ?monument ceo:heeftJuridischeStatus rn:b2d9a59a-fe1e-4552-9a05-3c2acddff864 ;
-              ceo:rijksmonumentnummer ?rijksmonument_nummer ;
+              ceo:rijksmonumentnummer ?nummer ;
               ceo:heeftBasisregistratieRelatie ?basisregistratieRelatie .
     ?basisregistratieRelatie ceo:heeftBAGRelatie ?bagRelatie .
     ?bagRelatie ceo:verblijfsobjectIdentificatie ?identificatie .
     VALUES ?identificatie {{ {identificaties} }}
 }}
+GROUP BY ?identificatie
 """
 
 BESCHERMDE_GEZICHTEN_QUERY = """
@@ -38,18 +39,18 @@ WHERE {{
 """
 
 
-async def query_rijksmonumenten(sessie, identificaties):
+async def query_rijksmonumenten(session, identificaties):
     async with CULTUREEL_ERFGOED_SEMAPHORE:
         identificaties_str = " ".join(
             f'"{identificatie}"' for identificatie in identificaties
         )
         query = RIJKSMONUMENTEN_QUERY_TEMPLATE.format(identificaties=identificaties_str)
-        params = {"query": query, "format": "json"}
+        data = {"query": query, "format": "json"}
         retries = 3
         for poging in range(retries):
             try:
-                async with sessie.post(
-                    CULTUREEL_ERFGOED_SPARQL_ENDPOINT, data=params
+                async with session.post(
+                    CULTUREEL_ERFGOED_SPARQL_ENDPOINT, data=data
                 ) as response:
                     response.raise_for_status()
                     resultaat = await response.json()
@@ -60,23 +61,25 @@ async def query_rijksmonumenten(sessie, identificaties):
                             f"Onverwacht antwoord bij poging {poging + 1}: {resultaat}"
                         )
                         return {}
-            except aiohttp.ClientResponseError:
+            except aiohttp.ClientResponseError as e:
+                logger.debug(response.headers)
                 if poging != retries - 1:
                     logger.warning(
-                        f"Poging {poging + 1}/{retries} voor rijksmonumenten query mislukt. Opnieuw proberen over 1 seconde..."
+                        f"Poging {poging + 1}/{retries} voor rijksmonumenten query mislukt. {e} Opnieuw proberen over 1 seconde..."
                     )
                     await asyncio.sleep(1)
                 else:
                     raise
 
 
-async def query_beschermde_gebieden(sessie):
+async def query_beschermde_gebieden(session):
     retries = 3
     for poging in range(retries):
         try:
-            params = {"query": BESCHERMDE_GEZICHTEN_QUERY, "format": "json"}
-            async with sessie.post(
-                CULTUREEL_ERFGOED_SPARQL_ENDPOINT, data=params
+            data = {"query": BESCHERMDE_GEZICHTEN_QUERY, "format": "json"}
+
+            async with session.post(
+                CULTUREEL_ERFGOED_SPARQL_ENDPOINT, data=data
             ) as response:
                 response.raise_for_status()
                 resultaat = await response.json()

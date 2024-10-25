@@ -6,7 +6,7 @@ from loguru import logger
 KADASTER_SPARQL_ENDPOINT = (
     "https://api.labs.kadaster.nl/datasets/dst/kkg/services/default/sparql"
 )
-KADASTER_SEMAPHORE = asyncio.Semaphore(10)
+KADASTER_SEMAPHORE = asyncio.Semaphore(4)
 
 VERBLIJFSOBJECTEN_QUERY_TEMPLATE = """
 PREFIX sor: <https://data.kkg.kadaster.nl/sor/model/def/>
@@ -21,7 +21,7 @@ WHERE {{
 """
 
 
-async def query_verblijfsobjecten(sessie, identificaties):
+async def query_verblijfsobjecten(session, identificaties):
     async with KADASTER_SEMAPHORE:
         identificaties_str = ", ".join(
             f'"{identificatie}"' for identificatie in identificaties
@@ -29,12 +29,12 @@ async def query_verblijfsobjecten(sessie, identificaties):
         query = VERBLIJFSOBJECTEN_QUERY_TEMPLATE.format(
             identificaties=identificaties_str
         )
-        params = {"query": query, "format": "json"}
+        data = {"query": query, "format": "json"}
         retries = 3
         for poging in range(retries):
             try:
-                async with sessie.post(
-                    KADASTER_SPARQL_ENDPOINT, data=params
+                async with session.post(
+                    KADASTER_SPARQL_ENDPOINT, data=data
                 ) as response:
                     response.raise_for_status()
                     resultaat = await response.json()

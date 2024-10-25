@@ -13,24 +13,49 @@ from monumenten.api.cultureel_erfgoed import (
 )
 from monumenten.api.kadaster import query_verblijfsobjecten
 
-ontbrekende_identificaties = set()
-identificatie_mapping = {}
 
 QUERY_BATCH_GROOTTE = 500  # lijkt meest optimaal qua performance
 
 
-async def verzamel_data(sessie, identificaties_batch):
-    rijksmonumenten_taak = query_rijksmonumenten(sessie, identificaties_batch)
-    verblijfsobjecten_taak = query_verblijfsobjecten(sessie, identificaties_batch)
+async def verzamel_data(session, identificaties_batch):
+    rijksmonumenten_taak = query_rijksmonumenten(session, identificaties_batch)
+    verblijfsobjecten_taak = query_verblijfsobjecten(session, identificaties_batch)
     rijksmonumenten, verblijfsobjecten = await asyncio.gather(
         rijksmonumenten_taak, verblijfsobjecten_taak
     )
     return rijksmonumenten, verblijfsobjecten
 
 
-async def voer_queries_uit(sessie, verblijfsobject_ids: list[str]):
+async def process_batch(session, batch, bg_df):
+    # Retrieve data asynchronously
+    rijksmonumenten, verblijfsobjecten = await verzamel_data(session, batch)
+
+    # Process 'verblijfsobjecten' into GeoDataFrame
+    if verblijfsobjecten:
+        vo_df = pd.DataFrame(verblijfsobjecten)
+        vo_df["geometry"] = gpd.GeoSeries.from_wkt(vo_df["verblijfsobjectWKT"])
+        vo_df = gpd.GeoDataFrame(
+            vo_df[["identificatie", "geometry"]], geometry="geometry"
+        )
+    else:
+        vo_df = gpd.GeoDataFrame(columns=["identificatie", "geometry"])
+
+    # Perform spatial join
+    if not vo_df.empty:
+        joined_df = gpd.sjoin(vo_df, bg_df, how="left", predicate="within")
+
+        verblijfsobjecten_in_beschermd_gezicht = joined_df[
+            ["identificatie", "beschermd_gezicht_naam"]
+        ].to_dict("records")
+    else:
+        verblijfsobjecten_in_beschermd_gezicht = []
+
+    return rijksmonumenten, verblijfsobjecten_in_beschermd_gezicht, len(batch)
+
+
+async def voer_queries_uit(session, verblijfsobject_ids: list[str]):
     # Load 'beschermde_gebieden' and convert to GeoDataFrame
-    beschermde_gebieden = await query_beschermde_gebieden(sessie)
+    beschermde_gebieden = await query_beschermde_gebieden(session)
     bg_df = gpd.GeoDataFrame()
 
     if beschermde_gebieden:
@@ -43,8 +68,8 @@ async def voer_queries_uit(sessie, verblijfsobject_ids: list[str]):
     # Ensure spatial index is built
     bg_df.sindex
 
-    rijksmonumenten_totaal = []
-    verblijfsobjecten_in_beschermd_gezicht_totaal = []
+    rijksmonumenten_result = []
+    verblijfsobjecten_in_beschermd_gezicht_result = []
 
     # Prepare batches
     batches = [
@@ -52,71 +77,37 @@ async def voer_queries_uit(sessie, verblijfsobject_ids: list[str]):
         for i in range(0, len(verblijfsobject_ids), QUERY_BATCH_GROOTTE)
     ]
 
-    # Semaphore to limit the number of concurrent tasks
-    semaphore = asyncio.Semaphore(10)
-
-    async def process_batch(batch):
-        async with semaphore:
-            # Retrieve data asynchronously
-            rijksmonumenten, verblijfsobjecten = await verzamel_data(sessie, batch)
-
-            # Process 'verblijfsobjecten' into GeoDataFrame
-            if verblijfsobjecten:
-                vo_df = pd.DataFrame(verblijfsobjecten)
-                vo_df["geometry"] = gpd.GeoSeries.from_wkt(vo_df["verblijfsobjectWKT"])
-                vo_df = gpd.GeoDataFrame(
-                    vo_df[["identificatie", "geometry"]], geometry="geometry"
-                )
-            else:
-                vo_df = gpd.GeoDataFrame(columns=["identificatie", "geometry"])
-
-            # Perform spatial join
-            if not vo_df.empty:
-                joined_df = gpd.sjoin(vo_df, bg_df, how="left", predicate="within")
-                verblijfsobjecten_in_beschermd_gezicht = joined_df[
-                    ["identificatie", "beschermd_gezicht_naam"]
-                ].to_dict("records")
-            else:
-                verblijfsobjecten_in_beschermd_gezicht = []
-
-            return rijksmonumenten, verblijfsobjecten_in_beschermd_gezicht, len(batch)
-
     # Create tasks for each batch
-    tasks = [process_batch(batch) for batch in batches]
+    tasks = [process_batch(session, batch, bg_df) for batch in batches]
 
-    rijksmonumenten_totaal = []
-    verblijfsobjecten_in_beschermd_gezicht_totaal = []
+    rijksmonumenten_result = []
+    verblijfsobjecten_in_beschermd_gezicht_result = []
 
-    # Use tqdm.asyncio to display a progress bar for asynchronous tasks
-    for future in tqdm_asyncio.as_completed(
-        tasks, desc="Verwerking verzoeken ", total=len(tasks)
-    ):
-        (
-            rijksmonumenten,
-            verblijfsobjecten_in_beschermd_gezicht,
-            batch_size,
-        ) = await future
-        rijksmonumenten_totaal.extend(rijksmonumenten)
-        verblijfsobjecten_in_beschermd_gezicht_totaal.extend(
-            verblijfsobjecten_in_beschermd_gezicht
-        )
+    progress_bar = tqdm_asyncio(total=len(verblijfsobject_ids))
 
-    # Merge results into final DataFrame
-    df_identificatie = pd.DataFrame({"identificatie": verblijfsobject_ids})
+    for task in asyncio.as_completed(tasks):
+        result = await task
+        rijksmonumenten_result.extend(result[0])
+        verblijfsobjecten_in_beschermd_gezicht_result.extend(result[1])
+        progress_bar.update(result[2])
+
+    progress_bar.close()
+
     df_rijksmonumenten = (
-        pd.DataFrame(rijksmonumenten_totaal)
-        if rijksmonumenten_totaal
-        else pd.DataFrame({"identificatie": [], "monument_nummer": []})
+        pd.DataFrame(rijksmonumenten_result)
+        if rijksmonumenten_result
+        else pd.DataFrame({"identificatie": [], "rijksmonument_nummer": []})
     )
+
     df_beschermd_gezicht = (
-        pd.DataFrame(verblijfsobjecten_in_beschermd_gezicht_totaal)
-        if verblijfsobjecten_in_beschermd_gezicht_totaal
+        pd.DataFrame(verblijfsobjecten_in_beschermd_gezicht_result)
+        if verblijfsobjecten_in_beschermd_gezicht_result
         else pd.DataFrame({"identificatie": [], "beschermd_gezicht_naam": []})
     )
 
-    result = df_identificatie.merge(
-        df_rijksmonumenten, on="identificatie", how="left"
-    ).merge(df_beschermd_gezicht, on="identificatie", how="left")
+    result = pd.merge(
+        df_rijksmonumenten, df_beschermd_gezicht, on="identificatie", how="outer"
+    )
 
     return result
 
@@ -128,15 +119,51 @@ def handle_sigint(signal, frame):
 
 
 async def main():
-    verblijfsobject_ids = pd.read_csv("verblijfsobjecten.csv", dtype=str)[
+    input = pd.read_csv("verblijfsobjecten.csv", dtype=str)
+
+    verblijfsobject_ids = input[
         "bag_verblijfsobject_id"
-    ].tolist()  # TODO: verwijder deze lijst na testen
+    ].drop_duplicates()  # TODO: verwijder deze lijst na testen
 
-    async with aiohttp.ClientSession() as sessie:
-        results = await voer_queries_uit(sessie, verblijfsobject_ids)
+    async with aiohttp.ClientSession() as session:
+        results = await voer_queries_uit(session, verblijfsobject_ids)
+        merged = pd.merge(
+            input, results, left_on="bag_verblijfsobject_id", right_on="identificatie"
+        )
 
-    results.to_csv("results.csv", index=False)
-    print(results)
+        if "identificatie" not in input.columns:
+            merged = merged.drop(columns=["identificatie"])
+
+        rijksmonument_nummer_position = merged.columns.get_loc("rijksmonument_nummer")
+
+        merged.insert(
+            rijksmonument_nummer_position + 1,
+            "rijksmonument_url",
+            merged.apply(
+                lambda row: f"https://monumenten.nl/monument/{int(row['rijksmonument_nummer'])}"
+                if pd.notnull(row["rijksmonument_nummer"])
+                else None,
+                axis=1,
+            ),
+        )
+
+        merged.insert(
+            rijksmonument_nummer_position,
+            "is_rijksmonument",
+            merged["rijksmonument_nummer"].notna(),
+        )
+
+        beschermd_gezicht_naam_position = merged.columns.get_loc(
+            "beschermd_gezicht_naam"
+        )
+
+        merged.insert(
+            beschermd_gezicht_naam_position,
+            "is_beschermd_gezicht",
+            merged["beschermd_gezicht_naam"].notna(),
+        )
+
+        merged.to_csv("monumenten.csv", index=False)
 
 
 if __name__ == "__main__":
