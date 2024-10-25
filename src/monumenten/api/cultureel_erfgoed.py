@@ -1,4 +1,5 @@
 import asyncio
+from typing import Any, List, Dict
 
 import aiohttp
 from loguru import logger
@@ -39,7 +40,9 @@ WHERE {{
 """
 
 
-async def query_rijksmonumenten(session, identificaties):
+async def query_rijksmonumenten(
+    session: aiohttp.ClientSession, identificaties: List[str]
+) -> List[Dict[str, Any]]:
     async with CULTUREEL_ERFGOED_SEMAPHORE:
         identificaties_str = " ".join(
             f'"{identificatie}"' for identificatie in identificaties
@@ -60,7 +63,6 @@ async def query_rijksmonumenten(session, identificaties):
                         logger.warning(
                             f"Onverwacht antwoord bij poging {poging + 1}: {resultaat}"
                         )
-                        return {}
             except aiohttp.ClientResponseError as e:
                 logger.debug(response.headers)
                 if poging != retries - 1:
@@ -70,9 +72,12 @@ async def query_rijksmonumenten(session, identificaties):
                     await asyncio.sleep(1)
                 else:
                     raise
+        return List[Dict[str, Any]]()
 
 
-async def query_beschermde_gebieden(session):
+async def query_beschermde_gebieden(
+    session: aiohttp.ClientSession,
+) -> List[Dict[str, Any]]:
     retries = 3
     for poging in range(retries):
         try:
@@ -89,7 +94,6 @@ async def query_beschermde_gebieden(session):
                     logger.warning(
                         f"Onverwacht antwoordformaat bij poging {poging + 1}: {resultaat}"
                     )
-                    return []
         except aiohttp.ClientResponseError:
             if poging != retries - 1:
                 logger.warning(
@@ -98,3 +102,4 @@ async def query_beschermde_gebieden(session):
                 await asyncio.sleep(1)
             else:
                 raise
+    return List[Dict[str, Any]]()

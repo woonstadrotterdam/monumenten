@@ -1,5 +1,6 @@
 import asyncio
 import signal
+from typing import Any, Dict, List, Tuple
 
 import aiohttp
 import geopandas as gpd
@@ -17,7 +18,10 @@ from monumenten.api.kadaster import query_verblijfsobjecten
 QUERY_BATCH_GROOTTE = 500  # lijkt meest optimaal qua performance
 
 
-async def verzamel_data(session, identificaties_batch):
+async def verzamel_data(
+    session: aiohttp.ClientSession,
+    identificaties_batch: List[str],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     rijksmonumenten_taak = query_rijksmonumenten(session, identificaties_batch)
     verblijfsobjecten_taak = query_verblijfsobjecten(session, identificaties_batch)
     rijksmonumenten, verblijfsobjecten = await asyncio.gather(
@@ -26,7 +30,9 @@ async def verzamel_data(session, identificaties_batch):
     return rijksmonumenten, verblijfsobjecten
 
 
-async def process_batch(session, batch, bg_df):
+async def process_batch(
+    session: aiohttp.ClientSession, batch: List[str], bg_df: gpd.GeoDataFrame
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
     # Retrieve data asynchronously
     rijksmonumenten, verblijfsobjecten = await verzamel_data(session, batch)
 
@@ -48,12 +54,14 @@ async def process_batch(session, batch, bg_df):
             ["identificatie", "beschermd_gezicht_naam"]
         ].to_dict("records")
     else:
-        verblijfsobjecten_in_beschermd_gezicht = []
+        verblijfsobjecten_in_beschermd_gezicht = List[Dict[str, Any]]()
 
     return rijksmonumenten, verblijfsobjecten_in_beschermd_gezicht, len(batch)
 
 
-async def voer_queries_uit(session, verblijfsobject_ids: list[str]):
+async def voer_queries_uit(
+    session: aiohttp.ClientSession, verblijfsobject_ids: List[str]
+) -> pd.DataFrame:
     # Load 'beschermde_gebieden' and convert to GeoDataFrame
     beschermde_gebieden = await query_beschermde_gebieden(session)
     bg_df = gpd.GeoDataFrame()
@@ -68,8 +76,8 @@ async def voer_queries_uit(session, verblijfsobject_ids: list[str]):
     # Ensure spatial index is built
     bg_df.sindex
 
-    rijksmonumenten_result = []
-    verblijfsobjecten_in_beschermd_gezicht_result = []
+    rijksmonumenten_result = list[Dict[str, Any]]()
+    verblijfsobjecten_in_beschermd_gezicht_result = list[Dict[str, Any]]()
 
     # Prepare batches
     batches = [
@@ -79,9 +87,6 @@ async def voer_queries_uit(session, verblijfsobject_ids: list[str]):
 
     # Create tasks for each batch
     tasks = [process_batch(session, batch, bg_df) for batch in batches]
-
-    rijksmonumenten_result = []
-    verblijfsobjecten_in_beschermd_gezicht_result = []
 
     progress_bar = tqdm_asyncio(total=len(verblijfsobject_ids))
 
@@ -112,13 +117,13 @@ async def voer_queries_uit(session, verblijfsobject_ids: list[str]):
     return result
 
 
-def handle_sigint(signal, frame):
+def handle_sigint(signal: int, frame: Any) -> None:
     logger.info("SIGINT ontvangen, taken annuleren...")
     for taak in asyncio.all_tasks():
         taak.cancel()
 
 
-async def main():
+async def main() -> None:
     input = pd.read_csv("verblijfsobjecten.csv", dtype=str)
 
     verblijfsobject_ids = input[

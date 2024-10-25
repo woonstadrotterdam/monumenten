@@ -1,4 +1,5 @@
 import asyncio
+from typing import Any, List, Dict
 
 import aiohttp
 from loguru import logger
@@ -21,7 +22,9 @@ WHERE {{
 """
 
 
-async def query_verblijfsobjecten(session, identificaties):
+async def query_verblijfsobjecten(
+    session: aiohttp.ClientSession, identificaties: List[str]
+) -> List[Dict[str, Any]]:
     async with KADASTER_SEMAPHORE:
         identificaties_str = ", ".join(
             f'"{identificatie}"' for identificatie in identificaties
@@ -44,7 +47,6 @@ async def query_verblijfsobjecten(session, identificaties):
                         logger.warning(
                             f"Onverwacht antwoordformaat bij poging {poging + 1}: {resultaat}"
                         )
-                        return []
             except aiohttp.ClientResponseError:
                 if poging != retries - 1:
                     logger.warning(
@@ -53,3 +55,4 @@ async def query_verblijfsobjecten(session, identificaties):
                     await asyncio.sleep(1)
                 else:
                     raise
+        return List[Dict[str, Any]]()
