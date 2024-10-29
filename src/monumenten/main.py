@@ -148,16 +148,14 @@ async def main() -> None:
             merged = merged.drop(columns=["identificatie"])
 
         rijksmonument_nummer_position = merged.columns.get_loc("rijksmonument_nummer")
-
         merged.insert(
             rijksmonument_nummer_position + 1,
             "rijksmonument_url",
-            merged.apply(
-                lambda row: f"https://monumenten.nl/monument/{int(row['rijksmonument_nummer'])}"
-                if pd.notnull(row["rijksmonument_nummer"])
-                else None,
-                axis=1,
-            ),
+            "https://monumenten.nl/monument/"
+            + merged["rijksmonument_nummer"]
+            .fillna("")
+            .astype(str)
+            .where(merged["rijksmonument_nummer"].notna(), None),
         )
 
         merged.insert(
