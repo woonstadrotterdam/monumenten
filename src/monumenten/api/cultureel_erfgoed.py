@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any, List, Dict
+from typing import Any, Dict, List, Optional
 
 import aiohttp
 from loguru import logger
@@ -7,7 +7,6 @@ from loguru import logger
 CULTUREEL_ERFGOED_SPARQL_ENDPOINT = (
     "https://api.linkeddata.cultureelerfgoed.nl/datasets/rce/cho/sparql"
 )
-CULTUREEL_ERFGOED_SEMAPHORE = asyncio.Semaphore(4)
 
 RIJKSMONUMENTEN_QUERY_TEMPLATE = """
 PREFIX ceo:<https://linkeddata.cultureelerfgoed.nl/def/ceo#>
@@ -39,11 +38,20 @@ WHERE {{
 }}
 """
 
+_cultureel_erfgoed_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def get_semaphore(loop: asyncio.AbstractEventLoop) -> asyncio.Semaphore:
+    global _cultureel_erfgoed_semaphore
+    if _cultureel_erfgoed_semaphore is None:
+        _cultureel_erfgoed_semaphore = asyncio.Semaphore(4)
+    return _cultureel_erfgoed_semaphore
+
 
 async def query_rijksmonumenten(
     session: aiohttp.ClientSession, identificaties: List[str]
 ) -> List[Dict[str, Any]]:
-    async with CULTUREEL_ERFGOED_SEMAPHORE:
+    async with get_semaphore(asyncio.get_running_loop()):
         identificaties_str = " ".join(
             f'"{identificatie}"' for identificatie in identificaties
         )

@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any, List, Dict
+from typing import Any, Dict, List, Optional
 
 import aiohttp
 from loguru import logger
@@ -7,7 +7,6 @@ from loguru import logger
 KADASTER_SPARQL_ENDPOINT = (
     "https://api.labs.kadaster.nl/datasets/dst/kkg/services/default/sparql"
 )
-KADASTER_SEMAPHORE = asyncio.Semaphore(4)
 
 VERBLIJFSOBJECTEN_QUERY_TEMPLATE = """
 PREFIX sor: <https://data.kkg.kadaster.nl/sor/model/def/>
@@ -21,11 +20,20 @@ WHERE {{
 }}
 """
 
+_kadaster_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def get_semaphore(loop: asyncio.AbstractEventLoop) -> asyncio.Semaphore:
+    global _kadaster_semaphore
+    if _kadaster_semaphore is None:
+        _kadaster_semaphore = asyncio.Semaphore(4)
+    return _kadaster_semaphore
+
 
 async def query_verblijfsobjecten(
     session: aiohttp.ClientSession, identificaties: List[str]
 ) -> List[Dict[str, Any]]:
-    async with KADASTER_SEMAPHORE:
+    async with get_semaphore(asyncio.get_running_loop()):
         identificaties_str = ", ".join(
             f'"{identificatie}"' for identificatie in identificaties
         )

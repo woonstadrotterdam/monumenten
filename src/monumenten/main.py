@@ -14,7 +14,6 @@ from monumenten.api.cultureel_erfgoed import (
 )
 from monumenten.api.kadaster import query_verblijfsobjecten
 
-
 QUERY_BATCH_GROOTTE = 500  # lijkt meest optimaal qua performance
 
 
@@ -33,8 +32,17 @@ async def verzamel_data(
 async def process_batch(
     session: aiohttp.ClientSession, batch: List[str], bg_df: gpd.GeoDataFrame
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
-    # Retrieve data asynchronously
-    rijksmonumenten, verblijfsobjecten = await verzamel_data(session, batch)
+    # Get the current event loop
+    loop = asyncio.get_running_loop()
+
+    # Create tasks using the current loop
+    rijksmonumenten_taak = loop.create_task(query_rijksmonumenten(session, batch))
+    verblijfsobjecten_taak = loop.create_task(query_verblijfsobjecten(session, batch))
+
+    # Wait for both tasks to complete
+    rijksmonumenten, verblijfsobjecten = await asyncio.gather(
+        rijksmonumenten_taak, verblijfsobjecten_taak
+    )
 
     # Process 'verblijfsobjecten' into GeoDataFrame
     if verblijfsobjecten:
