@@ -101,7 +101,6 @@ async def _query_rijksmonumenten(
                             resultaat,
                         )
             except aiohttp.ClientResponseError as e:
-                logger.debug("Response headers: %s", response.headers)
                 if poging != retries - 1:
                     logger.warning(
                         "Poging %d/%d voor rijksmonumenten query mislukt: %s. Opnieuw proberen over 1 seconde...",
