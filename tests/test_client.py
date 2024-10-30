@@ -4,7 +4,7 @@ import pytest_asyncio
 from monumenten import MonumentenClient
 
 
-@pytest_asyncio.fixture
+@pytest_asyncio.fixture(scope="function")
 async def client():
     async with MonumentenClient() as client:
         yield client
