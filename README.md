@@ -28,8 +28,12 @@ async def main():
         result = await client.process_from_list(bag_verblijfsobject_ids)
         print(result)
 
+# in een .py file"
 if __name__ == "__main__":
     asyncio.run(main())
+
+# in een .ipynb file (notebook):
+await main()
 ```
 
 ```python
@@ -93,9 +97,12 @@ async def main():
         )
         result.to_csv("monumenten.csv", index=False)
 
-
+# in een .py file"
 if __name__ == "__main__":
     asyncio.run(main())
+
+# in een .ipynb file (notebook):
+await main()
 ```
 
 | bag_verblijfsobject_id | is_rijksmonument | rijksmonument_nummer | rijksmonument_url                     | is_beschermd_gezicht | beschermd_gezicht_naam          |
