@@ -1,14 +1,17 @@
 import asyncio
+import logging
 from typing import Any, Dict, List, Optional
 
 import aiohttp
-from loguru import logger
 
-CULTUREEL_ERFGOED_SPARQL_ENDPOINT = (
+# Create a module-level logger
+logger = logging.getLogger("monumenten.api.cultureel_erfgoed")
+
+_CULTUREEL_ERFGOED_SPARQL_ENDPOINT = (
     "https://api.linkeddata.cultureelerfgoed.nl/datasets/rce/cho/sparql"
 )
 
-RIJKSMONUMENTEN_QUERY_TEMPLATE = """
+_RIJKSMONUMENTEN_QUERY_TEMPLATE = """
 PREFIX ceo:<https://linkeddata.cultureelerfgoed.nl/def/ceo#>
 PREFIX bag:<http://bag.basisregistraties.overheid.nl/bag/id/>
 PREFIX rn:<https://data.cultureelerfgoed.nl/term/id/rn/>
@@ -24,7 +27,7 @@ WHERE {{
 GROUP BY ?identificatie
 """
 
-BESCHERMDE_GEZICHTEN_QUERY = """
+_BESCHERMDE_GEZICHTEN_QUERY = """
 PREFIX ceo:<https://linkeddata.cultureelerfgoed.nl/def/ceo#>
 PREFIX rn:<https://data.cultureelerfgoed.nl/term/id/rn/>
 PREFIX geo: <http://www.opengis.net/ont/geosparql#>
@@ -41,27 +44,51 @@ WHERE {{
 _cultureel_erfgoed_semaphore: Optional[asyncio.Semaphore] = None
 
 
-def get_semaphore(loop: asyncio.AbstractEventLoop) -> asyncio.Semaphore:
+def _get_semaphore(loop: asyncio.AbstractEventLoop) -> asyncio.Semaphore:
+    """
+    Verkrijgt een semaphore voor het beperken van gelijktijdige aanvragen naar de Cultureel Erfgoed API.
+
+    Args:
+        loop (asyncio.AbstractEventLoop): De asyncio event loop
+
+    Returns:
+        asyncio.Semaphore: Een asyncio.Semaphore object dat het aantal gelijktijdige aanvragen beperkt tot 4
+    """
     global _cultureel_erfgoed_semaphore
     if _cultureel_erfgoed_semaphore is None:
         _cultureel_erfgoed_semaphore = asyncio.Semaphore(4)
     return _cultureel_erfgoed_semaphore
 
 
-async def query_rijksmonumenten(
+async def _query_rijksmonumenten(
     session: aiohttp.ClientSession, identificaties: List[str]
 ) -> List[Dict[str, Any]]:
-    async with get_semaphore(asyncio.get_running_loop()):
+    """
+    Voert een SPARQL-query uit om rijksmonumenten op te halen voor gegeven BAG-identificaties.
+
+    Args:
+        session (aiohttp.ClientSession): De aiohttp ClientSession voor het uitvoeren van de HTTP-aanvraag
+        identificaties (List[str]): Lijst van BAG-identificaties waarvoor rijksmonumenten worden opgezocht
+
+    Returns:
+        List[Dict[str, Any]]: Lijst van dictionaries met informatie over gevonden rijksmonumenten
+
+    Raises:
+        aiohttp.ClientResponseError: Bij fouten in de HTTP-aanvraag na 3 pogingen
+    """
+    async with _get_semaphore(asyncio.get_running_loop()):
         identificaties_str = " ".join(
             f'"{identificatie}"' for identificatie in identificaties
         )
-        query = RIJKSMONUMENTEN_QUERY_TEMPLATE.format(identificaties=identificaties_str)
+        query = _RIJKSMONUMENTEN_QUERY_TEMPLATE.format(
+            identificaties=identificaties_str
+        )
         data = {"query": query, "format": "json"}
         retries = 3
         for poging in range(retries):
             try:
                 async with session.post(
-                    CULTUREEL_ERFGOED_SPARQL_ENDPOINT, data=data
+                    _CULTUREEL_ERFGOED_SPARQL_ENDPOINT, data=data
                 ) as response:
                     response.raise_for_status()
                     resultaat = await response.json()
@@ -69,13 +96,18 @@ async def query_rijksmonumenten(
                         return resultaat
                     else:
                         logger.warning(
-                            f"Onverwacht antwoord bij poging {poging + 1}: {resultaat}"
+                            "Unexpected response format on attempt %d: %s",
+                            poging + 1,
+                            resultaat,
                         )
             except aiohttp.ClientResponseError as e:
-                logger.debug(response.headers)
+                logger.debug("Response headers: %s", response.headers)
                 if poging != retries - 1:
                     logger.warning(
-                        f"Poging {poging + 1}/{retries} voor rijksmonumenten query mislukt. {e} Opnieuw proberen over 1 seconde..."
+                        "Poging %d/%d voor rijksmonumenten query mislukt: %s. Opnieuw proberen over 1 seconde...",
+                        poging + 1,
+                        retries,
+                        str(e),
                     )
                     await asyncio.sleep(1)
                 else:
@@ -83,16 +115,28 @@ async def query_rijksmonumenten(
         return List[Dict[str, Any]]()
 
 
-async def query_beschermde_gebieden(
+async def _query_beschermde_gebieden(
     session: aiohttp.ClientSession,
 ) -> List[Dict[str, Any]]:
+    """
+    Voert een SPARQL-query uit om beschermde stads- en dorpsgezichten op te halen.
+
+    Args:
+        session (aiohttp.ClientSession): De aiohttp ClientSession voor het uitvoeren van de HTTP-aanvraag
+
+    Returns:
+        List[Dict[str, Any]]: Lijst van dictionaries met informatie over beschermde stads- en dorpsgezichten
+
+    Raises:
+        aiohttp.ClientResponseError: Bij fouten in de HTTP-aanvraag na 3 pogingen
+    """
     retries = 3
     for poging in range(retries):
         try:
-            data = {"query": BESCHERMDE_GEZICHTEN_QUERY, "format": "json"}
+            data = {"query": _BESCHERMDE_GEZICHTEN_QUERY, "format": "json"}
 
             async with session.post(
-                CULTUREEL_ERFGOED_SPARQL_ENDPOINT, data=data
+                _CULTUREEL_ERFGOED_SPARQL_ENDPOINT, data=data
             ) as response:
                 response.raise_for_status()
                 resultaat = await response.json()
@@ -100,12 +144,17 @@ async def query_beschermde_gebieden(
                     return resultaat
                 else:
                     logger.warning(
-                        f"Onverwacht antwoordformaat bij poging {poging + 1}: {resultaat}"
+                        "Onverwacht response formaat bij poging %d: %s",
+                        poging + 1,
+                        resultaat,
                     )
-        except aiohttp.ClientResponseError:
+        except aiohttp.ClientResponseError as e:
             if poging != retries - 1:
                 logger.warning(
-                    f"Poging {poging + 1}/{retries} voor beschermde gebieden query mislukt. Opnieuw proberen in 1 seconde..."
+                    "Poging %d/%d voor beschermde gebieden query mislukt: %s. Opnieuw proberen over 1 seconde...",
+                    poging + 1,
+                    retries,
+                    str(e),
                 )
                 await asyncio.sleep(1)
             else:
