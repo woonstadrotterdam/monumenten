@@ -45,6 +45,8 @@ dev = [
 
 [tool.pytest.ini_options]
 addopts = "--cov=monumenten --cov-report term --cov-report lcov:lcov.info"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.coverage.run]
 omit = [
