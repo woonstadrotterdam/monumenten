@@ -106,4 +106,5 @@ class MonumentenClient:
         """
         df = pd.DataFrame({"bag_verblijfsobject_id": verblijfsobject_ids})
         result = await self.process_from_df(df, "bag_verblijfsobject_id")
+        result = result.replace({pd.NA: None, pd.NaT: None})
         return list(result.to_dict(orient="records"))

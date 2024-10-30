@@ -45,21 +45,21 @@ await main()
         'rijksmonument_nummer': '524327',
         'rijksmonument_url': 'https://monumenten.nl/monument/524327',
         'is_beschermd_gezicht': False,
-        'beschermd_gezicht_naam': nan
+        'beschermd_gezicht_naam': None
     },
     {
         'bag_verblijfsobject_id': '0599010000486642',
         'is_rijksmonument': False,
-        'rijksmonument_nummer': nan,
-        'rijksmonument_url': nan,
+        'rijksmonument_nummer': None,
+        'rijksmonument_url': None,
         'is_beschermd_gezicht': False,
-        'beschermd_gezicht_naam': nan
+        'beschermd_gezicht_naam': None
     },
     {
         'bag_verblijfsobject_id': '0599010000281115',
         'is_rijksmonument': False,
-        'rijksmonument_nummer': nan,
-        'rijksmonument_url': nan,
+        'rijksmonument_nummer': None,
+        'rijksmonument_url': None,
         'is_beschermd_gezicht': True,
         'beschermd_gezicht_naam': 'Kralingen - Midden'
     }
