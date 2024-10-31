@@ -23,23 +23,26 @@ async def test_process_from_list(client):
     assert len(result) == 3
 
     # Test rijksmonument
-    assert result[0]["bag_verblijfsobject_id"] == "0599010000360091"
-    assert result[0]["is_rijksmonument"] is True
-    assert result[0]["rijksmonument_nummer"] == "524327"
-    assert result[0]["rijksmonument_url"] == "https://monumenten.nl/monument/524327"
-    assert result[0]["is_beschermd_gezicht"] is False
+    assert "0599010000360091" in result
+    assert result["0599010000360091"]["is_rijksmonument"] is True
+    assert result["0599010000360091"]["rijksmonument_nummer"] == "524327"
+    assert (
+        result["0599010000360091"]["rijksmonument_url"]
+        == "https://monumenten.nl/monument/524327"
+    )
+    assert result["0599010000360091"]["is_beschermd_gezicht"] is False
 
     # Test non-monument
-    assert result[1]["bag_verblijfsobject_id"] == "0599010000486642"
-    assert result[1]["is_rijksmonument"] is False
-    assert pd.isna(result[1]["rijksmonument_nummer"])
-    assert result[1]["is_beschermd_gezicht"] is False
+    assert "0599010000486642" in result
+    assert result["0599010000486642"]["is_rijksmonument"] is False
+    assert result["0599010000486642"]["rijksmonument_nummer"] is None
+    assert result["0599010000486642"]["is_beschermd_gezicht"] is False
 
     # Test beschermd gezicht
-    assert result[2]["bag_verblijfsobject_id"] == "0599010000281115"
-    assert result[2]["is_rijksmonument"] is False
-    assert result[2]["is_beschermd_gezicht"] is True
-    assert result[2]["beschermd_gezicht_naam"] == "Kralingen - Midden"
+    assert "0599010000281115" in result
+    assert result["0599010000281115"]["is_rijksmonument"] is False
+    assert result["0599010000281115"]["is_beschermd_gezicht"] is True
+    assert result["0599010000281115"]["beschermd_gezicht_naam"] == "Kralingen - Midden"
 
 
 @pytest.mark.asyncio
