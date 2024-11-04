@@ -1,6 +1,6 @@
 """Client voor monumenten package."""
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 import aiohttp
 import pandas as pd
@@ -95,16 +95,19 @@ class MonumentenClient:
 
     async def process_from_list(
         self, verblijfsobject_ids: List[str]
-    ) -> List[Dict[str, Any]]:
+    ) -> Dict[str, Dict[str, Any]]:
         """Verwerk een lijst met verblijfsobject ID's.
 
         Args:
             verblijfsobject_ids (List[str]): Lijst met te verwerken ID's
 
         Returns:
-            List[Dict[str, Any]]: Lijst met dictionaries met monumentinformatie
+            Dict[str, Dict[str, Any]]: Dictionary met verblijfsobject ID's als keys en dictionaries met monumentinformatie als values
         """
         df = pd.DataFrame({"bag_verblijfsobject_id": verblijfsobject_ids})
         result = await self.process_from_df(df, "bag_verblijfsobject_id")
         result = result.replace({pd.NA: None, pd.NaT: None})
-        return list(result.to_dict(orient="records"))
+        return cast(
+            Dict[str, Dict[str, Any]],
+            result.set_index("bag_verblijfsobject_id").to_dict(orient="index"),
+        )
