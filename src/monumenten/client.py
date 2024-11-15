@@ -72,7 +72,7 @@ class MonumentenClient:
         merged.insert(
             rijksmonument_nummer_position + 1,
             "rijksmonument_url",
-            "https://monumenten.nl/monument/"
+            "https://monumentenregister.cultureelerfgoed.nl/monumenten/"
             + merged["rijksmonument_nummer"]
             .fillna("")
             .astype(str)
