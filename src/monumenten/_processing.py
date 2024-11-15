@@ -17,24 +17,6 @@ from monumenten._api._kadaster import _query_verblijfsobjecten
 _QUERY_BATCH_GROOTTE = 500  # lijkt meest optimaal qua performance
 
 
-async def _verzamel_data(
-    session: aiohttp.ClientSession,
-    identificaties_batch: List[str],
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Verzamel data van verschillende API's voor een batch verblijfsobjecten.
-
-    Args:
-        session (aiohttp.ClientSession): De sessie voor HTTP requests
-        identificaties_batch (List[str]): Lijst met verblijfsobject ID's
-
-    Returns:
-        Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]: Tuple met rijksmonumenten en verblijfsobjecten data
-    """
-    rijksmonumenten_taak = _query_rijksmonumenten(session, identificaties_batch)
-    verblijfsobjecten_taak = _query_verblijfsobjecten(session, identificaties_batch)
-    return await asyncio.gather(rijksmonumenten_taak, verblijfsobjecten_taak)
-
-
 async def _process_batch(
     session: aiohttp.ClientSession, batch: List[str], bg_df: gpd.GeoDataFrame
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
