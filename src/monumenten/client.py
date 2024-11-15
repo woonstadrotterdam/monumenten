@@ -58,7 +58,11 @@ class MonumentenClient:
             self._session, df[verblijfsobject_id_col].drop_duplicates()
         )
         merged = pd.merge(
-            df, results, left_on=verblijfsobject_id_col, right_on="identificatie"
+            df,
+            results,
+            left_on=verblijfsobject_id_col,
+            right_on="identificatie",
+            how="left",
         )
 
         if "identificatie" not in df.columns:
