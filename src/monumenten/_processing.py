@@ -107,10 +107,10 @@ async def _query(
     progress_bar = tqdm_asyncio(total=len(verblijfsobject_ids))
 
     for task in asyncio.as_completed(tasks):
-        result = await task
-        rijksmonumenten_result.extend(result[0])
-        verblijfsobjecten_in_beschermd_gezicht_result.extend(result[1])
-        progress_bar.update(result[2])
+        rijksmonumenten, verblijfsobjecten, aantal = await task
+        rijksmonumenten_result.extend(rijksmonumenten)
+        verblijfsobjecten_in_beschermd_gezicht_result.extend(verblijfsobjecten)
+        progress_bar.update(aantal)
 
     progress_bar.close()
 
