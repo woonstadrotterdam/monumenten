@@ -61,7 +61,7 @@ async def _process_batch(
             ["identificatie", "beschermd_gezicht_naam"]
         ].to_dict("records")
     else:
-        verblijfsobjecten_in_beschermd_gezicht = List[Dict[str, Any]]()
+        verblijfsobjecten_in_beschermd_gezicht = list[Dict[str, Any]]()
 
     return rijksmonumenten, verblijfsobjecten_in_beschermd_gezicht, len(batch)
 
