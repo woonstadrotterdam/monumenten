@@ -58,7 +58,11 @@ class MonumentenClient:
             self._session, df[verblijfsobject_id_col].drop_duplicates()
         )
         merged = pd.merge(
-            df, results, left_on=verblijfsobject_id_col, right_on="identificatie"
+            df,
+            results,
+            left_on=verblijfsobject_id_col,
+            right_on="identificatie",
+            how="left",
         )
 
         if "identificatie" not in df.columns:
@@ -68,7 +72,7 @@ class MonumentenClient:
         merged.insert(
             rijksmonument_nummer_position + 1,
             "rijksmonument_url",
-            "https://monumenten.nl/monument/"
+            "https://monumentenregister.cultureelerfgoed.nl/monumenten/"
             + merged["rijksmonument_nummer"]
             .fillna("")
             .astype(str)
