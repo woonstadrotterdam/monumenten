@@ -28,7 +28,7 @@ async def test_process_from_list(client):
     assert result["0599010000360091"]["rijksmonument_nummer"] == "524327"
     assert (
         result["0599010000360091"]["rijksmonument_url"]
-        == "https://monumenten.nl/monument/524327"
+        == "https://monumentenregister.cultureelerfgoed.nl/monumenten/524327"
     )
     assert result["0599010000360091"]["is_beschermd_gezicht"] is False
 
@@ -70,7 +70,8 @@ async def test_process_from_df(client):
     assert bool(result.iloc[0]["is_rijksmonument"]) is True
     assert result.iloc[0]["rijksmonument_nummer"] == "524327"
     assert (
-        result.iloc[0]["rijksmonument_url"] == "https://monumenten.nl/monument/524327"
+        result.iloc[0]["rijksmonument_url"]
+        == "https://monumentenregister.cultureelerfgoed.nl/monumenten/524327"
     )
     assert bool(result.iloc[0]["is_beschermd_gezicht"]) is False
 
@@ -84,7 +85,10 @@ async def test_process_from_df(client):
     assert result.iloc[2]["bag_verblijfsobject_id"] == "0599010000183527"
     assert bool(result.iloc[2]["is_rijksmonument"]) is True
     assert result.iloc[2]["rijksmonument_nummer"] == "32807"
-    assert result.iloc[2]["rijksmonument_url"] == "https://monumenten.nl/monument/32807"
+    assert (
+        result.iloc[2]["rijksmonument_url"]
+        == "https://monumentenregister.cultureelerfgoed.nl/monumenten/32807"
+    )
     assert bool(result.iloc[2]["is_beschermd_gezicht"]) is True
     assert result.iloc[2]["beschermd_gezicht_naam"] == "Rotterdam - Scheepvaartkwartier"
 
