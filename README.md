@@ -63,6 +63,45 @@ await main()
 }
 ```
 
+### In [VERA-referentiedata](https://www.coraveraonline.nl/index.php/Referentiedata:EENHEIDMONUMENT)-formaat
+
+```python
+
+import asyncio
+
+from monumenten import MonumentenClient
+
+async def main():
+    bag_verblijfsobject_ids = [
+        "0599010000360091",
+        "0599010000486642",
+        "0599010000281115",
+    ]
+
+    async with MonumentenClient() as client:
+        result = await client.process_from_list(
+            bag_verblijfsobject_ids,
+            to_vera=True # zet to_vera=True
+        )
+        print(result)
+
+# in een .py file"
+if __name__ == "__main__":
+    asyncio.run(main())
+
+# in een .ipynb file (notebook):
+await main()
+```
+
+```python
+# OUTPUT
+{
+    '0599010000360091': {'code': 'RIJ', 'naam': 'Rijksmonument'}],
+    '0599010000486642': [],
+    '0599010000281115': [{'code': 'STA', 'naam': 'Beschermd stadsgezicht'}]
+}
+```
+
 ### Met pandas 🐼
 
 ```python
