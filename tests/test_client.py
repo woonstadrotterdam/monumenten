@@ -46,6 +46,33 @@ async def test_process_from_list(client):
 
 
 @pytest.mark.asyncio
+async def test_process_from_list_vera(client):
+    bag_verblijfsobject_ids = [
+        "0599010000360091",
+        "0599010000486642",
+        "0599010000281115",
+    ]
+
+    result = await client.process_from_list(bag_verblijfsobject_ids, to_vera=True)
+
+    # Test rijksmonument
+    assert "0599010000360091" in result
+    assert len(result["0599010000360091"]) == 1
+    assert result["0599010000360091"][0]["code"] == "RIJ"
+    assert result["0599010000360091"][0]["naam"] == "Rijksmonument"
+
+    # Test non-monument
+    assert "0599010000486642" in result
+    assert len(result["0599010000486642"]) == 0
+
+    # Test beschermd gezicht
+    assert "0599010000281115" in result
+    assert len(result["0599010000281115"]) == 1
+    assert result["0599010000281115"][0]["code"] == "STA"
+    assert result["0599010000281115"][0]["naam"] == "Beschermd stadsgezicht"
+
+
+@pytest.mark.asyncio
 async def test_process_from_df(client):
     input_df = pd.DataFrame(
         {
