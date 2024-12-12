@@ -96,7 +96,7 @@ await main()
 ```python
 # OUTPUT
 {
-    '0599010000360091': {'code': 'RIJ', 'naam': 'Rijksmonument'}],
+    '0599010000360091': [{'code': 'RIJ', 'naam': 'Rijksmonument'}],
     '0599010000486642': [],
     '0599010000281115': [{'code': 'STA', 'naam': 'Beschermd stadsgezicht'}]
 }
