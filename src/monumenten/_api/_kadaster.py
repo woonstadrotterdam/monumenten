@@ -5,18 +5,20 @@ from typing import Any, Dict, List, Optional
 import aiohttp
 
 _KADASTER_SPARQL_ENDPOINT = (
-    "https://api.labs.kadaster.nl/datasets/dst/kkg/services/default/sparql"
+    "https://api.labs.kadaster.nl/datasets/kadaster/kkg/services/kkg/sparql"
 )
 
 _VERBLIJFSOBJECTEN_QUERY_TEMPLATE = """
-PREFIX sor: <https://data.kkg.kadaster.nl/sor/model/def/>
-PREFIX nen3610: <https://data.kkg.kadaster.nl/nen3610/model/def/>
-PREFIX geo: <http://www.opengis.net/ont/geosparql#>
-SELECT DISTINCT ?identificatie ?verblijfsobjectWKT
-WHERE {{
-  ?verblijfsobject sor:geregistreerdMet/nen3610:identificatie ?identificatie .
-  ?verblijfsobject geo:hasGeometry/geo:asWKT ?verblijfsobjectWKT.
-  FILTER (?identificatie IN ( {identificaties} ))
+prefix geo: <http://www.opengis.net/ont/geosparql#>
+prefix prov: <http://www.w3.org/ns/prov#>
+
+select distinct ?identificatie ?verblijfsobjectWKT
+where {{
+  ?adres prov:wasDerivedFrom ?verblijfsobjectId .
+  ?adres geo:hasGeometry/geo:asWKT ?verblijfsobjectWKT .
+  filter(?verblijfsobjectId in ({uri_list}))
+
+  BIND(STRAFTER(STR(?verblijfsobjectId), "https://bag.basisregistraties.overheid.nl/id/verblijfsobject/") AS ?identificatie)
 }}
 """
 
@@ -37,12 +39,13 @@ async def _query_verblijfsobjecten(
     session: aiohttp.ClientSession, identificaties: List[str]
 ) -> List[Dict[str, Any]]:
     async with _get_semaphore(asyncio.get_running_loop()):
-        identificaties_str = ", ".join(
-            f'"{identificatie}"' for identificatie in identificaties
+        uri_list = ", ".join(
+            f"<https://bag.basisregistraties.overheid.nl/id/verblijfsobject/{identificatie}>"
+            for identificatie in identificaties
         )
-        query = _VERBLIJFSOBJECTEN_QUERY_TEMPLATE.format(
-            identificaties=identificaties_str
-        )
+
+        query = _VERBLIJFSOBJECTEN_QUERY_TEMPLATE.format(uri_list=uri_list)
+
         data = {"query": query, "format": "json"}
         retries = 3
         for poging in range(retries):
