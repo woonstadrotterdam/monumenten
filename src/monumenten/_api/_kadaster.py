@@ -11,14 +11,33 @@ _KADASTER_SPARQL_ENDPOINT = (
 _VERBLIJFSOBJECTEN_QUERY_TEMPLATE = """
 prefix geo: <http://www.opengis.net/ont/geosparql#>
 prefix prov: <http://www.w3.org/ns/prov#>
+prefix imx: <http://modellen.geostandaarden.nl/def/imx-geo#>
+prefix geof: <http://www.opengis.net/def/function/geosparql/>
 
-select distinct ?identificatie ?verblijfsobjectWKT
+select distinct ?adres ?identificatie ?verblijfsobjectWKT ?grondslagcode ?grondslag
 where {{
-  ?adres prov:wasDerivedFrom ?verblijfsobjectId .
-  ?adres geo:hasGeometry/geo:asWKT ?verblijfsobjectWKT .
-  filter(?verblijfsobjectId in ({uri_list}))
+  filter(?verblijfsobjectIri in (
+    {uri_list})
+  )
 
-  BIND(STRAFTER(STR(?verblijfsobjectId), "https://bag.basisregistraties.overheid.nl/id/verblijfsobject/") AS ?identificatie)
+  ?adres prov:wasDerivedFrom ?verblijfsobjectIri;
+          geo:hasGeometry/geo:asWKT ?verblijfsobjectWKT;
+          imx:isAdresVanGebouw ?gebouw.
+  ?gebouw imx:bevindtZichOpPerceel ?perceel.
+
+  optional {{
+    ?beperking <http://modellen.geostandaarden.nl/def/imx-geo#isBeperkingOpPerceel> ?perceel.
+    ?beperking geo:hasGeometry/geo:asWKT ?beperkingWKT.
+    ?beperking imx:grondslagcode ?grondslagcode.
+    ?beperking imx:grondslag ?grondslag.
+    values ?grondslagcode {{
+      "GG"
+      "GWA"
+    }}
+    FILTER (geof:sfWithin(?verblijfsobjectWKT, ?beperkingWKT))
+  }}
+
+  bind(strafter(str(?verblijfsobjectIri), "https://bag.basisregistraties.overheid.nl/id/verblijfsobject/") as ?identificatie)
 }}
 """
 
