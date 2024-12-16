@@ -16,11 +16,12 @@ async def test_process_from_list(client):
         "0599010000360091",
         "0599010000486642",
         "0599010000281115",
+        "0599010000076715",
     ]
 
     result = await client.process_from_list(bag_verblijfsobject_ids)
 
-    assert len(result) == 3
+    assert len(result) == 4
 
     # Test rijksmonument
     assert "0599010000360091" in result
@@ -43,6 +44,16 @@ async def test_process_from_list(client):
     assert result["0599010000281115"]["is_rijksmonument"] is False
     assert result["0599010000281115"]["is_beschermd_gezicht"] is True
     assert result["0599010000281115"]["beschermd_gezicht_naam"] == "Kralingen - Midden"
+
+    # Test gemeentelijk monument
+    assert "0599010000076715" in result
+    assert result["0599010000076715"]["is_rijksmonument"] is False
+    assert result["0599010000076715"]["is_beschermd_gezicht"] is False
+    assert result["0599010000076715"]["is_gemeentelijk_monument"] is True
+    assert (
+        result["0599010000076715"]["grondslag"]
+        == "Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift)"
+    )
 
 
 @pytest.mark.asyncio
