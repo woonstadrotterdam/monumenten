@@ -96,12 +96,14 @@ class MonumentenClient:
             merged["beschermd_gezicht_naam"].notna(),
         )
 
-        gemeentelijk_monument_position = merged.columns.get_loc("grondslag")
+        gemeentelijk_monument_position = merged.columns.get_loc(
+            "grondslag_gemeentelijk_monument"
+        )
 
         merged.insert(
             gemeentelijk_monument_position,
             "is_gemeentelijk_monument",
-            merged["grondslag"].notna(),
+            merged["grondslag_gemeentelijk_monument"].notna(),
         )
 
         return merged

@@ -51,7 +51,7 @@ async def test_process_from_list(client):
     assert result["0599010000076715"]["is_beschermd_gezicht"] is False
     assert result["0599010000076715"]["is_gemeentelijk_monument"] is True
     assert (
-        result["0599010000076715"]["grondslag"]
+        result["0599010000076715"]["grondslag_gemeentelijk_monument"]
         == "Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift)"
     )
 
@@ -116,6 +116,6 @@ async def test_process_from_df(client):
     assert bool(result.iloc[4]["is_beschermd_gezicht"]) is False
     assert bool(result.iloc[4]["is_gemeentelijk_monument"]) is True
     assert (
-        result.iloc[4]["grondslag"]
+        result.iloc[4]["grondslag_gemeentelijk_monument"]
         == "Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift)"
     )

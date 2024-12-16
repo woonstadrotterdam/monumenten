@@ -48,7 +48,7 @@ await main()
     "is_beschermd_gezicht": false,
     "beschermd_gezicht_naam": null,
     "is_gemeentelijk_monument": false,
-    "grondslag": null
+    "grondslag_gemeentelijk_monument": null
   },
   "0599010000486642": {
     "is_rijksmonument": false,
@@ -57,7 +57,7 @@ await main()
     "is_beschermd_gezicht": false,
     "beschermd_gezicht_naam": null,
     "is_gemeentelijk_monument": false,
-    "grondslag": null
+    "grondslag_gemeentelijk_monument": null
   },
   "0599010000281115": {
     "is_rijksmonument": false,
@@ -66,7 +66,7 @@ await main()
     "is_beschermd_gezicht": true,
     "beschermd_gezicht_naam": "Kralingen - Midden",
     "is_gemeentelijk_monument": false,
-    "grondslag": null
+    "grondslag_gemeentelijk_monument": null
   },
   "0599010000146141": {
     "is_rijksmonument": false,
@@ -75,7 +75,7 @@ await main()
     "is_beschermd_gezicht": true,
     "beschermd_gezicht_naam": "Rotterdam - Waterproject",
     "is_gemeentelijk_monument": true,
-    "grondslag": "Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift)"
+    "grondslag_gemeentelijk_monument": "Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift)"
   }
 }
 ```
