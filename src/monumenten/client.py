@@ -3,6 +3,7 @@
 from typing import Any, Dict, List, Optional, cast
 
 import aiohttp
+import numpy as np
 import pandas as pd
 
 from monumenten._processing import _query
@@ -118,7 +119,7 @@ class MonumentenClient:
         """
         df = pd.DataFrame({"bag_verblijfsobject_id": verblijfsobject_ids})
         result = await self.process_from_df(df, "bag_verblijfsobject_id")
-        result = result.replace({pd.NA: None, pd.NaT: None})
+        result = result.replace({pd.NA: None, pd.NaT: None, np.nan: None})
         return cast(
             Dict[str, Dict[str, Any]],
             result.set_index("bag_verblijfsobject_id").to_dict(orient="index"),
