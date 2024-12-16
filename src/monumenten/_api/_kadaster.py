@@ -5,18 +5,39 @@ from typing import Any, Dict, List, Optional
 import aiohttp
 
 _KADASTER_SPARQL_ENDPOINT = (
-    "https://api.labs.kadaster.nl/datasets/dst/kkg/services/default/sparql"
+    "https://api.labs.kadaster.nl/datasets/kadaster/kkg/services/kkg/sparql"
 )
 
 _VERBLIJFSOBJECTEN_QUERY_TEMPLATE = """
-PREFIX sor: <https://data.kkg.kadaster.nl/sor/model/def/>
-PREFIX nen3610: <https://data.kkg.kadaster.nl/nen3610/model/def/>
-PREFIX geo: <http://www.opengis.net/ont/geosparql#>
-SELECT DISTINCT ?identificatie ?verblijfsobjectWKT
-WHERE {{
-  ?verblijfsobject sor:geregistreerdMet/nen3610:identificatie ?identificatie .
-  ?verblijfsobject geo:hasGeometry/geo:asWKT ?verblijfsobjectWKT.
-  FILTER (?identificatie IN ( {identificaties} ))
+prefix geo: <http://www.opengis.net/ont/geosparql#>
+prefix prov: <http://www.w3.org/ns/prov#>
+prefix imx: <http://modellen.geostandaarden.nl/def/imx-geo#>
+prefix geof: <http://www.opengis.net/def/function/geosparql/>
+
+select distinct ?adres ?identificatie ?verblijfsobjectWKT ?grondslagcode ?grondslag
+where {{
+  filter(?verblijfsobjectIri in (
+    {uri_list})
+  )
+
+  ?adres prov:wasDerivedFrom ?verblijfsobjectIri;
+          geo:hasGeometry/geo:asWKT ?verblijfsobjectWKT;
+          imx:isAdresVanGebouw ?gebouw.
+  ?gebouw imx:bevindtZichOpPerceel ?perceel.
+
+  optional {{
+    ?beperking <http://modellen.geostandaarden.nl/def/imx-geo#isBeperkingOpPerceel> ?perceel.
+    ?beperking geo:hasGeometry/geo:asWKT ?beperkingWKT.
+    ?beperking imx:grondslagcode ?grondslagcode.
+    ?beperking imx:grondslag ?grondslag.
+    values ?grondslagcode {{
+      "GG"
+      "GWA"
+    }}
+    FILTER (geof:sfWithin(?verblijfsobjectWKT, ?beperkingWKT))
+  }}
+
+  bind(strafter(str(?verblijfsobjectIri), "https://bag.basisregistraties.overheid.nl/id/verblijfsobject/") as ?identificatie)
 }}
 """
 
@@ -37,12 +58,13 @@ async def _query_verblijfsobjecten(
     session: aiohttp.ClientSession, identificaties: List[str]
 ) -> List[Dict[str, Any]]:
     async with _get_semaphore(asyncio.get_running_loop()):
-        identificaties_str = ", ".join(
-            f'"{identificatie}"' for identificatie in identificaties
+        uri_list = ", ".join(
+            f"<https://bag.basisregistraties.overheid.nl/id/verblijfsobject/{identificatie}>"
+            for identificatie in identificaties
         )
-        query = _VERBLIJFSOBJECTEN_QUERY_TEMPLATE.format(
-            identificaties=identificaties_str
-        )
+
+        query = _VERBLIJFSOBJECTEN_QUERY_TEMPLATE.format(uri_list=uri_list)
+
         data = {"query": query, "format": "json"}
         retries = 3
         for poging in range(retries):
