@@ -109,20 +109,42 @@ class MonumentenClient:
         return merged
 
     async def process_from_list(
-        self, verblijfsobject_ids: List[str]
-    ) -> Dict[str, Dict[str, Any]]:
+        self, verblijfsobject_ids: List[str], to_vera: bool = False
+    ) -> Dict[str, List[Dict[str, str]]]:
         """Verwerk een lijst met verblijfsobject ID's.
 
         Args:
             verblijfsobject_ids (List[str]): Lijst met te verwerken ID's
+            to_vera (bool): Of de output in VERA-referentiedataformaat moet zijn. Standaard is False.
 
         Returns:
-            Dict[str, Dict[str, Any]]: Dictionary met verblijfsobject ID's als keys en dictionaries met monumentinformatie als values
+            Dict[str, List[Dict[str, str]]]: Dictionary met verblijfsobject ID's als keys en lijst van monumentstatussen als values
         """
         df = pd.DataFrame({"bag_verblijfsobject_id": verblijfsobject_ids})
+
         result = await self.process_from_df(df, "bag_verblijfsobject_id")
+
         result = result.replace({pd.NA: None, pd.NaT: None, np.nan: None})
-        return cast(
-            Dict[str, Dict[str, Any]],
-            result.set_index("bag_verblijfsobject_id").to_dict(orient="index"),
+
+        if not to_vera:
+            return cast(
+                Dict[str, List[Dict[str, str]]],
+                result.set_index("bag_verblijfsobject_id").to_dict(orient="index"),
+            )
+
+        def naar_referentiedata(row: pd.Series) -> List[Dict[str, str]]:
+            statuses = []
+            if row.is_rijksmonument:
+                statuses.append({"code": "RIJ", "naam": "Rijksmonument"})
+            if row.is_beschermd_gezicht:
+                statuses.append({"code": "STA", "naam": "Beschermd stadsgezicht"})
+            if row.is_gemeentelijk_monument:
+                statuses.append({"code": "GEM", "naam": "Gemeentelijk monument"})
+            return statuses
+
+        return dict(
+            zip(
+                result["bag_verblijfsobject_id"],
+                result.apply(naar_referentiedata, axis=1),
+            )
         )
