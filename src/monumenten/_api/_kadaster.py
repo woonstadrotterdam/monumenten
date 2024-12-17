@@ -4,9 +4,7 @@ from typing import Any, Dict, List, Optional
 
 import aiohttp
 
-_KADASTER_SPARQL_ENDPOINT = (
-    "https://api.labs.kadaster.nl/datasets/kadaster/kkg/services/kkg/sparql"
-)
+_KADASTER_SPARQL_ENDPOINT = "https://data.kkg.kadaster.nl/service/sparql"
 
 _VERBLIJFSOBJECTEN_QUERY_TEMPLATE = """
 prefix geo: <http://www.opengis.net/ont/geosparql#>
