@@ -62,6 +62,7 @@ async def test_process_from_list_vera(client):
         "0599010000360091",
         "0599010000486642",
         "0599010000281115",
+        "0599010000076715",
     ]
 
     result = await client.process_from_list(bag_verblijfsobject_ids, to_vera=True)
@@ -81,6 +82,12 @@ async def test_process_from_list_vera(client):
     assert len(result["0599010000281115"]) == 1
     assert result["0599010000281115"][0]["code"] == "STA"
     assert result["0599010000281115"][0]["naam"] == "Beschermd stadsgezicht"
+
+    # Test gemeentelijk monument
+    assert "0599010000076715" in result
+    assert len(result["0599010000076715"]) == 1
+    assert result["0599010000076715"][0]["code"] == "GEM"
+    assert result["0599010000076715"][0]["naam"] == "Gemeentelijk monument"
 
 
 @pytest.mark.asyncio
