@@ -48,7 +48,7 @@ async def _process_batch(
         vo_df = pd.DataFrame(verblijfsobjecten)
 
         gemeentelijke_monumenten = vo_df[vo_df["grondslagcode"].notna()][
-            ["identificatie", "grondslag"]
+            ["identificatie", "grondslag_gemeentelijk_monument"]
         ].to_dict("records")
 
         vo_df["geometry"] = gpd.GeoSeries.from_wkt(vo_df["verblijfsobjectWKT"])
@@ -148,7 +148,7 @@ async def _query(
     df_gemeentelijke_monumenten = (
         pd.DataFrame(gemeentelijke_monumenten_result)
         if gemeentelijke_monumenten_result
-        else pd.DataFrame({"identificatie": [], "grondslag": []})
+        else pd.DataFrame({"identificatie": [], "grondslag_gemeentelijk_monument": []})
     )
 
     result = pd.merge(

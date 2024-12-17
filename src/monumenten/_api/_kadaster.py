@@ -14,7 +14,7 @@ prefix prov: <http://www.w3.org/ns/prov#>
 prefix imx: <http://modellen.geostandaarden.nl/def/imx-geo#>
 prefix geof: <http://www.opengis.net/def/function/geosparql/>
 
-select distinct ?adres ?identificatie ?verblijfsobjectWKT ?grondslagcode ?grondslag
+select distinct ?adres ?identificatie ?verblijfsobjectWKT ?grondslagcode ?grondslag_gemeentelijk_monument
 where {{
   filter(?verblijfsobjectIri in (
     {uri_list})
@@ -29,7 +29,7 @@ where {{
     ?beperking <http://modellen.geostandaarden.nl/def/imx-geo#isBeperkingOpPerceel> ?perceel.
     ?beperking geo:hasGeometry/geo:asWKT ?beperkingWKT.
     ?beperking imx:grondslagcode ?grondslagcode.
-    ?beperking imx:grondslag ?grondslag.
+    ?beperking imx:grondslag ?grondslag_gemeentelijk_monument.
     values ?grondslagcode {{
       "GG"
       "GWA"

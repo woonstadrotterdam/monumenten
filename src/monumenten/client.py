@@ -3,6 +3,7 @@
 from typing import Any, Dict, List, Optional, cast
 
 import aiohttp
+import numpy as np
 import pandas as pd
 
 from monumenten._processing import _query
@@ -95,12 +96,14 @@ class MonumentenClient:
             merged["beschermd_gezicht_naam"].notna(),
         )
 
-        gemeentelijk_monument_position = merged.columns.get_loc("grondslag")
+        gemeentelijk_monument_position = merged.columns.get_loc(
+            "grondslag_gemeentelijk_monument"
+        )
 
         merged.insert(
             gemeentelijk_monument_position,
             "is_gemeentelijk_monument",
-            merged["grondslag"].notna(),
+            merged["grondslag_gemeentelijk_monument"].notna(),
         )
 
         return merged
@@ -118,8 +121,11 @@ class MonumentenClient:
             Dict[str, List[Dict[str, str]]]: Dictionary met verblijfsobject ID's als keys en lijst van monumentstatussen als values
         """
         df = pd.DataFrame({"bag_verblijfsobject_id": verblijfsobject_ids})
+        
         result = await self.process_from_df(df, "bag_verblijfsobject_id")
-        result = result.replace({pd.NA: None, pd.NaT: None})
+        
+        result = result.replace({pd.NA: None, pd.NaT: None, np.nan: None})
+        
         if not to_vera:
             return cast(
                 Dict[str, List[Dict[str, str]]],
@@ -141,4 +147,8 @@ class MonumentenClient:
                 result["bag_verblijfsobject_id"],
                 result.apply(naar_referentiedata, axis=1),
             )
+        
+        return cast(
+            Dict[str, Dict[str, Any]],
+            result.set_index("bag_verblijfsobject_id").to_dict(orient="index"),
         )
