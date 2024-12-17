@@ -99,7 +99,7 @@ async def test_process_from_df(client):
                 "0599010000486642",  # non-monument
                 "0599010000183527",  # both rijksmonument and beschermd gezicht
                 "0599010000281115",  # beschermd gezicht only
-                "0599010000076715",  # gemeentelijk monument
+                "0599010000146141",  # gemeentelijk monument
             ]
         }
     )
@@ -145,9 +145,9 @@ async def test_process_from_df(client):
     assert result.iloc[3]["beschermd_gezicht_naam"] == "Kralingen - Midden"
 
     # Test gemeentelijk monument
-    assert result.iloc[4]["bag_verblijfsobject_id"] == "0599010000076715"
+    assert result.iloc[4]["bag_verblijfsobject_id"] == "0599010000146141"
     assert bool(result.iloc[4]["is_rijksmonument"]) is False
-    assert bool(result.iloc[4]["is_beschermd_gezicht"]) is False
+    assert bool(result.iloc[4]["is_beschermd_gezicht"]) is True
     assert bool(result.iloc[4]["is_gemeentelijk_monument"]) is True
     assert (
         result.iloc[4]["grondslag_gemeentelijk_monument"]
