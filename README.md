@@ -1,8 +1,10 @@
 # Monumenten
 
-Een Python package voor het ophalen van monumentgegevens van Nederlandse overheids-API's. Momenteel is het mogelijk om de status van rijksmonumenten en beschermde gezichten op te halen.
+Een Python package voor het ophalen van monumentgegevens van Nederlandse overheids-API's. Momenteel is het mogelijk om de status van rijksmonumenten, gemeentelijke monumenten en beschermde gezichten op te halen. Eventueel in VERA-referentiedataformaat.
 
 Door middel van de package is het mogelijk om, indienst gewenst, voor tienduizenden verblijfsobjecten per seconde monumentgegevens op te halen. Er zijn geen API-keys nodig.
+
+> In VERA-referentiedataformaat wordt geen onderscheid gemaakt tussen beschermde stads- en dorpsgezichten. Alle beschermde gezichten worden teruggegeven als beschermd stadsgezicht.
 
 ## Installatie
 
@@ -93,6 +95,7 @@ async def main():
         "0599010000360091",
         "0599010000486642",
         "0599010000281115",
+        "0599010000146141",
     ]
 
     async with MonumentenClient() as client:
@@ -115,7 +118,11 @@ await main()
 {
     '0599010000360091': [{'code': 'RIJ', 'naam': 'Rijksmonument'}],
     '0599010000486642': [],
-    '0599010000281115': [{'code': 'STA', 'naam': 'Beschermd stadsgezicht'}]
+    '0599010000281115': [{'code': 'STA', 'naam': 'Beschermd stadsgezicht'}],
+    '0599010000146141': [
+        {'code': 'STA', 'naam': 'Beschermd stadsgezicht'},
+        {'code': 'GEM', 'naam': 'Gemeentelijk monument'}
+    ]
 }
 ```
 
