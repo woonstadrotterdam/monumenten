@@ -16,11 +16,12 @@ async def test_process_from_list(client):
         "0599010000360091",
         "0599010000486642",
         "0599010000281115",
+        "0599010000076715",
     ]
 
     result = await client.process_from_list(bag_verblijfsobject_ids)
 
-    assert len(result) == 3
+    assert len(result) == 4
 
     # Test rijksmonument
     assert "0599010000360091" in result
@@ -44,6 +45,16 @@ async def test_process_from_list(client):
     assert result["0599010000281115"]["is_beschermd_gezicht"] is True
     assert result["0599010000281115"]["beschermd_gezicht_naam"] == "Kralingen - Midden"
 
+    # Test gemeentelijk monument
+    assert "0599010000076715" in result
+    assert result["0599010000076715"]["is_rijksmonument"] is False
+    assert result["0599010000076715"]["is_beschermd_gezicht"] is False
+    assert result["0599010000076715"]["is_gemeentelijk_monument"] is True
+    assert (
+        result["0599010000076715"]["grondslag_gemeentelijk_monument"]
+        == "Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift)"
+    )
+
 
 @pytest.mark.asyncio
 async def test_process_from_df(client):
@@ -54,6 +65,7 @@ async def test_process_from_df(client):
                 "0599010000486642",  # non-monument
                 "0599010000183527",  # both rijksmonument and beschermd gezicht
                 "0599010000281115",  # beschermd gezicht only
+                "0599010000076715",  # gemeentelijk monument
             ]
         }
     )
@@ -63,7 +75,7 @@ async def test_process_from_df(client):
     )
 
     assert isinstance(result, pd.DataFrame)
-    assert len(result) == 4
+    assert len(result) == 5
 
     # Test rijksmonument
     assert result.iloc[0]["bag_verblijfsobject_id"] == "0599010000360091"
@@ -97,3 +109,13 @@ async def test_process_from_df(client):
     assert bool(result.iloc[3]["is_rijksmonument"]) is False
     assert bool(result.iloc[3]["is_beschermd_gezicht"]) is True
     assert result.iloc[3]["beschermd_gezicht_naam"] == "Kralingen - Midden"
+
+    # Test gemeentelijk monument
+    assert result.iloc[4]["bag_verblijfsobject_id"] == "0599010000076715"
+    assert bool(result.iloc[4]["is_rijksmonument"]) is False
+    assert bool(result.iloc[4]["is_beschermd_gezicht"]) is False
+    assert bool(result.iloc[4]["is_gemeentelijk_monument"]) is True
+    assert (
+        result.iloc[4]["grondslag_gemeentelijk_monument"]
+        == "Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift)"
+    )

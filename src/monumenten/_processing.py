@@ -19,7 +19,7 @@ _QUERY_BATCH_GROOTTE = 500  # lijkt meest optimaal qua performance
 
 async def _process_batch(
     session: aiohttp.ClientSession, batch: List[str], bg_df: gpd.GeoDataFrame
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], int]:
     """Verwerk een batch verblijfsobjecten.
 
     Args:
@@ -28,8 +28,8 @@ async def _process_batch(
         bg_df (gpd.GeoDataFrame): GeoDataFrame met beschermde gezichten
 
     Returns:
-        Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]: Tuple met rijksmonumenten,
-            beschermde gezichten en aantal verwerkte objecten
+        Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], int]: Tuple met rijksmonumenten,
+            beschermde gezichten, gemeentelijke monumenten en aantal verwerkte objecten
     """
     # Get the current event loop
     loop = asyncio.get_running_loop()
@@ -43,19 +43,24 @@ async def _process_batch(
         rijksmonumenten_taak, verblijfsobjecten_taak
     )
 
-    # Process 'verblijfsobjecten' into GeoDataFrame
+    # Process 'verblijfsobjecten'
     if verblijfsobjecten:
         vo_df = pd.DataFrame(verblijfsobjecten)
+
+        gemeentelijke_monumenten = vo_df[vo_df["grondslagcode"].notna()][
+            ["identificatie", "grondslag_gemeentelijk_monument"]
+        ].to_dict("records")
+
         vo_df["geometry"] = gpd.GeoSeries.from_wkt(vo_df["verblijfsobjectWKT"])
-        vo_df = gpd.GeoDataFrame(
+        geo_df = gpd.GeoDataFrame(
             vo_df[["identificatie", "geometry"]], geometry="geometry"
         )
     else:
-        vo_df = gpd.GeoDataFrame(columns=["identificatie", "geometry"])
+        geo_df = gpd.GeoDataFrame(columns=["identificatie", "geometry"])
 
     # Perform spatial join
-    if not vo_df.empty:
-        joined_df = gpd.sjoin(vo_df, bg_df, how="left", predicate="within")
+    if not geo_df.empty:
+        joined_df = gpd.sjoin(geo_df, bg_df, how="left", predicate="within")
 
         verblijfsobjecten_in_beschermd_gezicht = joined_df[
             ["identificatie", "beschermd_gezicht_naam"]
@@ -63,7 +68,12 @@ async def _process_batch(
     else:
         verblijfsobjecten_in_beschermd_gezicht = list[Dict[str, Any]]()
 
-    return rijksmonumenten, verblijfsobjecten_in_beschermd_gezicht, len(batch)
+    return (
+        rijksmonumenten,
+        verblijfsobjecten_in_beschermd_gezicht,
+        gemeentelijke_monumenten,
+        len(batch),
+    )
 
 
 async def _query(
@@ -94,6 +104,7 @@ async def _query(
 
     rijksmonumenten_result = list[Dict[str, Any]]()
     verblijfsobjecten_in_beschermd_gezicht_result = list[Dict[str, Any]]()
+    gemeentelijke_monumenten_result = list[Dict[str, Any]]()
 
     # Prepare batches
     batches = [
@@ -107,9 +118,17 @@ async def _query(
     progress_bar = tqdm_asyncio(total=len(verblijfsobject_ids))
 
     for task in asyncio.as_completed(tasks):
-        rijksmonumenten, verblijfsobjecten, aantal = await task
+        (
+            rijksmonumenten,
+            verblijfsobjecten_in_beschermd_gezicht,
+            gemeentelijke_monumenten,
+            aantal,
+        ) = await task
         rijksmonumenten_result.extend(rijksmonumenten)
-        verblijfsobjecten_in_beschermd_gezicht_result.extend(verblijfsobjecten)
+        verblijfsobjecten_in_beschermd_gezicht_result.extend(
+            verblijfsobjecten_in_beschermd_gezicht
+        )
+        gemeentelijke_monumenten_result.extend(gemeentelijke_monumenten)
         progress_bar.update(aantal)
 
     progress_bar.close()
@@ -126,8 +145,14 @@ async def _query(
         else pd.DataFrame({"identificatie": [], "beschermd_gezicht_naam": []})
     )
 
+    df_gemeentelijke_monumenten = (
+        pd.DataFrame(gemeentelijke_monumenten_result)
+        if gemeentelijke_monumenten_result
+        else pd.DataFrame({"identificatie": [], "grondslag_gemeentelijk_monument": []})
+    )
+
     result = pd.merge(
         df_rijksmonumenten, df_beschermd_gezicht, on="identificatie", how="outer"
-    )
+    ).merge(df_gemeentelijke_monumenten, on="identificatie", how="outer")
 
     return result
