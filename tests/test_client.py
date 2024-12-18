@@ -18,6 +18,7 @@ async def test_process_from_list(client):
         "0599010000281115",
         "0599010000076715",
         "0599010000146141",
+        "0232010000002251",  # gebouw ligt volgens kadaster op meerdere percelen
     ]
 
     result = await client.process_from_list(bag_verblijfsobject_ids)
@@ -55,6 +56,16 @@ async def test_process_from_list(client):
     assert result["0599010000076715"]["is_gemeentelijk_monument"] is True
     assert (
         result["0599010000076715"]["grondslag_gemeentelijk_monument"]
+        == "Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift)"
+    )
+
+    # Test gemeentelijk monument op meerdere percelen
+    assert "0232010000002251" in result
+    assert result["0232010000002251"]["is_rijksmonument"] is False
+    assert result["0232010000002251"]["is_beschermd_gezicht"] is False
+    assert result["0232010000002251"]["is_gemeentelijk_monument"] is True
+    assert (
+        result["0232010000002251"]["grondslag_gemeentelijk_monument"]
         == "Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift)"
     )
 
