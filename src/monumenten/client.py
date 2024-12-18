@@ -106,7 +106,7 @@ class MonumentenClient:
             merged["grondslag_gemeentelijk_monument"].notna(),
         )
 
-        return merged.drop_duplicates(subset=["bag_verblijfsobject_id"])
+        return merged
 
     async def process_from_list(
         self, verblijfsobject_ids: List[str], to_vera: bool = False

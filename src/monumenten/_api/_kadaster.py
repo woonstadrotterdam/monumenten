@@ -22,6 +22,8 @@ where {{
           geo:hasGeometry/geo:asWKT ?verblijfsobjectWKT;
           imx:isAdresVanGebouw ?gebouw.
   ?gebouw imx:bevindtZichOpPerceel ?perceel.
+  ?perceel geo:hasGeometry/geo:asWKT ?perceelWKT.
+  FILTER (geof:sfWithin(?verblijfsobjectWKT, ?perceelWKT))
 
   optional {{
     ?beperking <http://modellen.geostandaarden.nl/def/imx-geo#isBeperkingOpPerceel> ?perceel.
