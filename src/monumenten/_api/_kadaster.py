@@ -26,7 +26,7 @@ where {{
   FILTER (geof:sfWithin(?verblijfsobjectWKT, ?perceelWKT))
 
   optional {{
-    ?beperking <http://modellen.geostandaarden.nl/def/imx-geo#isBeperkingOpPerceel> ?perceel.
+    ?beperking imx:isBeperkingOpPerceel ?perceel.
     ?beperking geo:hasGeometry/geo:asWKT ?beperkingWKT.
     ?beperking imx:grondslagcode ?grondslagcode.
     ?beperking imx:grondslag ?grondslag_gemeentelijk_monument.
