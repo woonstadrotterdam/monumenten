@@ -137,7 +137,7 @@ class MonumentenClient:
             if row.is_rijksmonument:
                 statuses.append({"code": "RIJ", "naam": "Rijksmonument"})
             if row.is_beschermd_gezicht:
-                statuses.append({"code": "STA", "naam": "Beschermd stadsgezicht"})
+                statuses.append({"code": "SGR", "naam": "Rijksbeschermd stadsgezicht"})
             if row.is_gemeentelijk_monument:
                 statuses.append({"code": "GEM", "naam": "Gemeentelijk monument"})
             return statuses
