@@ -115,7 +115,7 @@ async def _query(
     # Create tasks for each batch
     tasks = [_process_batch(session, batch, bg_df) for batch in batches]
 
-    progress_bar = tqdm_asyncio(total=len(verblijfsobject_ids))
+    progress_bar = tqdm_asyncio(total=len(verblijfsobject_ids), disable=len(tasks) <= 1)
 
     for task in asyncio.as_completed(tasks):
         (
