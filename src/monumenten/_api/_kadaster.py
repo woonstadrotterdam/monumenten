@@ -96,4 +96,4 @@ async def _query_verblijfsobjecten(
                         "Alle pogingen voor verblijfsobjecten query mislukt: %s", str(e)
                     )
                     raise
-        return List[Dict[str, Any]]()
+        return []

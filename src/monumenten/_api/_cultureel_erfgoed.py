@@ -111,7 +111,7 @@ async def _query_rijksmonumenten(
                     await asyncio.sleep(1)
                 else:
                     raise
-        return List[Dict[str, Any]]()
+        return []
 
 
 async def _query_beschermde_gebieden(
@@ -158,4 +158,4 @@ async def _query_beschermde_gebieden(
                 await asyncio.sleep(1)
             else:
                 raise
-    return List[Dict[str, Any]]()
+    return []
