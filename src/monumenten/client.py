@@ -120,7 +120,9 @@ class MonumentenClient:
         Returns:
             Dict[str, List[Dict[str, str]]]: Dictionary met verblijfsobject ID's als keys en lijst van monumentstatussen als values
         """
-        df = pd.DataFrame({"bag_verblijfsobject_id": verblijfsobject_ids})
+        df = pd.DataFrame(
+            {"bag_verblijfsobject_id": verblijfsobject_ids}
+        ).drop_duplicates()
 
         result = await self.process_from_df(df, "bag_verblijfsobject_id")
 
