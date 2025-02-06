@@ -57,6 +57,7 @@ async def _process_batch(
         )
     else:
         geo_df = gpd.GeoDataFrame(columns=["identificatie", "geometry"])
+        gemeentelijke_monumenten = []
 
     # Perform spatial join
     if not geo_df.empty:
@@ -66,7 +67,7 @@ async def _process_batch(
             ["identificatie", "beschermd_gezicht_naam"]
         ].to_dict("records")
     else:
-        verblijfsobjecten_in_beschermd_gezicht = list[Dict[str, Any]]()
+        verblijfsobjecten_in_beschermd_gezicht = []
 
     return (
         rijksmonumenten,
@@ -102,9 +103,9 @@ async def _query(
     # Ensure spatial index is built
     bg_df.sindex
 
-    rijksmonumenten_result = list[Dict[str, Any]]()
-    verblijfsobjecten_in_beschermd_gezicht_result = list[Dict[str, Any]]()
-    gemeentelijke_monumenten_result = list[Dict[str, Any]]()
+    rijksmonumenten_result = []
+    verblijfsobjecten_in_beschermd_gezicht_result = []
+    gemeentelijke_monumenten_result = []
 
     # Prepare batches
     batches = [
@@ -115,7 +116,7 @@ async def _query(
     # Create tasks for each batch
     tasks = [_process_batch(session, batch, bg_df) for batch in batches]
 
-    progress_bar = tqdm_asyncio(total=len(verblijfsobject_ids))
+    progress_bar = tqdm_asyncio(total=len(verblijfsobject_ids), disable=len(tasks) <= 1)
 
     for task in asyncio.as_completed(tasks):
         (
