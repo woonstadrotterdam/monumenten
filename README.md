@@ -118,9 +118,9 @@ await main()
 {
     '0599010000360091': [{'code': 'RIJ', 'naam': 'Rijksmonument'}],
     '0599010000486642': [],
-    '0599010000281115': [{'code': 'STA', 'naam': 'Beschermd stadsgezicht'}],
+    '0599010000281115': [{'code': 'SGR', 'naam': 'Rijksbeschermd stadsgezicht'}],
     '0599010000146141': [
-        {'code': 'STA', 'naam': 'Beschermd stadsgezicht'},
+        {'code': 'SGR', 'naam': 'Rijksbeschermd stadsgezicht'},
         {'code': 'GEM', 'naam': 'Gemeentelijk monument'}
     ]
 }
