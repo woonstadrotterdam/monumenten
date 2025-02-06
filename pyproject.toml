@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "monumenten"
 dynamic = ["version"]
-description = "Checkt op basis van BAG verblijfsobject-ids of het verblijfsobject een monument en/of beschermd stadsgezicht is."
+description = "Checkt op basis van BAG verblijfsobject-ids of het verblijfsobject een monument en/of rijksbeschermd stadsgezicht is."
 authors = [
     {name = "Woonstad Rotterdam", email = "info@woonstadrotterdam.nl"},
     {name = "Ben Verhees", email = "ben.verhees@woonstadrotterdam.nl"},

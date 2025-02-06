@@ -112,8 +112,8 @@ async def test_process_from_list_vera(client):
     # Test beschermd gezicht
     assert "0599010000281115" in result
     assert len(result["0599010000281115"]) == 1
-    assert result["0599010000281115"][0]["code"] == "STA"
-    assert result["0599010000281115"][0]["naam"] == "Beschermd stadsgezicht"
+    assert result["0599010000281115"][0]["code"] == "SGR"
+    assert result["0599010000281115"][0]["naam"] == "Rijksbeschermd stadsgezicht"
 
     # Test gemeentelijk monument
     assert "0599010000076715" in result
@@ -124,8 +124,8 @@ async def test_process_from_list_vera(client):
     # test beschermd stads gezicht en gemeentelijk monument
     assert "0599010000146141" in result
     assert len(result["0599010000146141"]) == 2
-    assert result["0599010000146141"][0]["code"] == "STA"
-    assert result["0599010000146141"][0]["naam"] == "Beschermd stadsgezicht"
+    assert result["0599010000146141"][0]["code"] == "SGR"
+    assert result["0599010000146141"][0]["naam"] == "Rijksbeschermd stadsgezicht"
     assert result["0599010000146141"][1]["code"] == "GEM"
     assert result["0599010000146141"][1]["naam"] == "Gemeentelijk monument"
 
