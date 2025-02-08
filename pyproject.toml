@@ -40,7 +40,7 @@ test = [
 ]
 dev = [
     "monumenten[test]",
-    "ruff==0.4.8"
+    "ruff==0.9.5"
 ]
 
 [tool.pytest.ini_options]
