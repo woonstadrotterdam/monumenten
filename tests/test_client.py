@@ -23,9 +23,9 @@ async def test_process_from_list(client):
 
     result = await client.process_from_list(bag_verblijfsobject_ids)
 
-    assert len(result) == len(
-        bag_verblijfsobject_ids
-    ), "Niet voor elk verblijfsobject een resultaat"
+    assert len(result) == len(bag_verblijfsobject_ids), (
+        "Niet voor elk verblijfsobject een resultaat"
+    )
 
     # Test rijksmonument
     assert "0599010000360091" in result
@@ -95,9 +95,9 @@ async def test_process_from_list_vera(client):
     ]
 
     result = await client.process_from_list(bag_verblijfsobject_ids, to_vera=True)
-    assert len(result) == len(
-        bag_verblijfsobject_ids
-    ), "Niet voor elk verblijfsobject een resultaat"
+    assert len(result) == len(bag_verblijfsobject_ids), (
+        "Niet voor elk verblijfsobject een resultaat"
+    )
 
     # Test rijksmonument
     assert "0599010000360091" in result
