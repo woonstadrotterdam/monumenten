@@ -3,6 +3,7 @@
 import asyncio
 from typing import Any, Dict, List, Tuple
 
+from aiocache import cached_stampede
 import aiohttp
 import geopandas as gpd
 import pandas as pd
@@ -77,6 +78,26 @@ async def _process_batch(
     )
 
 
+@cached_stampede(ttl=60 * 60 * 24 * 7, noself=True)  # Cache resultaat voor 7 dagen
+async def _get_beschermde_gebieden(
+    session: aiohttp.ClientSession,
+) -> gpd.GeoDataFrame:
+    """Haal beschermde gebieden op."""
+    beschermde_gebieden = await _query_beschermde_gebieden(session)
+    bg_df = gpd.GeoDataFrame()
+
+    if not beschermde_gebieden:
+        raise ValueError("Geen beschermde gebieden gevonden")
+
+    bg_df = pd.DataFrame(beschermde_gebieden)
+    bg_df["geometry"] = gpd.GeoSeries.from_wkt(bg_df["gezichtWKT"])
+    bg_df = gpd.GeoDataFrame(
+        bg_df[["beschermd_gezicht_naam", "geometry"]], geometry="geometry"
+    )
+
+    return bg_df
+
+
 async def _query(
     session: aiohttp.ClientSession, verblijfsobject_ids: List[str]
 ) -> pd.DataFrame:
@@ -90,18 +111,7 @@ async def _query(
         pd.DataFrame: DataFrame met monumentinformatie
     """
     # Load 'beschermde_gebieden' and convert to GeoDataFrame
-    beschermde_gebieden = await _query_beschermde_gebieden(session)
-    bg_df = gpd.GeoDataFrame()
-
-    if beschermde_gebieden:
-        bg_df = pd.DataFrame(beschermde_gebieden)
-        bg_df["geometry"] = gpd.GeoSeries.from_wkt(bg_df["gezichtWKT"])
-        bg_df = gpd.GeoDataFrame(
-            bg_df[["beschermd_gezicht_naam", "geometry"]], geometry="geometry"
-        )
-
-    # Ensure spatial index is built
-    bg_df.sindex
+    bg_df = await _get_beschermde_gebieden(session)
 
     rijksmonumenten_result = []
     verblijfsobjecten_in_beschermd_gezicht_result = []
