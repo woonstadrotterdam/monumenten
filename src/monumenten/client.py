@@ -1,6 +1,6 @@
 """Client voor monumenten package."""
 
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, Union, cast
 
 import aiohttp
 import numpy as np
@@ -110,7 +110,7 @@ class MonumentenClient:
 
     async def process_from_list(
         self, verblijfsobject_ids: List[str], to_vera: bool = False
-    ) -> Dict[str, List[Dict[str, str]]]:
+    ) -> Union[Dict[str, List[Dict[str, str]]], Dict[str, Dict[str, Any]]]:
         """Verwerk een lijst met verblijfsobject ID's.
 
         Args:
@@ -118,7 +118,7 @@ class MonumentenClient:
             to_vera (bool): Of de output in VERA-referentiedataformaat moet zijn. Standaard is False.
 
         Returns:
-            Dict[str, List[Dict[str, str]]]: Dictionary met verblijfsobject ID's als keys en lijst van monumentstatussen als values
+            Union[Dict[str, List[Dict[str, str]]], Dict[str, Dict[str, Any]]]: Dictionary met verblijfsobject ID's als keys en lijst van monumentstatussen als values
         """
         df = pd.DataFrame(
             {"bag_verblijfsobject_id": verblijfsobject_ids}
@@ -130,7 +130,7 @@ class MonumentenClient:
 
         if not to_vera:
             return cast(
-                Dict[str, List[Dict[str, str]]],
+                Dict[str, Dict[str, Any]],
                 result.set_index("bag_verblijfsobject_id").to_dict(orient="index"),
             )
 
@@ -144,9 +144,9 @@ class MonumentenClient:
                 statuses.append({"code": "GEM", "naam": "Gemeentelijk monument"})
             return statuses
 
-        return dict(
-            zip(
-                result["bag_verblijfsobject_id"],
-                result.apply(naar_referentiedata, axis=1),
-            )
+        return cast(
+            Dict[str, List[Dict[str, str]]],
+            result.set_index("bag_verblijfsobject_id")
+            .apply(naar_referentiedata, axis=1)
+            .to_dict(),
         )
