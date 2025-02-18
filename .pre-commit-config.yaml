@@ -41,9 +41,12 @@ repos:
     hooks:
       - id: mypy
         description: "Mypy is an optional static type checker for Python."
-        args:
-          ["--strict", "--ignore-missing-imports", "--allow-untyped-decorators"]
+        args: ["--strict", "--allow-untyped-decorators"]
         exclude: "tests"
+        additional_dependencies:
+          - "pandas-stubs>=2.0.0"
+          - "aiohttp>=3.10.10"
+          - "types-tqdm>=4.66.5"
 
   - repo: https://github.com/PyCQA/bandit
     rev: 1.7.8

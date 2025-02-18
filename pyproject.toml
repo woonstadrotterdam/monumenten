@@ -40,7 +40,8 @@ test = [
 ]
 dev = [
     "monumenten[test]",
-    "ruff==0.9.5"
+    "ruff==0.9.5",
+    "pandas-stubs>=2.0.0"
 ]
 
 [tool.pytest.ini_options]
@@ -64,3 +65,10 @@ Issues = "https://github.com/woonstadrotterdam/monumenten/issues"
 [tool.setuptools]
 packages = ["monumenten"]
 package-dir = {"" = "src"}
+
+[[tool.mypy.overrides]]
+module = [
+    "geopandas.*",  # https://github.com/geopandas/geopandas/issues/1974
+    "aiocache.*",  # https://github.com/aio-libs/aiocache/issues/512, https://github.com/aio-libs/aiocache/issues/667
+]
+ignore_missing_imports = true

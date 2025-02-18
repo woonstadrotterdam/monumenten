@@ -101,6 +101,7 @@ jobs:
             ./dist/*.tar.gz
             ./dist/*.whl
       - name: Determine latest Release
+        id: latest-release
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -124,6 +125,7 @@ jobs:
       - name: Create GitHub Release
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          LATEST_TAG_NAME: ${{ steps.latest-release.outputs.LATEST_TAG_NAME }}
         run: >-
           gh release create
           '${{ github.ref_name }}'
