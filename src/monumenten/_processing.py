@@ -1,7 +1,7 @@
 """Interne processing functies voor de monumenten package."""
 
 import asyncio
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Hashable
 
 from aiocache import cached_stampede
 import aiohttp
@@ -20,7 +20,7 @@ _QUERY_BATCH_GROOTTE = 500  # lijkt meest optimaal qua performance
 
 async def _process_batch(
     session: aiohttp.ClientSession, batch: List[str], bg_df: gpd.GeoDataFrame
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], int]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[Hashable, Any]], int]:
     """Verwerk een batch verblijfsobjecten.
 
     Args:
@@ -29,7 +29,7 @@ async def _process_batch(
         bg_df (gpd.GeoDataFrame): GeoDataFrame met beschermde gezichten
 
     Returns:
-        Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], int]: Tuple met rijksmonumenten,
+        Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[Hashable, Any]], int]: Tuple met rijksmonumenten,
             beschermde gezichten, gemeentelijke monumenten en aantal verwerkte objecten
     """
     # Get the current event loop

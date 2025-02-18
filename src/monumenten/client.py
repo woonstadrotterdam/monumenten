@@ -56,7 +56,7 @@ class MonumentenClient:
             raise RuntimeError("Client must be used as a context manager")
 
         results = await _query(
-            self._session, df[verblijfsobject_id_col].drop_duplicates()
+            self._session, df[verblijfsobject_id_col].drop_duplicates().tolist()
         )
         merged = pd.merge(
             df,
@@ -70,6 +70,12 @@ class MonumentenClient:
             merged = merged.drop(columns=["identificatie"])
 
         rijksmonument_nummer_position = merged.columns.get_loc("rijksmonument_nummer")
+
+        if not isinstance(rijksmonument_nummer_position, int):
+            raise RuntimeError(
+                "Interne fout: Kan kolomnummer voor 'rijksmonument_nummer' niet bepalen"
+            )
+
         merged.insert(
             rijksmonument_nummer_position + 1,
             "rijksmonument_url",
@@ -90,6 +96,11 @@ class MonumentenClient:
             "beschermd_gezicht_naam"
         )
 
+        if not isinstance(beschermd_gezicht_naam_position, int):
+            raise RuntimeError(
+                "Interne fout: Kan kolomnummer voor 'beschermd_gezicht_naam' niet bepalen"
+            )
+
         merged.insert(
             beschermd_gezicht_naam_position,
             "is_beschermd_gezicht",
@@ -97,8 +108,13 @@ class MonumentenClient:
         )
 
         gemeentelijk_monument_position = merged.columns.get_loc(
-            "grondslag_gemeentelijk_monument"
+            "grondslag_gemeentelijk_monument",
         )
+
+        if not isinstance(gemeentelijk_monument_position, int):
+            raise RuntimeError(
+                "Interne fout: Kan kolomnummer voor 'grondslag_gemeentelijk_monument' niet bepalen"
+            )
 
         merged.insert(
             gemeentelijk_monument_position,
@@ -134,7 +150,7 @@ class MonumentenClient:
                 result.set_index("bag_verblijfsobject_id").to_dict(orient="index"),
             )
 
-        def naar_referentiedata(row: pd.Series) -> List[Dict[str, str]]:
+        def naar_referentiedata(row: pd.Series[Any]) -> List[Dict[str, str]]:
             statuses = []
             if row.is_rijksmonument:
                 statuses.append({"code": "RIJ", "naam": "Rijksmonument"})
