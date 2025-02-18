@@ -40,7 +40,8 @@ test = [
 ]
 dev = [
     "monumenten[test]",
-    "ruff==0.9.5"
+    "ruff==0.9.5",
+    "pandas-stubs>=2.0.0"
 ]
 
 [tool.pytest.ini_options]
