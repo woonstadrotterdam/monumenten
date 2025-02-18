@@ -1,5 +1,7 @@
 """Client voor monumenten package."""
 
+from __future__ import annotations
+
 from typing import Any, Dict, List, Optional, Union, cast
 
 import aiohttp
@@ -150,7 +152,7 @@ class MonumentenClient:
                 result.set_index("bag_verblijfsobject_id").to_dict(orient="index"),
             )
 
-        def naar_referentiedata(row: pd.Series[Any]) -> List[Dict[str, str]]:
+        def naar_referentiedata(row: pd.Series[bool]) -> List[Dict[str, str]]:
             statuses = []
             if row.is_rijksmonument:
                 statuses.append({"code": "RIJ", "naam": "Rijksmonument"})

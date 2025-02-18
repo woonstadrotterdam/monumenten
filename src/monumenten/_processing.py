@@ -1,5 +1,7 @@
 """Interne processing functies voor de monumenten package."""
 
+from __future__ import annotations
+
 import asyncio
 from typing import Any, Dict, List, Tuple, Hashable
 

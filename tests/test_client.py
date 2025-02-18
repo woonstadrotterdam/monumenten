@@ -11,7 +11,7 @@ async def client():
 
 
 @pytest.mark.asyncio
-async def test_process_from_list(client):
+async def test_process_from_list(client: MonumentenClient):
     bag_verblijfsobject_ids = [
         "0599010000360091",
         "0599010000486642",
@@ -29,6 +29,7 @@ async def test_process_from_list(client):
 
     # Test rijksmonument
     assert "0599010000360091" in result
+    assert isinstance(result["0599010000360091"], dict)
     assert result["0599010000360091"]["is_rijksmonument"] is True
     assert result["0599010000360091"]["rijksmonument_nummer"] == "524327"
     assert (
@@ -39,18 +40,21 @@ async def test_process_from_list(client):
 
     # Test non-monument
     assert "0599010000486642" in result
+    assert isinstance(result["0599010000486642"], dict)
     assert result["0599010000486642"]["is_rijksmonument"] is False
     assert result["0599010000486642"]["rijksmonument_nummer"] is None
     assert result["0599010000486642"]["is_beschermd_gezicht"] is False
 
     # Test beschermd gezicht
     assert "0599010000281115" in result
+    assert isinstance(result["0599010000281115"], dict)
     assert result["0599010000281115"]["is_rijksmonument"] is False
     assert result["0599010000281115"]["is_beschermd_gezicht"] is True
     assert result["0599010000281115"]["beschermd_gezicht_naam"] == "Kralingen - Midden"
 
     # Test gemeentelijk monument
     assert "0599010000076715" in result
+    assert isinstance(result["0599010000076715"], dict)
     assert result["0599010000076715"]["is_rijksmonument"] is False
     assert result["0599010000076715"]["is_beschermd_gezicht"] is False
     assert result["0599010000076715"]["is_gemeentelijk_monument"] is True
@@ -61,6 +65,7 @@ async def test_process_from_list(client):
 
     # Test gemeentelijk monument op meerdere percelen
     assert "0232010000002251" in result
+    assert isinstance(result["0232010000002251"], dict)
     assert result["0232010000002251"]["is_rijksmonument"] is False
     assert result["0232010000002251"]["is_beschermd_gezicht"] is False
     assert result["0232010000002251"]["is_gemeentelijk_monument"] is True
@@ -71,6 +76,7 @@ async def test_process_from_list(client):
 
     # test beschermd stads gezicht en gemeentelijk monument
     assert "0599010000146141" in result
+    assert isinstance(result["0599010000146141"], dict)
     assert result["0599010000146141"]["is_rijksmonument"] is False
     assert result["0599010000146141"]["is_beschermd_gezicht"] is True
     assert result["0599010000146141"]["is_gemeentelijk_monument"] is True
@@ -85,7 +91,7 @@ async def test_process_from_list(client):
 
 
 @pytest.mark.asyncio
-async def test_process_from_list_vera(client):
+async def test_process_from_list_vera(client: MonumentenClient):
     bag_verblijfsobject_ids = [
         "0599010000360091",
         "0599010000486642",
@@ -98,10 +104,11 @@ async def test_process_from_list_vera(client):
     assert len(result) == len(bag_verblijfsobject_ids), (
         "Niet voor elk verblijfsobject een resultaat"
     )
-
     # Test rijksmonument
     assert "0599010000360091" in result
+    assert isinstance(result["0599010000360091"], list)
     assert len(result["0599010000360091"]) == 1
+
     assert result["0599010000360091"][0]["code"] == "RIJ"
     assert result["0599010000360091"][0]["naam"] == "Rijksmonument"
 
@@ -111,18 +118,21 @@ async def test_process_from_list_vera(client):
 
     # Test beschermd gezicht
     assert "0599010000281115" in result
+    assert isinstance(result["0599010000281115"], list)
     assert len(result["0599010000281115"]) == 1
     assert result["0599010000281115"][0]["code"] == "SGR"
     assert result["0599010000281115"][0]["naam"] == "Rijksbeschermd stadsgezicht"
 
     # Test gemeentelijk monument
     assert "0599010000076715" in result
+    assert isinstance(result["0599010000076715"], list)
     assert len(result["0599010000076715"]) == 1
     assert result["0599010000076715"][0]["code"] == "GEM"
     assert result["0599010000076715"][0]["naam"] == "Gemeentelijk monument"
 
     # test beschermd stads gezicht en gemeentelijk monument
     assert "0599010000146141" in result
+    assert isinstance(result["0599010000146141"], list)
     assert len(result["0599010000146141"]) == 2
     assert result["0599010000146141"][0]["code"] == "SGR"
     assert result["0599010000146141"][0]["naam"] == "Rijksbeschermd stadsgezicht"
@@ -131,7 +141,7 @@ async def test_process_from_list_vera(client):
 
 
 @pytest.mark.asyncio
-async def test_process_from_df(client):
+async def test_process_from_df(client: MonumentenClient):
     input_df = pd.DataFrame(
         {
             "bag_verblijfsobject_id": [
