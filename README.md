@@ -10,6 +10,9 @@ Door middel van de package is het mogelijk om, indienst gewenst, voor tienduizen
 > [!NOTE]
 > Wanneer een verblijfsobject wel bij het Kadaster als rijksmonument is geregistreerd, maar niet bij de Rijksdienst voor het Cultureel Erfgoed, wordt het rijksmonument_nummer gevuld met `ONTBREEKT_BIJ_RCE`
 
+> [!WARNING]
+> Het is mogelijk dat een verblijfsobject ten onrechte wel of geen monumentstatus heeft. Dit hangt af van hoe het verblijfsobject staat geregistreerd bij het Kadaster en de Rijksdienst voor het Cultureel Erfgoed. Neem contact met hen op als u denkt u een verkeerde monumentale status terugkrijgt.
+
 ## Installatie
 
 `pip install monumenten`
