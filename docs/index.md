@@ -1,3 +1,1 @@
-```{include} README_link.md
-
-```
+{% include-markdown "../README.md" %}
