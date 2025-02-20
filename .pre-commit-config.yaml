@@ -42,7 +42,7 @@ repos:
       - id: mypy
         description: "Mypy is an optional static type checker for Python."
         args: ["--strict", "--allow-untyped-decorators"]
-        exclude: "tests"
+        exclude: ^(tests|docs)
         additional_dependencies:
           - "pandas-stubs>=2.0.0"
           - "aiohttp>=3.10.10"
