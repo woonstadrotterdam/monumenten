@@ -31,8 +31,10 @@ where {{
     ?beperking imx:grondslagcode ?grondslagcode.
     ?beperking imx:grondslag ?grondslag_gemeentelijk_monument.
     values ?grondslagcode {{
-      "GG"
-      "GWA"
+      "GG"  # Besluit monument, Gemeentewet
+      "GWA" # Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift)
+      "EWE" # Erfgoedwet: Afschrift inschrijving monument of archeologisch monument in rijksmonumentenregister door minister OCW
+      "EWD" # Erfgoedwet: Toezending ontwerpbesluit aanwijzing rijksmonument door minister OCW (voorbescherming)
     }}
     FILTER (geof:sfWithin(?verblijfsobjectWKT, ?beperkingWKT))
   }}

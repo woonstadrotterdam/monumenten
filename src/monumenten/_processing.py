@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, List, Tuple, Hashable
+from typing import List, Tuple
 
 from aiocache import cached_stampede
 import aiohttp
 import geopandas as gpd
 import pandas as pd
+from pandas import DataFrame
 from tqdm.asyncio import tqdm_asyncio
 
 from monumenten._api._cultureel_erfgoed import (
-    _query_beschermde_gebieden,
     _query_rijksmonumenten,
+    _query_beschermde_gezichten,
 )
 from monumenten._api._kadaster import _query_verblijfsobjecten
 
@@ -21,17 +22,19 @@ _QUERY_BATCH_GROOTTE = 500  # lijkt meest optimaal qua performance
 
 
 async def _process_batch(
-    session: aiohttp.ClientSession, batch: List[str], bg_df: gpd.GeoDataFrame
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[Hashable, Any]], int]:
+    session: aiohttp.ClientSession,
+    batch: List[str],
+    beschermde_gezichten_df: gpd.GeoDataFrame,
+) -> Tuple[DataFrame, DataFrame, DataFrame, int]:
     """Verwerk een batch verblijfsobjecten.
 
     Args:
         session (aiohttp.ClientSession): De sessie voor HTTP requests
         batch (List[str]): Lijst met verblijfsobject ID's
-        bg_df (gpd.GeoDataFrame): GeoDataFrame met beschermde gezichten
+        beschermde_gezichten_df (gpd.GeoDataFrame): GeoDataFrame met beschermde gezichten
 
     Returns:
-        Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[Hashable, Any]], int]: Tuple met rijksmonumenten,
+        Tuple[DataFrame, DataFrame, DataFrame, int]: Tuple met rijksmonumenten,
             beschermde gezichten, gemeentelijke monumenten en aantal verwerkte objecten
     """
     # Get the current event loop
@@ -46,58 +49,73 @@ async def _process_batch(
         rijksmonumenten_taak, verblijfsobjecten_taak
     )
 
-    # Process 'verblijfsobjecten'
-    if verblijfsobjecten:
-        vo_df = pd.DataFrame(verblijfsobjecten)
+    verblijfsobjecten_df = pd.DataFrame(verblijfsobjecten).astype(
+        {"identificatie": "string"}
+    )
 
-        gemeentelijke_monumenten = vo_df[vo_df["grondslagcode"].notna()][
-            ["identificatie", "grondslag_gemeentelijk_monument"]
-        ].to_dict("records")
+    rijksmonumenten_df = pd.merge(
+        pd.DataFrame(
+            rijksmonumenten,
+            columns=["identificatie", "rijksmonument_nummer"],
+            dtype="string",
+        ),
+        verblijfsobjecten_df[
+            verblijfsobjecten_df["grondslagcode"].isin(["EWE", "EWD"])
+        ][["identificatie"]],
+        on="identificatie",
+        how="outer",
+    ).fillna({"rijksmonument_nummer": "REGISTRATIE_ONTBREEKT_BIJ_RCE"})
 
-        vo_df["geometry"] = gpd.GeoSeries.from_wkt(vo_df["verblijfsobjectWKT"])
-        geo_df = gpd.GeoDataFrame(
-            vo_df[["identificatie", "geometry"]], geometry="geometry"
-        )
-    else:
-        geo_df = gpd.GeoDataFrame(columns=["identificatie", "geometry"])
-        gemeentelijke_monumenten = []
+    # Process gemeentelijke monumenten
+    gemeentelijke_monumenten_df = verblijfsobjecten_df[
+        verblijfsobjecten_df["grondslagcode"].isin(["GG", "GWA"])
+    ][["identificatie", "grondslag_gemeentelijk_monument"]]
 
-    # Perform spatial join
-    if not geo_df.empty:
-        joined_df = gpd.sjoin(geo_df, bg_df, how="left", predicate="within")
+    # Process beschermde gezichten
+    geo_df = gpd.GeoDataFrame(
+        verblijfsobjecten_df[["identificatie", "verblijfsobjectWKT"]].assign(
+            geometry=lambda x: gpd.GeoSeries.from_wkt(x["verblijfsobjectWKT"])
+        )[["identificatie", "geometry"]],
+        geometry="geometry",
+    )
 
-        verblijfsobjecten_in_beschermd_gezicht = joined_df[
-            ["identificatie", "beschermd_gezicht_naam"]
-        ].to_dict("records")
-    else:
-        verblijfsobjecten_in_beschermd_gezicht = []
+    # Find objects within beschermde gezichten
+    verblijfsobjecten_in_beschermde_gezichten_df = gpd.sjoin(
+        geo_df,
+        beschermde_gezichten_df,
+        how="left",
+        predicate="within",
+    )[["identificatie", "beschermd_gezicht_naam"]]
 
     return (
-        rijksmonumenten,
-        verblijfsobjecten_in_beschermd_gezicht,
-        gemeentelijke_monumenten,
+        rijksmonumenten_df,
+        verblijfsobjecten_in_beschermde_gezichten_df,
+        gemeentelijke_monumenten_df,
         len(batch),
     )
 
 
 @cached_stampede(ttl=60 * 60 * 24 * 7, noself=True)  # Cache resultaat voor 7 dagen
-async def _get_beschermde_gebieden(
+async def _get_beschermde_gezichten(
     session: aiohttp.ClientSession,
 ) -> gpd.GeoDataFrame:
-    """Haal beschermde gebieden op."""
-    beschermde_gebieden = await _query_beschermde_gebieden(session)
-    bg_df = gpd.GeoDataFrame()
+    """Haal beschermde gezichten op."""
+    beschermde_gezichten = await _query_beschermde_gezichten(session)
+    beschermde_gezichten_df = gpd.GeoDataFrame()
 
-    if not beschermde_gebieden:
-        raise ValueError("Geen beschermde gebieden gevonden")
+    if not beschermde_gezichten:
+        raise ValueError("Geen beschermde gezichten gevonden")
 
-    bg_df = pd.DataFrame(beschermde_gebieden)
-    bg_df["geometry"] = gpd.GeoSeries.from_wkt(bg_df["gezichtWKT"])
-    bg_df = gpd.GeoDataFrame(
-        bg_df[["beschermd_gezicht_naam", "geometry"]], geometry="geometry"
+    beschermde_gezichten_df = pd.DataFrame(beschermde_gezichten)
+    beschermde_gezichten_df["geometry"] = gpd.GeoSeries.from_wkt(
+        beschermde_gezichten_df["gezichtWKT"]
+    )
+    beschermde_gezichten_df = gpd.GeoDataFrame(
+        beschermde_gezichten_df[["beschermd_gezicht_naam", "geometry"]],
+        geometry="geometry",
     )
 
-    return bg_df
+    return beschermde_gezichten_df
 
 
 async def _query(
@@ -112,12 +130,12 @@ async def _query(
     Returns:
         pd.DataFrame: DataFrame met monumentinformatie
     """
-    # Load 'beschermde_gebieden' and convert to GeoDataFrame
-    bg_df = await _get_beschermde_gebieden(session)
+    # Load 'beschermde_gezichten' and convert to GeoDataFrame
+    beschermde_gezichten_df = await _get_beschermde_gezichten(session)
 
-    rijksmonumenten_result = []
-    verblijfsobjecten_in_beschermd_gezicht_result = []
-    gemeentelijke_monumenten_result = []
+    rijksmonumenten_result = pd.DataFrame()
+    verblijfsobjecten_in_beschermd_gezicht_result = pd.DataFrame()
+    gemeentelijke_monumenten_result = pd.DataFrame()
 
     # Prepare batches
     batches = [
@@ -126,7 +144,9 @@ async def _query(
     ]
 
     # Create tasks for each batch
-    tasks = [_process_batch(session, batch, bg_df) for batch in batches]
+    tasks = [
+        _process_batch(session, batch, beschermde_gezichten_df) for batch in batches
+    ]
 
     progress_bar = tqdm_asyncio(total=len(verblijfsobject_ids), disable=len(tasks) <= 1)
 
@@ -137,35 +157,23 @@ async def _query(
             gemeentelijke_monumenten,
             aantal,
         ) = await task
-        rijksmonumenten_result.extend(rijksmonumenten)
-        verblijfsobjecten_in_beschermd_gezicht_result.extend(
-            verblijfsobjecten_in_beschermd_gezicht
+
+        rijksmonumenten_result = pd.concat([rijksmonumenten_result, rijksmonumenten])
+        verblijfsobjecten_in_beschermd_gezicht_result = pd.concat(
+            [
+                verblijfsobjecten_in_beschermd_gezicht_result,
+                verblijfsobjecten_in_beschermd_gezicht,
+            ]
         )
-        gemeentelijke_monumenten_result.extend(gemeentelijke_monumenten)
+        gemeentelijke_monumenten_result = pd.concat(
+            [gemeentelijke_monumenten_result, gemeentelijke_monumenten]
+        )
         progress_bar.update(aantal)
 
     progress_bar.close()
 
-    df_rijksmonumenten = (
-        pd.DataFrame(rijksmonumenten_result)
-        if rijksmonumenten_result
-        else pd.DataFrame({"identificatie": [], "rijksmonument_nummer": []})
-    )
-
-    df_beschermd_gezicht = (
-        pd.DataFrame(verblijfsobjecten_in_beschermd_gezicht_result)
-        if verblijfsobjecten_in_beschermd_gezicht_result
-        else pd.DataFrame({"identificatie": [], "beschermd_gezicht_naam": []})
-    )
-
-    df_gemeentelijke_monumenten = (
-        pd.DataFrame(gemeentelijke_monumenten_result)
-        if gemeentelijke_monumenten_result
-        else pd.DataFrame({"identificatie": [], "grondslag_gemeentelijk_monument": []})
-    )
-
-    result = pd.merge(
-        df_rijksmonumenten, df_beschermd_gezicht, on="identificatie", how="outer"
-    ).merge(df_gemeentelijke_monumenten, on="identificatie", how="outer")
+    result = rijksmonumenten_result.merge(
+        verblijfsobjecten_in_beschermd_gezicht_result, on="identificatie", how="outer"
+    ).merge(gemeentelijke_monumenten_result, on="identificatie", how="outer")
 
     return result
