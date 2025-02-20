@@ -114,7 +114,7 @@ async def _query_rijksmonumenten(
         return []
 
 
-async def _query_beschermde_gebieden(
+async def _query_beschermde_gezichten(
     session: aiohttp.ClientSession,
 ) -> List[Dict[str, Any]]:
     """
@@ -150,7 +150,7 @@ async def _query_beschermde_gebieden(
         except aiohttp.ClientResponseError as e:
             if poging != retries - 1:
                 logger.warning(
-                    "Poging %d/%d voor beschermde gebieden query mislukt: %s. Opnieuw proberen over 1 seconde...",
+                    "Poging %d/%d voor beschermde gezichten query mislukt: %s. Opnieuw proberen over 1 seconde...",
                     poging + 1,
                     retries,
                     str(e),

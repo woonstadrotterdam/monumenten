@@ -37,6 +37,16 @@ class MonumentenClient:
         if self._owns_session and self._session:
             await self._session.close()
 
+    def _naar_referentiedata(self, row: pd.Series[bool]) -> List[Dict[str, str]]:
+        statuses = []
+        if row.is_rijksmonument:
+            statuses.append({"code": "RIJ", "naam": "Rijksmonument"})
+        if row.is_beschermd_gezicht:
+            statuses.append({"code": "SGR", "naam": "Rijksbeschermd stadsgezicht"})
+        if row.is_gemeentelijk_monument:
+            statuses.append({"code": "GEM", "naam": "Gemeentelijk monument"})
+        return statuses
+
     async def process_from_df(
         self,
         df: pd.DataFrame,
@@ -85,7 +95,11 @@ class MonumentenClient:
             + merged["rijksmonument_nummer"]
             .fillna("")
             .astype(str)
-            .where(merged["rijksmonument_nummer"].notna(), None),
+            .where(
+                (merged["rijksmonument_nummer"].notna())
+                & (merged["rijksmonument_nummer"] != "REGISTRATIE_ONTBREEKT_BIJ_RCE"),
+                None,
+            ),
         )
 
         merged.insert(
@@ -152,19 +166,8 @@ class MonumentenClient:
                 result.set_index("bag_verblijfsobject_id").to_dict(orient="index"),
             )
 
-        def naar_referentiedata(row: pd.Series[bool]) -> List[Dict[str, str]]:
-            statuses = []
-            if row.is_rijksmonument:
-                statuses.append({"code": "RIJ", "naam": "Rijksmonument"})
-            if row.is_beschermd_gezicht:
-                statuses.append({"code": "SGR", "naam": "Rijksbeschermd stadsgezicht"})
-            if row.is_gemeentelijk_monument:
-                statuses.append({"code": "GEM", "naam": "Gemeentelijk monument"})
-            return statuses
-
-        return cast(
-            Dict[str, List[Dict[str, str]]],
+        return (
             result.set_index("bag_verblijfsobject_id")
-            .apply(naar_referentiedata, axis=1)
-            .to_dict(),
+            .apply(self._naar_referentiedata, axis=1)
+            .to_dict()
         )

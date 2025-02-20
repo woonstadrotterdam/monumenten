@@ -4,11 +4,11 @@ Een Python package voor het ophalen van monumentgegevens van Nederlandse overhei
 
 Door middel van de package is het mogelijk om, indienst gewenst, voor tienduizenden verblijfsobjecten per seconde monumentgegevens op te halen. Er zijn geen API-keys nodig.
 
-> **Note**  
+> [!NOTE]
 > In VERA-referentiedataformaat wordt geen onderscheid gemaakt tussen beschermde stads- en dorpsgezichten. Alle beschermde gezichten worden teruggegeven als beschermd stadsgezicht.
 
-> **Note**  
-> Wanneer een verblijfsobject wel bij het Kadaster als rijksmonument is geregistreerd, maar niet bij de Rijksdienst voor het Cultureel Erfgoed, wordt het `rijksmonument_nummer` gevuld met `ONTBREEKT_BIJ_RCE`.
+> [!NOTE]
+> Wanneer een verblijfsobject wel bij het Kadaster als rijksmonument is geregistreerd, maar niet bij de Rijksdienst voor het Cultureel Erfgoed, wordt het rijksmonument_nummer gevuld met `ONTBREEKT_BIJ_RCE`
 
 ## Installatie
 
