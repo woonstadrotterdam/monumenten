@@ -1,3 +1,5 @@
 # Monumenten
 
-Documentatie voor Monumenten package.
+```{include} README_link.md
+
+```
