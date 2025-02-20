@@ -13,8 +13,8 @@ from pandas import DataFrame
 from tqdm.asyncio import tqdm_asyncio
 
 from monumenten._api._cultureel_erfgoed import (
-    _query_beschermde_gebieden,
     _query_rijksmonumenten,
+    _query_beschermde_gezichten,
 )
 from monumenten._api._kadaster import _query_verblijfsobjecten
 
@@ -49,12 +49,15 @@ async def _process_batch(
         rijksmonumenten_taak, verblijfsobjecten_taak
     )
 
-    verblijfsobjecten_df = pd.DataFrame(verblijfsobjecten)
+    verblijfsobjecten_df = pd.DataFrame(verblijfsobjecten).astype(
+        {"identificatie": "string"}
+    )
 
     rijksmonumenten_df = pd.merge(
         pd.DataFrame(
             rijksmonumenten,
             columns=["identificatie", "rijksmonument_nummer"],
+            dtype="string",
         ),
         verblijfsobjecten_df[
             verblijfsobjecten_df["grondslagcode"].isin(["EWE", "EWD"])
@@ -93,23 +96,26 @@ async def _process_batch(
 
 
 @cached_stampede(ttl=60 * 60 * 24 * 7, noself=True)  # Cache resultaat voor 7 dagen
-async def _get_beschermde_gebieden(
+async def _get_beschermde_gezichten(
     session: aiohttp.ClientSession,
 ) -> gpd.GeoDataFrame:
-    """Haal beschermde gebieden op."""
-    beschermde_gebieden = await _query_beschermde_gebieden(session)
-    bg_df = gpd.GeoDataFrame()
+    """Haal beschermde gezichten op."""
+    beschermde_gezichten = await _query_beschermde_gezichten(session)
+    beschermde_gezichten_df = gpd.GeoDataFrame()
 
-    if not beschermde_gebieden:
-        raise ValueError("Geen beschermde gebieden gevonden")
+    if not beschermde_gezichten:
+        raise ValueError("Geen beschermde gezichten gevonden")
 
-    bg_df = pd.DataFrame(beschermde_gebieden)
-    bg_df["geometry"] = gpd.GeoSeries.from_wkt(bg_df["gezichtWKT"])
-    bg_df = gpd.GeoDataFrame(
-        bg_df[["beschermd_gezicht_naam", "geometry"]], geometry="geometry"
+    beschermde_gezichten_df = pd.DataFrame(beschermde_gezichten)
+    beschermde_gezichten_df["geometry"] = gpd.GeoSeries.from_wkt(
+        beschermde_gezichten_df["gezichtWKT"]
+    )
+    beschermde_gezichten_df = gpd.GeoDataFrame(
+        beschermde_gezichten_df[["beschermd_gezicht_naam", "geometry"]],
+        geometry="geometry",
     )
 
-    return bg_df
+    return beschermde_gezichten_df
 
 
 async def _query(
@@ -124,8 +130,8 @@ async def _query(
     Returns:
         pd.DataFrame: DataFrame met monumentinformatie
     """
-    # Load 'beschermde_gebieden' and convert to GeoDataFrame
-    bg_df = await _get_beschermde_gebieden(session)
+    # Load 'beschermde_gezichten' and convert to GeoDataFrame
+    beschermde_gezichten_df = await _get_beschermde_gezichten(session)
 
     rijksmonumenten_result = pd.DataFrame()
     verblijfsobjecten_in_beschermd_gezicht_result = pd.DataFrame()
@@ -138,7 +144,9 @@ async def _query(
     ]
 
     # Create tasks for each batch
-    tasks = [_process_batch(session, batch, bg_df) for batch in batches]
+    tasks = [
+        _process_batch(session, batch, beschermde_gezichten_df) for batch in batches
+    ]
 
     progress_bar = tqdm_asyncio(total=len(verblijfsobject_ids), disable=len(tasks) <= 1)
 
