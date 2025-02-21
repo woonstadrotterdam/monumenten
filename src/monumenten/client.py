@@ -37,10 +37,16 @@ class MonumentenClient:
         if self._owns_session and self._session:
             await self._session.close()
 
-    def _naar_referentiedata(self, row: pd.Series[bool]) -> List[Dict[str, str]]:
+    def _naar_referentiedata(self, row: pd.Series[bool]) -> List[Dict[str, object]]:
         statuses = []
         if row.is_rijksmonument:
-            statuses.append({"code": "RIJ", "naam": "Rijksmonument"})
+            statuses.append(
+                {
+                    "code": "RIJ",
+                    "naam": "Rijksmonument",
+                    "bron": row.rijksmonument_bron,
+                }
+            )
         if row.is_beschermd_gezicht:
             statuses.append({"code": "SGR", "naam": "Rijksbeschermd stadsgezicht"})
         if row.is_gemeentelijk_monument:
@@ -96,8 +102,7 @@ class MonumentenClient:
             .fillna("")
             .astype(str)
             .where(
-                (merged["rijksmonument_nummer"].notna())
-                & (merged["rijksmonument_nummer"] != "REGISTRATIE_ONTBREEKT_BIJ_RCE"),
+                merged["rijksmonument_nummer"].notna(),
                 None,
             ),
         )
@@ -105,8 +110,15 @@ class MonumentenClient:
         merged.insert(
             rijksmonument_nummer_position,
             "is_rijksmonument",
-            merged["rijksmonument_nummer"].notna(),
+            merged["rijksmonument_bron"].notna(),
         )
+
+        # verplaats rijksmonument_bron naar rijksmonument_nummer_position + 1
+        columns = merged.columns.tolist()
+        rijksmonument_bron_index = columns.index("rijksmonument_bron")
+        columns.pop(rijksmonument_bron_index)
+        columns.insert(rijksmonument_nummer_position + 1, "rijksmonument_bron")
+        merged = merged[columns]
 
         beschermd_gezicht_naam_position = merged.columns.get_loc(
             "beschermd_gezicht_naam"
@@ -159,6 +171,11 @@ class MonumentenClient:
         result = await self.process_from_df(df, "bag_verblijfsobject_id")
 
         result = result.replace({pd.NA: None, pd.NaT: None, np.nan: None})
+
+        if "rijksmonument_bron" in result.columns:
+            result["rijksmonument_bron"] = result["rijksmonument_bron"].apply(
+                lambda x: x.split(",") if pd.notna(x) else None
+            )
 
         if not to_vera:
             return cast(
