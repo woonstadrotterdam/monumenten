@@ -174,7 +174,7 @@ class MonumentenClient:
 
         if "rijksmonument_bron" in result.columns:
             result["rijksmonument_bron"] = result["rijksmonument_bron"].apply(
-                lambda x: x.split(",") if pd.notna(x) else None
+                lambda x: x.split(", ") if pd.notna(x) else None
             )
 
         if not to_vera:
