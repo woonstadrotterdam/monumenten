@@ -33,7 +33,9 @@ plugins:
         python:
           options:
             show_source: true
-  - include-markdown
+  - include-markdown:
+  - mknotebooks
 
 nav:
   - Home: index.md
+  - Tutorial: tutorial.ipynb
