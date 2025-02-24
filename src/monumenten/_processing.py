@@ -5,16 +5,17 @@ from __future__ import annotations
 import asyncio
 from typing import List, Tuple
 
-from aiocache import cached_stampede
 import aiohttp
 import geopandas as gpd
+import numpy as np
 import pandas as pd
+from aiocache import cached_stampede
 from pandas import DataFrame
 from tqdm.asyncio import tqdm_asyncio
 
 from monumenten._api._cultureel_erfgoed import (
-    _query_rijksmonumenten,
     _query_beschermde_gezichten,
+    _query_rijksmonumenten,
 )
 from monumenten._api._kadaster import _query_verblijfsobjecten
 
@@ -61,10 +62,34 @@ async def _process_batch(
         ),
         verblijfsobjecten_df[
             verblijfsobjecten_df["grondslagcode"].isin(["EWE", "EWD"])
-        ][["identificatie"]],
+        ][["identificatie", "grondslagcode"]],
         on="identificatie",
         how="outer",
-    ).fillna({"rijksmonument_nummer": "REGISTRATIE_ONTBREEKT_BIJ_RCE"})
+    )
+
+    # voeg bron voor rijksmonumenten toe in de kolom rijksmonument_bron
+    condition_choice_map = {
+        "RCE, Kadaster": (
+            rijksmonumenten_df["rijksmonument_nummer"].notna()
+            & rijksmonumenten_df["grondslagcode"].isin(["EWE", "EWD"])
+        ),
+        "RCE": (
+            rijksmonumenten_df["rijksmonument_nummer"].notna()
+            & ~rijksmonumenten_df["grondslagcode"].isin(["EWE", "EWD"])
+        ),
+        "Kadaster": (
+            rijksmonumenten_df["rijksmonument_nummer"].isna()
+            & rijksmonumenten_df["grondslagcode"].isin(["EWE", "EWD"])
+        ),
+    }
+
+    rijksmonumenten_df["rijksmonument_bron"] = np.select(
+        list(condition_choice_map.values()),
+        list(condition_choice_map.keys()),
+        default="",
+    )
+
+    rijksmonumenten_df.drop(columns=["grondslagcode"], inplace=True)
 
     # Process gemeentelijke monumenten
     gemeentelijke_monumenten_df = verblijfsobjecten_df[
