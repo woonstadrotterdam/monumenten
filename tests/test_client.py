@@ -13,11 +13,11 @@ async def client():
 @pytest.mark.asyncio
 async def test_process_from_list(client: MonumentenClient):
     bag_verblijfsobject_ids = [
-        "0599010000360091",
-        "0599010000486642",
-        "0599010000281115",
-        "0599010000076715",
-        "0599010000146141",
+        "0599010000360091",  # rijksmonument
+        "0599010000486642",  # non-monument
+        "0599010000281115",  # beschermd gezicht
+        "0599010000076715",  # gemeentelijk monument
+        "0599010000146141",  # beschermd stads gezicht en gemeentelijk monument
         "0232010000002251",  # gebouw ligt volgens kadaster op meerdere percelen
     ]
 
@@ -93,11 +93,12 @@ async def test_process_from_list(client: MonumentenClient):
 @pytest.mark.asyncio
 async def test_process_from_list_vera(client: MonumentenClient):
     bag_verblijfsobject_ids = [
-        "0599010000360091",
-        "0599010000486642",
-        "0599010000281115",
-        "0599010000076715",
-        "0599010000146141",
+        "0599010000360091",  # rijksmonument
+        "0599010000486642",  # non-monument
+        "0599010000281115",  # beschermd gezicht
+        "0599010000076715",  # gemeentelijk monument
+        "0599010000146141",  # beschermd stads gezicht en gemeentelijk monument
+        "0599010000341377",  # rijksmonument volgens kadaster maar niet RCE
     ]
 
     result = await client.process_from_list(bag_verblijfsobject_ids, to_vera=True)
