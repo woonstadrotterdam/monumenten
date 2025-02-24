@@ -103,7 +103,7 @@ class MonumentenClient:
             .astype(str)
             .where(
                 merged["rijksmonument_nummer"].notna(),
-                None,
+                pd.NA,
             ),
         )
 
@@ -150,7 +150,9 @@ class MonumentenClient:
             merged["grondslag_gemeentelijk_monument"].notna(),
         )
 
-        return merged
+        return merged.replace(
+            [np.nan, None, ""], pd.NA
+        )  # gebruik pd.NA als consistente waarde voor missing values
 
     async def process_from_list(
         self, verblijfsobject_ids: List[str], to_vera: bool = False
