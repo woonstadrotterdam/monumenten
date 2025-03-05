@@ -34,4 +34,4 @@ pip install monumenten
 
 <!-- snippet-end -->
 
-Zie [readthedocs](https://monumenten.readthedocs.io/nl/latest/tutorial.html).
+Zie [readthedocs](https://monumenten.readthedocs.io/nl/latest/tutorial/).
