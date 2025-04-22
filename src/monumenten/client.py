@@ -151,7 +151,8 @@ class MonumentenClient:
         )
 
         return merged.replace(
-            [np.nan, None, ""], pd.NA
+            [np.nan, None, ""],  # type: ignore[list-item]
+            pd.NA,
         )  # gebruik pd.NA als consistente waarde voor missing values
 
     async def process_from_list(
