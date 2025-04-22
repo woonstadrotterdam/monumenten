@@ -150,10 +150,9 @@ class MonumentenClient:
             merged["grondslag_gemeentelijk_monument"].notna(),
         )
 
-        return merged.replace(
-            [np.nan, None, ""],  # type: ignore[list-item]
-            pd.NA,
-        )  # gebruik pd.NA als consistente waarde voor missing values
+        merged = merged.replace([np.nan, ""], pd.NA)
+        merged = merged.replace({None: pd.NA})
+        return merged
 
     async def process_from_list(
         self, verblijfsobject_ids: List[str], to_vera: bool = False
