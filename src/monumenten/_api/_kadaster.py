@@ -14,9 +14,9 @@ prefix geof: <http://www.opengis.net/def/function/geosparql/>
 
 select distinct ?adres ?identificatie ?verblijfsobjectWKT ?grondslagcode ?grondslag_gemeentelijk_monument
 where {{
-  filter(?verblijfsobjectIri in (
-    {uri_list})
-  )
+  values ?verblijfsobjectIri {{
+    {uri_list}
+  }}
 
   ?adres prov:wasDerivedFrom ?verblijfsobjectIri;
           geo:hasGeometry/geo:asWKT ?verblijfsobjectWKT;
@@ -60,7 +60,7 @@ async def _query_verblijfsobjecten(
     session: aiohttp.ClientSession, identificaties: List[str]
 ) -> List[Dict[str, Any]]:
     async with _get_semaphore(asyncio.get_running_loop()):
-        uri_list = ", ".join(
+        uri_list = " ".join(
             f"<https://bag.basisregistraties.overheid.nl/id/verblijfsobject/{identificatie}>"
             for identificatie in identificaties
         )
