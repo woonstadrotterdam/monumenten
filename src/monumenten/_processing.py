@@ -55,7 +55,7 @@ async def _process_batch(
 
     if not verblijfsobjecten:
         raise ValueError(
-            "Geen geldige BAG verblijfsobjecten gevonden voor de opgegeven IDs"
+            "Geen geldige BAG verblijfsobjecten gevonden voor een batch van verblijfsobject ID's"
         )
 
     verblijfsobjecten_df = pd.DataFrame(verblijfsobjecten).astype(
