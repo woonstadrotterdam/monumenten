@@ -247,3 +247,21 @@ async def test_process_from_df(client: MonumentenClient):
     assert pd.isna(result.iloc[5]["beschermd_gezicht_naam"])
     assert bool(result.iloc[5]["is_gemeentelijk_monument"]) is False
     assert pd.isna(result.iloc[5]["grondslag_gemeentelijk_monument"])
+
+
+@pytest.mark.asyncio
+async def test_process_from_list_invalid_ids(client: MonumentenClient):
+    bag_verblijfsobject_ids = ["123"]
+
+    # test both from_list and from_df
+
+    # from_list
+    with pytest.raises(ValueError):
+        await client.process_from_list(bag_verblijfsobject_ids)
+
+    # from_df
+    with pytest.raises(ValueError):
+        await client.process_from_df(
+            df=pd.DataFrame({"bag_verblijfsobject_id": ["123"]}),
+            verblijfsobject_id_col="bag_verblijfsobject_id",
+        )

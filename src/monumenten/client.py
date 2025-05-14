@@ -70,8 +70,19 @@ class MonumentenClient:
         Raises:
             RuntimeError: Als de client niet als context manager wordt gebruikt
         """
+
         if not self._session:
             raise RuntimeError("Client must be used as a context manager")
+
+        # verblijfsobject_id's moeten 16 cijfers lang zijn, en cijfers 5 en 6 moeten '01' zijn
+        ids = df[verblijfsobject_id_col]
+        invalid_verblijf_object_ids = (
+            (ids.str.len() != 16) | (~ids.str.isdigit()) | (ids.str.slice(4, 6) != "01")
+        )
+        if invalid_verblijf_object_ids.any():
+            raise ValueError(
+                f"Onjuiste verblijfsobject ID's gevonden, bijvoorbeeld: '{df[invalid_verblijf_object_ids].iloc[0, 0]}'"
+            )
 
         results = await _query(
             self._session, df[verblijfsobject_id_col].drop_duplicates().tolist()
