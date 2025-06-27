@@ -74,10 +74,12 @@ class MonumentenClient:
         if not self._session:
             raise RuntimeError("Client must be used as a context manager")
 
-        # verblijfsobject_id's moeten 16 cijfers lang zijn, en cijfers 5 en 6 moeten '01' zijn
+        # verblijfsobject_id's moeten 16 cijfers lang zijn, en cijfers 5 en 6 moeten '01', '02' of '03' zijn
         ids = df[verblijfsobject_id_col]
         invalid_verblijf_object_ids = (
-            (ids.str.len() != 16) | (~ids.str.isdigit()) | (ids.str.slice(4, 6) != "01")
+            (ids.str.len() != 16)
+            | (~ids.str.isdigit())
+            | (~ids.str.slice(4, 6).isin(["01", "02", "03"]))
         )
         if invalid_verblijf_object_ids.any():
             raise ValueError(

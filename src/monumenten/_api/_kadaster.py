@@ -12,31 +12,34 @@ prefix prov: <http://www.w3.org/ns/prov#>
 prefix imx: <http://modellen.geostandaarden.nl/def/imx-geo#>
 prefix geof: <http://www.opengis.net/def/function/geosparql/>
 
-select distinct ?adres ?identificatie ?verblijfsobjectWKT ?grondslagcode ?grondslag_gemeentelijk_monument
+select distinct ?identificatie ?verblijfsobjectWKT ?grondslagcode ?grondslag_gemeentelijk_monument
 where {{
   values ?verblijfsobjectIri {{
     {uri_list}
   }}
 
   ?adres prov:wasDerivedFrom ?verblijfsobjectIri;
-          geo:hasGeometry/geo:asWKT ?verblijfsobjectWKT;
-          imx:isAdresVanGebouw ?gebouw.
-  ?gebouw imx:bevindtZichOpPerceel ?perceel.
-  ?perceel geo:hasGeometry/geo:asWKT ?perceelWKT.
-  FILTER (geof:sfWithin(?verblijfsobjectWKT, ?perceelWKT))
+         imx:isHoofdadres true;
+         geo:hasGeometry/geo:asWKT ?verblijfsobjectWKT.
 
-  optional {{
-    ?beperking imx:isBeperkingOpPerceel ?perceel.
-    ?beperking geo:hasGeometry/geo:asWKT ?beperkingWKT.
-    ?beperking imx:grondslagcode ?grondslagcode.
-    ?beperking imx:grondslag ?grondslag_gemeentelijk_monument.
-    values ?grondslagcode {{
-      "GG"  # Besluit monument, Gemeentewet
-      "GWA" # Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift)
-      "EWE" # Erfgoedwet: Afschrift inschrijving monument of archeologisch monument in rijksmonumentenregister door minister OCW
-      "EWD" # Erfgoedwet: Toezending ontwerpbesluit aanwijzing rijksmonument door minister OCW (voorbescherming)
+  OPTIONAL {{
+    ?adres imx:isAdresVanGebouw ?gebouw.
+    ?gebouw imx:bevindtZichOpPerceel ?perceel.
+    ?perceel geo:hasGeometry/geo:asWKT ?perceelWKT.
+    FILTER (geof:sfWithin(?verblijfsobjectWKT, ?perceelWKT))
+    OPTIONAL {{
+      ?beperking imx:isBeperkingOpPerceel ?perceel.
+      ?beperking geo:hasGeometry/geo:asWKT ?beperkingWKT.
+      ?beperking imx:grondslagcode ?grondslagcode.
+      ?beperking imx:grondslag ?grondslag_gemeentelijk_monument.
+      values ?grondslagcode {{
+        "GG"  # Besluit monument, Gemeentewet
+        "GWA" # Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift)
+        "EWE" # Erfgoedwet: Afschrift inschrijving monument of archeologisch monument in rijksmonumentenregister door minister OCW
+        "EWD" # Erfgoedwet: Toezending ontwerpbesluit aanwijzing rijksmonument door minister OCW (voorbescherming)
+      }}
+      FILTER (geof:sfWithin(?verblijfsobjectWKT, ?beperkingWKT))
     }}
-    FILTER (geof:sfWithin(?verblijfsobjectWKT, ?beperkingWKT))
   }}
 
   bind(strafter(str(?verblijfsobjectIri), "https://bag.basisregistraties.overheid.nl/id/verblijfsobject/") as ?identificatie)
