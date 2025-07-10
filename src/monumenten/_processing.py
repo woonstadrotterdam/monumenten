@@ -37,6 +37,9 @@ async def _process_batch(
     Returns:
         Tuple[DataFrame, DataFrame, DataFrame, int]: Tuple met rijksmonumenten,
             beschermde gezichten, gemeentelijke monumenten en aantal verwerkte objecten
+
+    Raises:
+        ValueError: Als er geen geldige BAG verblijfsobjecten gevonden worden
     """
     # Get the current event loop
     loop = asyncio.get_running_loop()
@@ -49,6 +52,11 @@ async def _process_batch(
     rijksmonumenten, verblijfsobjecten = await asyncio.gather(
         rijksmonumenten_taak, verblijfsobjecten_taak
     )
+
+    if not verblijfsobjecten:
+        raise ValueError(
+            "Geen geldige BAG verblijfsobjecten gevonden voor een batch van verblijfsobject ID's"
+        )
 
     verblijfsobjecten_df = pd.DataFrame(verblijfsobjecten).astype(
         {"identificatie": "string"}
