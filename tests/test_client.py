@@ -265,3 +265,94 @@ async def test_process_from_list_invalid_ids(client: MonumentenClient):
             df=pd.DataFrame({"bag_verblijfsobject_id": ["123"]}),
             verblijfsobject_id_col="bag_verblijfsobject_id",
         )
+
+
+@pytest.mark.asyncio
+async def test_process_from_list_duplicate_handling(client: MonumentenClient):
+    bag_verblijfsobject_ids = [
+        "1916010000074542"
+    ]  # verblijfsobject met zowel EWE als GWA grondslagcode
+
+    result = await client.process_from_list(bag_verblijfsobject_ids)
+
+    assert len(result) == 1, "Niet voor elk verblijfsobject een resultaat"
+    assert "1916010000074542" in result
+
+    # Test verblijfsobject met meerdere monumenttypes
+    assert isinstance(result["1916010000074542"], dict)
+    assert result["1916010000074542"]["is_rijksmonument"] is True
+    assert result["1916010000074542"]["is_gemeentelijk_monument"] is True
+    assert result["1916010000074542"]["rijksmonument_bron"] == ["Kadaster"]
+    assert result["1916010000074542"]["rijksmonument_nummer"] is None
+    assert result["1916010000074542"]["rijksmonument_url"] is None
+    assert result["1916010000074542"]["grondslag_gemeentelijk_monument"] is not None
+    assert (
+        "Gemeentewet" in result["1916010000074542"]["grondslag_gemeentelijk_monument"]
+    )
+    assert result["1916010000074542"]["is_beschermd_gezicht"] is True
+    assert result["1916010000074542"]["beschermd_gezicht_naam"] is not None
+    assert "Leidschendam" in result["1916010000074542"]["beschermd_gezicht_naam"]
+
+
+@pytest.mark.asyncio
+async def test_process_from_list_duplicate_handling_vera(client: MonumentenClient):
+    bag_verblijfsobject_ids = [
+        "1916010000074542"
+    ]  # verblijfsobject met zowel EWE als GWA grondslagcode
+
+    result = await client.process_from_list(bag_verblijfsobject_ids, to_vera=True)
+
+    assert len(result) == 1, "Niet voor elk verblijfsobject een resultaat"
+    assert "1916010000074542" in result
+
+    # Test VERA output voor verblijfsobject met meerdere monumenttypes
+    assert isinstance(result["1916010000074542"], list)
+    assert len(result["1916010000074542"]) >= 2  # minstens 2 monumenttypes
+
+    # Controleer voor rijksmonument
+    rijksmonument_found = any(
+        item["code"] == "RIJ" for item in result["1916010000074542"]
+    )
+    assert rijksmonument_found
+
+    # Controleer voor gemeentelijk monument
+    gemeentelijk_monument_found = any(
+        item["code"] == "GEM" for item in result["1916010000074542"]
+    )
+    assert gemeentelijk_monument_found
+
+    # Controleer voor beschermd gezicht
+    beschermd_gezicht_found = any(
+        item["code"] == "SGR" for item in result["1916010000074542"]
+    )
+    assert beschermd_gezicht_found
+
+
+@pytest.mark.asyncio
+async def test_process_from_df_duplicate_handling(client: MonumentenClient):
+    input_df = pd.DataFrame(
+        {
+            "bag_verblijfsobject_id": [
+                "1916010000074542"
+            ]  # verblijfsobject met zowel EWE als GWA grondslagcode
+        }
+    )
+
+    result = await client.process_from_df(
+        df=input_df, verblijfsobject_id_col="bag_verblijfsobject_id"
+    )
+
+    assert isinstance(result, pd.DataFrame)
+    assert len(result) == 1, "Niet voor elk verblijfsobject een resultaat"
+
+    # Test verblijfsobject met meerdere monumenttypes
+    row = result.iloc[0]
+    assert bool(row["is_rijksmonument"]) is True
+    assert bool(row["is_gemeentelijk_monument"]) is True
+    assert row["rijksmonument_bron"] == "Kadaster"
+    assert pd.isna(row["rijksmonument_nummer"])
+    assert not pd.isna(row["grondslag_gemeentelijk_monument"])
+    assert "Gemeentewet" in row["grondslag_gemeentelijk_monument"]
+    assert bool(row["is_beschermd_gezicht"]) is True
+    assert not pd.isna(row["beschermd_gezicht_naam"])
+    assert "Leidschendam" in row["beschermd_gezicht_naam"]

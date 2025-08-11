@@ -205,6 +205,25 @@ async def _query(
 
     progress_bar.close()
 
+    # The filtering in _process_batch already separates the data correctly:
+    # - EWE/EWD rows go to rijksmonumenten_df
+    # - GG/GWA rows go to gemeentelijke_monumenten_df
+    # We only remove truly duplicate rows (all columns identical) to preserve unique information
+
+    if not rijksmonumenten_result.empty:
+        rijksmonumenten_result = rijksmonumenten_result.drop_duplicates(keep="first")
+
+    if not verblijfsobjecten_in_beschermd_gezicht_result.empty:
+        # Deduplicate beschermd gezicht data since multiple rows for same identificatie don't add value
+        verblijfsobjecten_in_beschermd_gezicht_result = (
+            verblijfsobjecten_in_beschermd_gezicht_result.drop_duplicates(keep="first")
+        )
+
+    if not gemeentelijke_monumenten_result.empty:
+        gemeentelijke_monumenten_result = (
+            gemeentelijke_monumenten_result.drop_duplicates(keep="first")
+        )
+
     result = rijksmonumenten_result.merge(
         verblijfsobjecten_in_beschermd_gezicht_result, on="identificatie", how="outer"
     ).merge(gemeentelijke_monumenten_result, on="identificatie", how="outer")

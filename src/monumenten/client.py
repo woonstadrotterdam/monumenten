@@ -193,13 +193,24 @@ class MonumentenClient:
             )
 
         if not to_vera:
+            # Ensure unique index before converting to dictionary
+            result_indexed = result.set_index("bag_verblijfsobject_id")
+            if result_indexed.index.duplicated().any():
+                # If there are duplicates, keep the first occurrence
+                result_indexed = result_indexed[
+                    ~result_indexed.index.duplicated(keep="first")
+                ]
             return cast(
                 Dict[str, Dict[str, Any]],
-                result.set_index("bag_verblijfsobject_id").to_dict(orient="index"),
+                result_indexed.to_dict(orient="index"),
             )
 
-        return (
-            result.set_index("bag_verblijfsobject_id")
-            .apply(self._naar_referentiedata, axis=1)
-            .to_dict()
-        )
+        # Ensure unique index before converting to dictionary
+        result_indexed = result.set_index("bag_verblijfsobject_id")
+        if result_indexed.index.duplicated().any():
+            # If there are duplicates, keep the first occurrence
+            result_indexed = result_indexed[
+                ~result_indexed.index.duplicated(keep="first")
+            ]
+
+        return result_indexed.apply(self._naar_referentiedata, axis=1).to_dict()
