@@ -356,3 +356,104 @@ async def test_process_from_df_duplicate_handling(client: MonumentenClient):
     assert bool(row["is_beschermd_gezicht"]) is True
     assert not pd.isna(row["beschermd_gezicht_naam"])
     assert "Leidschendam" in row["beschermd_gezicht_naam"]
+
+
+@pytest.mark.asyncio
+async def test_process_from_list_multiple_beschermd_gezichten(client: MonumentenClient):
+    """Test verblijfsobject met meerdere beschermde gezichten en gemeentelijk monument."""
+    bag_verblijfsobject_ids = [
+        "0014010011011647"  # verblijfsobject met meerdere beschermde gezichten en gemeentelijk monument
+    ]
+
+    result = await client.process_from_list(bag_verblijfsobject_ids)
+
+    assert len(result) == 1, "Niet voor elk verblijfsobject een resultaat"
+    assert "0014010011011647" in result
+
+    # Test verblijfsobject met meerdere beschermde gezichten
+    assert isinstance(result["0014010011011647"], dict)
+    assert result["0014010011011647"]["is_rijksmonument"] is False
+    assert result["0014010011011647"]["is_gemeentelijk_monument"] is True
+    assert result["0014010011011647"]["is_beschermd_gezicht"] is True
+
+    # Controleer dat beschermd gezicht naam concatenated is
+    beschermd_gezicht_naam = result["0014010011011647"]["beschermd_gezicht_naam"]
+    assert beschermd_gezicht_naam is not None
+    assert "Groningen" in beschermd_gezicht_naam
+    assert "Schildersbuurt" in beschermd_gezicht_naam
+    assert " | " in beschermd_gezicht_naam  # Controleer concatenation
+
+    # Controleer gemeentelijk monument details
+    assert result["0014010011011647"]["grondslag_gemeentelijk_monument"] is not None
+    assert (
+        "Gemeentewet" in result["0014010011011647"]["grondslag_gemeentelijk_monument"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_from_list_multiple_beschermd_gezichten_vera(
+    client: MonumentenClient,
+):
+    """Test VERA output voor verblijfsobject met meerdere beschermde gezichten."""
+    bag_verblijfsobject_ids = [
+        "0014010011011647"  # verblijfsobject met meerdere beschermde gezichten en gemeentelijk monument
+    ]
+
+    result = await client.process_from_list(bag_verblijfsobject_ids, to_vera=True)
+
+    assert len(result) == 1, "Niet voor elk verblijfsobject een resultaat"
+    assert "0014010011011647" in result
+
+    # Test VERA output voor verblijfsobject met meerdere beschermde gezichten
+    assert isinstance(result["0014010011011647"], list)
+    assert (
+        len(result["0014010011011647"]) == 2
+    )  # beschermd gezicht + gemeentelijk monument
+
+    # Controleer voor beschermd gezicht (SGR)
+    beschermd_gezicht_found = any(
+        item["code"] == "SGR" for item in result["0014010011011647"]
+    )
+    assert beschermd_gezicht_found
+
+    # Controleer voor gemeentelijk monument (GEM)
+    gemeentelijk_monument_found = any(
+        item["code"] == "GEM" for item in result["0014010011011647"]
+    )
+    assert gemeentelijk_monument_found
+
+
+@pytest.mark.asyncio
+async def test_process_from_df_multiple_beschermd_gezichten(client: MonumentenClient):
+    """Test DataFrame output voor verblijfsobject met meerdere beschermde gezichten."""
+    input_df = pd.DataFrame(
+        {
+            "bag_verblijfsobject_id": [
+                "0014010011011647"  # verblijfsobject met meerdere beschermde gezichten en gemeentelijk monument
+            ]
+        }
+    )
+
+    result = await client.process_from_df(
+        df=input_df, verblijfsobject_id_col="bag_verblijfsobject_id"
+    )
+
+    assert isinstance(result, pd.DataFrame)
+    assert len(result) == 1, "Niet voor elk verblijfsobject een resultaat"
+
+    # Test verblijfsobject met meerdere beschermde gezichten
+    row = result.iloc[0]
+    assert bool(row["is_rijksmonument"]) is False
+    assert bool(row["is_gemeentelijk_monument"]) is True
+    assert bool(row["is_beschermd_gezicht"]) is True
+
+    # Controleer dat beschermd gezicht naam concatenated is
+    beschermd_gezicht_naam = row["beschermd_gezicht_naam"]
+    assert not pd.isna(beschermd_gezicht_naam)
+    assert "Groningen" in beschermd_gezicht_naam
+    assert "Schildersbuurt" in beschermd_gezicht_naam
+    assert ", " in beschermd_gezicht_naam  # Controleer concatenation
+
+    # Controleer gemeentelijk monument details
+    assert not pd.isna(row["grondslag_gemeentelijk_monument"])
+    assert "Gemeentewet" in row["grondslag_gemeentelijk_monument"]

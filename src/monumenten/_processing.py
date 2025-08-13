@@ -214,9 +214,17 @@ async def _query(
         rijksmonumenten_result = rijksmonumenten_result.drop_duplicates(keep="first")
 
     if not verblijfsobjecten_in_beschermd_gezicht_result.empty:
-        # Deduplicate beschermd gezicht data since multiple rows for same identificatie don't add value
+        # Aggregate beschermd gezicht names for the same identificatie
         verblijfsobjecten_in_beschermd_gezicht_result = (
-            verblijfsobjecten_in_beschermd_gezicht_result.drop_duplicates(keep="first")
+            verblijfsobjecten_in_beschermd_gezicht_result.groupby("identificatie")
+            .agg(
+                {
+                    "beschermd_gezicht_naam": lambda x: ", ".join(x.dropna().unique())
+                    if x.dropna().any()
+                    else None
+                }
+            )
+            .reset_index()
         )
 
     if not gemeentelijke_monumenten_result.empty:
