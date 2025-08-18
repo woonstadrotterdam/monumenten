@@ -381,7 +381,7 @@ async def test_process_from_list_multiple_beschermd_gezichten(client: Monumenten
     assert beschermd_gezicht_naam is not None
     assert "Groningen" in beschermd_gezicht_naam
     assert "Schildersbuurt" in beschermd_gezicht_naam
-    assert " | " in beschermd_gezicht_naam  # Controleer concatenation
+    assert ", " in beschermd_gezicht_naam  # Controleer concatenation
 
     # Controleer gemeentelijk monument details
     assert result["0014010011011647"]["grondslag_gemeentelijk_monument"] is not None
