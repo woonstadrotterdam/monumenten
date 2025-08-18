@@ -191,20 +191,6 @@ class MonumentenClient:
             result["rijksmonument_bron"] = result["rijksmonument_bron"].apply(
                 lambda x: x.split(", ") if pd.notna(x) else None
             )
-
-        if not to_vera:
-            # Ensure unique index before converting to dictionary
-            result_indexed = result.set_index("bag_verblijfsobject_id")
-            if result_indexed.index.duplicated().any():
-                # If there are duplicates, keep the first occurrence
-                result_indexed = result_indexed[
-                    ~result_indexed.index.duplicated(keep="first")
-                ]
-            return cast(
-                Dict[str, Dict[str, Any]],
-                result_indexed.to_dict(orient="index"),
-            )
-
         # Ensure unique index before converting to dictionary
         result_indexed = result.set_index("bag_verblijfsobject_id")
         if result_indexed.index.duplicated().any():
@@ -212,5 +198,11 @@ class MonumentenClient:
             result_indexed = result_indexed[
                 ~result_indexed.index.duplicated(keep="first")
             ]
+
+        if not to_vera:
+            return cast(
+                Dict[str, Dict[str, Any]],
+                result_indexed.to_dict(orient="index"),
+            )
 
         return result_indexed.apply(self._naar_referentiedata, axis=1).to_dict()
