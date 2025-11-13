@@ -14,10 +14,10 @@ _CULTUREEL_ERFGOED_SPARQL_ENDPOINT = (
 _RIJKSMONUMENTEN_QUERY_TEMPLATE = """
 PREFIX ceo:<https://linkeddata.cultureelerfgoed.nl/def/ceo#>
 PREFIX bag:<http://bag.basisregistraties.overheid.nl/bag/id/>
-PREFIX rn:<https://data.cultureelerfgoed.nl/term/id/rn/>
+PREFIX rn2:<https://data.cultureelerfgoed.nl/term/id/rn/2/>
 SELECT ?identificatie (MAX(?nummer) as ?rijksmonument_nummer)
 WHERE {{
-    ?monument ceo:heeftJuridischeStatus rn:b2d9a59a-fe1e-4552-9a05-3c2acddff864 ;
+    ?monument ceo:heeftJuridischeStatus rn2:b2d9a59a-fe1e-4552-9a05-3c2acddff864 ;
               ceo:rijksmonumentnummer ?nummer ;
               ceo:heeftBasisregistratieRelatie ?basisregistratieRelatie .
     ?basisregistratieRelatie ceo:heeftBAGRelatie ?bagRelatie .
@@ -29,13 +29,13 @@ GROUP BY ?identificatie
 
 _BESCHERMDE_GEZICHTEN_QUERY = """
 PREFIX ceo:<https://linkeddata.cultureelerfgoed.nl/def/ceo#>
-PREFIX rn:<https://data.cultureelerfgoed.nl/term/id/rn/>
+PREFIX rn2:<https://data.cultureelerfgoed.nl/term/id/rn/2/>
 PREFIX geo: <http://www.opengis.net/ont/geosparql#>
 SELECT DISTINCT ?gezicht ?beschermd_gezicht_naam ?gezichtWKT
 WHERE {{
   ?gezicht
       ceo:heeftGeometrie ?gezichtGeometrie ;
-      ceo:heeftGezichtsstatus rn:fd968529-bf70-4afa-8564-7c6c2fcfcc54;
+      ceo:heeftGezichtsstatus rn2:fd968529-bf70-4afa-8564-7c6c2fcfcc54;
       ceo:heeftNaam/ceo:naam ?beschermd_gezicht_naam.
   ?gezichtGeometrie geo:asWKT ?gezichtWKT.
 }}
