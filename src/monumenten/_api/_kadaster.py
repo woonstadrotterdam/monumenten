@@ -6,7 +6,7 @@ import aiohttp
 
 # New endpoints following the BAG LV + KKG two-stage approach
 _BAG_LV_ENDPOINT = "https://api.labs.kadaster.nl/datasets/bag/lv/services/baglv/sparql"
-_KKG_ENDPOINT = "https://api.labs.kadaster.nl/datasets/kadaster/kkg/services/kkg/sparql"
+_KKG_ENDPOINT = "https://data.kkg.kadaster.nl/service/sparql"
 
 # Stage 1 – BAG LV: verblijfsobject ID -> Nummeraanduiding URI
 _BAG_NUMMERAANDUIDING_QUERY_TEMPLATE = """
