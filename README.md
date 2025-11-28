@@ -183,11 +183,11 @@ flowchart TB
 
 ### SPARQL Endpoints
 
-| Bron             | Endpoint                                                                 |
-| ---------------- | ------------------------------------------------------------------------ |
-| **BAG LV**       | `https://api.labs.kadaster.nl/datasets/bag/lv/services/baglv/sparql`     |
-| **Kadaster KKG** | `https://api.labs.kadaster.nl/datasets/kadaster/kkg/services/kkg/sparql` |
-| **RCE**          | `https://api.linkeddata.cultureelerfgoed.nl/datasets/rce/cho/sparql`     |
+| Bron             | Endpoint                                                             |
+| ---------------- | -------------------------------------------------------------------- |
+| **BAG LV**       | `https://api.labs.kadaster.nl/datasets/bag/lv/services/baglv/sparql` |
+| **Kadaster KKG** | `https://data.kkg.kadaster.nl/service/sparql`                        |
+| **RCE**          | `https://api.linkeddata.cultureelerfgoed.nl/datasets/rce/cho/sparql` |
 
 ## Tutorial
 
