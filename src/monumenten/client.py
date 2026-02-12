@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Dict, List, Optional, Union, cast
 
 import aiohttp
@@ -82,15 +83,18 @@ class MonumentenClient:
             | (~ids.str.slice(4, 6).isin(["01", "02", "03"]))
         )
         if invalid_verblijf_object_ids.any():
-            raise ValueError(
-                f"Onjuiste verblijfsobject ID's gevonden, bijvoorbeeld: '{df[invalid_verblijf_object_ids].iloc[0, 0]}'"
+            invalid_ids = ids[invalid_verblijf_object_ids].drop_duplicates().tolist()
+            warnings.warn(
+                f"{len(invalid_ids)} onjuiste verblijfsobject ID's gevonden: {invalid_ids}"
             )
 
+        valid_id_df = df.loc[~invalid_verblijf_object_ids]
         results = await _query(
-            self._session, df[verblijfsobject_id_col].drop_duplicates().tolist()
+            self._session,
+            valid_id_df.loc[:, verblijfsobject_id_col].drop_duplicates().tolist(),
         )
         merged = pd.merge(
-            df,
+            valid_id_df,
             results,
             left_on=verblijfsobject_id_col,
             right_on="identificatie",
