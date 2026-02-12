@@ -122,7 +122,7 @@ class MonumentenClient:
             .astype(str)
             .where(
                 merged["rijksmonument_nummer"].notna(),
-                pd.NA,
+                np.nan,
             ),
         )
 
@@ -211,4 +211,7 @@ class MonumentenClient:
                 result_indexed.to_dict(orient="index"),
             )
 
-        return result_indexed.apply(self._naar_referentiedata, axis=1).to_dict()
+        return cast(
+            Dict[str, List[Dict[str, str]]],
+            result_indexed.apply(self._naar_referentiedata, axis=1).to_dict(),
+        )
