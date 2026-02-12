@@ -1,6 +1,7 @@
 import pandas as pd
 import pytest
 import pytest_asyncio
+
 from monumenten import MonumentenClient
 
 
@@ -251,20 +252,52 @@ async def test_process_from_df(client: MonumentenClient):
 
 @pytest.mark.asyncio
 async def test_process_from_list_invalid_ids(client: MonumentenClient):
+    """Only invalid IDs trigger a warning and then ValueError (no valid rows to process)."""
     bag_verblijfsobject_ids = ["123"]
 
-    # test both from_list and from_df
+    # from_list: expect warning then ValueError
+    with pytest.warns(Warning, match="onjuiste verblijfsobject"):
+        with pytest.raises(ValueError, match="Geen enkel geldig"):
+            await client.process_from_list(bag_verblijfsobject_ids)
 
-    # from_list
-    with pytest.raises(ValueError):
-        await client.process_from_list(bag_verblijfsobject_ids)
+    # from_df: expect warning then ValueError
+    with pytest.warns(Warning, match="onjuiste verblijfsobject"):
+        with pytest.raises(ValueError, match="Geen enkel geldig"):
+            await client.process_from_df(
+                df=pd.DataFrame({"bag_verblijfsobject_id": ["123"]}),
+                verblijfsobject_id_col="bag_verblijfsobject_id",
+            )
 
-    # from_df
-    with pytest.raises(ValueError):
-        await client.process_from_df(
-            df=pd.DataFrame({"bag_verblijfsobject_id": ["123"]}),
-            verblijfsobject_id_col="bag_verblijfsobject_id",
+
+@pytest.mark.asyncio
+async def test_process_from_df_invalid_ids_warning_and_filtering(
+    client: MonumentenClient,
+):
+    """Mixed valid and invalid IDs: warning is emitted and only valid rows are returned."""
+    input_df = pd.DataFrame(
+        {
+            "bag_verblijfsobject_id": [
+                "0599010000486642",  # valid (non-monument)
+                "123",  # invalid: wrong length
+                "tooshort",  # invalid: non-digit
+            ]
+        }
+    )
+
+    with pytest.warns(Warning, match="onjuiste verblijfsobject") as record:
+        result = await client.process_from_df(
+            df=input_df, verblijfsobject_id_col="bag_verblijfsobject_id"
         )
+
+    assert len(record) == 1
+    msg = str(record[0].message)
+    assert "2 onjuiste verblijfsobject ID's" in msg or "2" in msg
+    assert "123" in msg
+    assert "tooshort" in msg
+
+    assert isinstance(result, pd.DataFrame)
+    assert len(result) == 1
+    assert result.iloc[0]["bag_verblijfsobject_id"] == "0599010000486642"
 
 
 @pytest.mark.asyncio

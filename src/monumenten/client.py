@@ -89,6 +89,8 @@ class MonumentenClient:
             )
 
         valid_id_df = df.loc[~invalid_verblijf_object_ids]
+        if valid_id_df.empty:
+            raise ValueError("Geen enkel geldig verblijfsobject ID gevonden")
         results = await _query(
             self._session,
             valid_id_df.loc[:, verblijfsobject_id_col].drop_duplicates().tolist(),
