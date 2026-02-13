@@ -122,7 +122,7 @@ class MonumentenClient:
             .astype(str)
             .where(
                 merged["rijksmonument_nummer"].notna(),
-                pd.NA,
+                np.nan,
             ),
         )
 
