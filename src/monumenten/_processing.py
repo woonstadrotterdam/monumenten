@@ -215,15 +215,14 @@ async def _query(
 
     if not verblijfsobjecten_in_beschermd_gezicht_result.empty:
         # Aggregate beschermd gezicht names for the same identificatie
+        def _join_beschermd_gezicht_naam(x: pd.Series[str]) -> str | None:
+            if x.dropna().any():
+                return ", ".join(str(v) for v in x.dropna().unique())
+            return None
+
         verblijfsobjecten_in_beschermd_gezicht_result = (
             verblijfsobjecten_in_beschermd_gezicht_result.groupby("identificatie")
-            .agg(
-                {
-                    "beschermd_gezicht_naam": lambda x: ", ".join(x.dropna().unique())
-                    if x.dropna().any()
-                    else None
-                }
-            )
+            .agg({"beschermd_gezicht_naam": _join_beschermd_gezicht_naam})
             .reset_index()
         )
 
