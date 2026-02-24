@@ -85,7 +85,9 @@ def get_retry_after_seconds(
     # Integer seconds
     if raw.isdigit():
         secs = int(raw)
-        return min(max(secs, 0), max_delay) if max_delay is not None else max(secs, 0)
+        return float(
+            min(max(secs, 0), max_delay) if max_delay is not None else max(secs, 0)
+        )
     # HTTP-date (RFC 7231)
     try:
         dt = parsedate_to_datetime(raw)
@@ -97,4 +99,4 @@ def get_retry_after_seconds(
     delta = (dt - now).total_seconds()
     if delta <= 0:
         return 0.0
-    return min(delta, max_delay)
+    return float(min(delta, max_delay))
