@@ -12,6 +12,9 @@ Door middel van de package is het mogelijk om, indienst gewenst, voor tienduizen
 > [!WARNING]
 > Het is mogelijk dat een verblijfsobject ten onrechte wel of geen monumentstatus heeft. Dit hangt af van hoe het verblijfsobject staat geregistreerd bij het Kadaster en de Rijksdienst voor het Cultureel Erfgoed. Neem contact met hen op als u denkt u een verkeerde monumentale status terugkrijgt.
 
+> [!TIP]
+> Op [deze website](https://huggingface.co/spaces/woonstadrotterdam/monumenten-space) kun je via een gebruikersinterface gebruik maken van de package.
+
 ## Installatie
 
 ```bash
