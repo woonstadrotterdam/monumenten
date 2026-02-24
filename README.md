@@ -189,6 +189,10 @@ flowchart TB
 | **Kadaster KKG** | `https://data.kkg.kadaster.nl/service/sparql`                        |
 | **RCE**          | `https://api.linkeddata.cultureelerfgoed.nl/datasets/rce/cho/sparql` |
 
+### Retry-gedrag
+
+Aanroepen naar Kadaster (BAG LV, KKG) en RCE gebruiken een gedeelde **exponential backoff**-strategie: maximaal 12 pogingen, base delay 1s, verdubbeling per poging (max 300s), met **full jitter** om thundering herd te voorkomen. Alleen tijdelijke fouten worden herhaald: HTTP 429, 500, 502, 503, 504 en netwerk-/verbindingsfouten (timeout, connector error, server disconnected). Permanente 4xx worden direct doorgegeven. De `Retry-After`-header wordt bij 429/503 gerespecteerd (integer seconden of HTTP-datum, gecapped op 300s). Zie [issue #42](https://github.com/woonstadrotterdam/monumenten/issues/42).
+
 ## Tutorial
 
 <!-- snippet-end -->

@@ -4,6 +4,14 @@ from typing import Any, Dict, List, Optional
 
 import aiohttp
 
+from monumenten._api._backoff import (
+    MAX_ATTEMPTS,
+    RETRYABLE_NETWORK_EXCEPTIONS,
+    RETRYABLE_STATUS_CODES,
+    compute_delay,
+    get_retry_after_seconds,
+)
+
 # New endpoints following the BAG LV + KKG two-stage approach
 _BAG_LV_ENDPOINT = "https://api.labs.kadaster.nl/datasets/bag/lv/services/baglv/sparql"
 _KKG_ENDPOINT = "https://data.kkg.kadaster.nl/service/sparql"
@@ -75,32 +83,69 @@ def _get_semaphore(loop: asyncio.AbstractEventLoop) -> asyncio.Semaphore:
 async def _post_sparql_json(
     session: aiohttp.ClientSession, endpoint: str, query: str, context: str
 ) -> Any:
-    """Generic helper to POST a SPARQL query and return JSON with retries."""
+    """Generic helper to POST a SPARQL query and return JSON with exponential backoff retries."""
     data = {"query": query, "format": "json"}
-    retries = 3
-    for poging in range(retries):
+    last_error: Optional[BaseException] = None
+    for poging in range(MAX_ATTEMPTS):
         try:
             async with session.post(endpoint, data=data) as response:
                 response.raise_for_status()
                 return await response.json()
         except aiohttp.ClientResponseError as e:
-            if poging != retries - 1:
-                logger.warning(
-                    "Poging %d/%d voor %s mislukt: %s. Opnieuw proberen over 1 seconde...",
-                    poging + 1,
-                    retries,
+            last_error = e
+            if e.status not in RETRYABLE_STATUS_CODES:
+                logger.error(
+                    "Niet-herhaalbare HTTP-fout voor %s: %s (status %s)",
                     context,
                     str(e),
+                    e.status,
                 )
-                await asyncio.sleep(1)
-            else:
+                raise
+            if poging == MAX_ATTEMPTS - 1:
                 logger.error(
-                    "Alle pogingen voor %s mislukt tegen %s: %s",
+                    "Alle %d pogingen voor %s mislukt tegen %s: %s",
+                    MAX_ATTEMPTS,
                     context,
                     endpoint,
                     str(e),
                 )
                 raise
+            retry_after = (
+                get_retry_after_seconds(e.headers) if e.status in (429, 503) else None
+            )
+            delay = compute_delay(poging, retry_after)
+            logger.warning(
+                "Poging %d/%d voor %s mislukt: %s. Opnieuw proberen over %.1fs...",
+                poging + 1,
+                MAX_ATTEMPTS,
+                context,
+                str(e),
+                delay,
+            )
+            await asyncio.sleep(delay)
+        except RETRYABLE_NETWORK_EXCEPTIONS as e:
+            last_error = e
+            if poging == MAX_ATTEMPTS - 1:
+                logger.error(
+                    "Alle %d pogingen voor %s mislukt (netwerk/verbinding): %s",
+                    MAX_ATTEMPTS,
+                    context,
+                    str(e),
+                )
+                raise
+            delay = compute_delay(poging, None)
+            logger.warning(
+                "Poging %d/%d voor %s mislukt (netwerk): %s. Opnieuw proberen over %.1fs...",
+                poging + 1,
+                MAX_ATTEMPTS,
+                context,
+                str(e),
+                delay,
+            )
+            await asyncio.sleep(delay)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Geen response ontvangen")
 
 
 async def _query_verblijfsobjecten(
