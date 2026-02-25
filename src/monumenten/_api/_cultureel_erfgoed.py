@@ -8,8 +8,7 @@ from monumenten._api._backoff import (
     MAX_ATTEMPTS,
     RETRYABLE_NETWORK_EXCEPTIONS,
     RETRYABLE_STATUS_CODES,
-    compute_delay,
-    get_retry_after_seconds,
+    RETRY_SLEEP_SECONDS,
 )
 
 # Create a module-level logger
@@ -114,33 +113,26 @@ async def _query_rijksmonumenten(
                     raise
                 if poging == MAX_ATTEMPTS - 1:
                     raise
-                retry_after = (
-                    get_retry_after_seconds(e.headers)
-                    if e.status in (429, 503)
-                    else None
-                )
-                delay = compute_delay(poging, retry_after)
                 logger.warning(
-                    "Poging %d/%d voor rijksmonumenten query mislukt: %s. Opnieuw proberen over %.1fs...",
+                    "Poging %d/%d voor rijksmonumenten query mislukt: %s. Opnieuw proberen over %ds...",
                     poging + 1,
                     MAX_ATTEMPTS,
                     str(e),
-                    delay,
+                    RETRY_SLEEP_SECONDS,
                 )
-                await asyncio.sleep(delay)
+                await asyncio.sleep(RETRY_SLEEP_SECONDS)
             except RETRYABLE_NETWORK_EXCEPTIONS as e:
                 last_error = e
                 if poging == MAX_ATTEMPTS - 1:
                     raise
-                delay = compute_delay(poging, None)
                 logger.warning(
-                    "Poging %d/%d voor rijksmonumenten query mislukt (netwerk): %s. Opnieuw proberen over %.1fs...",
+                    "Poging %d/%d voor rijksmonumenten query mislukt (netwerk): %s. Opnieuw proberen over %ds...",
                     poging + 1,
                     MAX_ATTEMPTS,
                     str(e),
-                    delay,
+                    RETRY_SLEEP_SECONDS,
                 )
-                await asyncio.sleep(delay)
+                await asyncio.sleep(RETRY_SLEEP_SECONDS)
         if last_error is not None:
             raise last_error
         return []
@@ -184,31 +176,26 @@ async def _query_beschermde_gezichten(
                 raise
             if poging == MAX_ATTEMPTS - 1:
                 raise
-            retry_after = (
-                get_retry_after_seconds(e.headers) if e.status in (429, 503) else None
-            )
-            delay = compute_delay(poging, retry_after)
             logger.warning(
-                "Poging %d/%d voor beschermde gezichten query mislukt: %s. Opnieuw proberen over %.1fs...",
+                "Poging %d/%d voor beschermde gezichten query mislukt: %s. Opnieuw proberen over %ds...",
                 poging + 1,
                 MAX_ATTEMPTS,
                 str(e),
-                delay,
+                RETRY_SLEEP_SECONDS,
             )
-            await asyncio.sleep(delay)
+            await asyncio.sleep(RETRY_SLEEP_SECONDS)
         except RETRYABLE_NETWORK_EXCEPTIONS as e:
             last_error = e
             if poging == MAX_ATTEMPTS - 1:
                 raise
-            delay = compute_delay(poging, None)
             logger.warning(
-                "Poging %d/%d voor beschermde gezichten query mislukt (netwerk): %s. Opnieuw proberen over %.1fs...",
+                "Poging %d/%d voor beschermde gezichten query mislukt (netwerk): %s. Opnieuw proberen over %ds...",
                 poging + 1,
                 MAX_ATTEMPTS,
                 str(e),
-                delay,
+                RETRY_SLEEP_SECONDS,
             )
-            await asyncio.sleep(delay)
+            await asyncio.sleep(RETRY_SLEEP_SECONDS)
     if last_error is not None:
         raise last_error
     return []
