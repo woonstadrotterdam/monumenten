@@ -246,6 +246,12 @@ async def _query(
                     gemeentelijke_monumenten,
                     aantal,
                 ) = batch_result
+                if attempt >= 1:
+                    logger.info(
+                        "Batch [%s] (size %d) geslaagd na retry",
+                        batch_id,
+                        len(batch),
+                    )
                 rijksmonumenten_result = pd.concat(
                     [rijksmonumenten_result, rijksmonumenten]
                 )

@@ -89,6 +89,13 @@ async def _post_sparql_json(
         try:
             async with session.post(endpoint, data=data) as response:
                 response.raise_for_status()
+                if poging >= 1:
+                    logger.info(
+                        "Poging %d/%d voor %s geslaagd na eerdere mislukking",
+                        poging + 1,
+                        MAX_ATTEMPTS,
+                        context,
+                    )
                 return await response.json()
         except aiohttp.ClientResponseError as e:
             last_error = e

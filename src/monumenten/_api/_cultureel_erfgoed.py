@@ -100,6 +100,12 @@ async def _query_rijksmonumenten(
                     response.raise_for_status()
                     resultaat = await response.json()
                     if isinstance(resultaat, list):
+                        if poging >= 1:
+                            logger.info(
+                                "Poging %d/%d voor rijksmonumenten query geslaagd na eerdere mislukking",
+                                poging + 1,
+                                MAX_ATTEMPTS,
+                            )
                         return resultaat
                     else:
                         logger.warning(
@@ -163,6 +169,12 @@ async def _query_beschermde_gezichten(
                 response.raise_for_status()
                 resultaat = await response.json()
                 if isinstance(resultaat, list):
+                    if poging >= 1:
+                        logger.info(
+                            "Poging %d/%d voor beschermde gezichten query geslaagd na eerdere mislukking",
+                            poging + 1,
+                            MAX_ATTEMPTS,
+                        )
                     return resultaat
                 else:
                     logger.warning(
