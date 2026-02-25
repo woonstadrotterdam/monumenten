@@ -191,7 +191,9 @@ flowchart TB
 
 ### Retry-gedrag
 
-Aanroepen naar Kadaster (BAG LV, KKG) en RCE gebruiken een gedeelde **exponential backoff**-strategie: maximaal 12 pogingen, base delay 1s, verdubbeling per poging (max 300s), met **full jitter** om thundering herd te voorkomen. Alleen tijdelijke fouten worden herhaald: HTTP 429, 500, 502, 503, 504 en netwerk-/verbindingsfouten (timeout, connector error, server disconnected). Permanente 4xx worden direct doorgegeven. De `Retry-After`-header wordt bij 429/503 gerespecteerd (integer seconden of HTTP-datum, gecapped op 300s). Zie [issue #42](https://github.com/woonstadrotterdam/monumenten/issues/42).
+Aanroepen naar Kadaster (BAG LV, KKG) en RCE gebruiken een gedeelde retry-logica: maximaal 2 pogingen per request, bij mislukking 3 seconden wachten en één keer opnieuw proberen. Alleen tijdelijke fouten worden herhaald: HTTP 429, 500, 502, 503, 504 en netwerk-/verbindingsfouten (timeout, connector error, server disconnected). Permanente 4xx worden niet herhaald en direct doorgegeven.
+
+Op batchniveau (verwerking van verblijfsobjecten): elke batch krijgt tot 2 pogingen; na twee mislukkingen gaat de batch naar een uitgestelde wachtrij. Aan het eind worden uitgestelde batches opnieuw geprobeerd; bij opnieuw falen worden ze in tweeën gedeeld en opnieuw in de wachtrij gezet, tot ze slagen of te klein zijn om verder te splitsen (minimaal 1 ID, max. splitdiepte 10). Batches die definitief falen worden overgeslagen met een waarschuwing.
 
 ## Tutorial
 
