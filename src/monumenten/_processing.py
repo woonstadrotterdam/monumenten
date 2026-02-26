@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from typing import List, Tuple, cast
+from typing import List, Tuple
 
 import aiohttp
 import geopandas as gpd
@@ -191,85 +191,60 @@ async def _query(
 
     # Phase 1: process all batches, up to _MAX_BATCH_ATTEMPTS per batch; defer rest
     _BatchResult = Tuple[DataFrame, DataFrame, DataFrame, int]
-    task_to_info: dict[asyncio.Future[_BatchResult], Tuple[List[str], int, str]] = {}
-    all_tasks: set[asyncio.Future[_BatchResult]] = set()
+    results_list: List[_BatchResult] = []
     deferred: List[Tuple[List[str], str]] = []
 
-    for batch in batches:
-        t = cast(
-            asyncio.Future[_BatchResult],
-            asyncio.ensure_future(
-                _process_batch(session, batch, beschermde_gezichten_df)
-            ),
-        )
-        all_tasks.add(t)
-        task_to_info[t] = (batch, 0, uuid.uuid4().hex[:8])
-
-    try:
-        while all_tasks:
-            done, _ = await asyncio.wait(all_tasks, return_when=asyncio.FIRST_COMPLETED)
-            for t in done:
-                all_tasks.discard(t)
-                batch, attempt, batch_id = task_to_info.pop(t)
-                try:
-                    batch_result = t.result()
-                except Exception:
-                    if attempt < _MAX_BATCH_ATTEMPTS - 1:
-                        t2 = cast(
-                            asyncio.Future[_BatchResult],
-                            asyncio.ensure_future(
-                                _process_batch(session, batch, beschermde_gezichten_df)
-                            ),
-                        )
-                        all_tasks.add(t2)
-                        task_to_info[t2] = (batch, attempt + 1, batch_id)
-                        logger.warning(
-                            "Batch [%s] (size %d) mislukt, poging %d/%d, opnieuw proberen",
-                            batch_id,
-                            len(batch),
-                            attempt + 1,
-                            _MAX_BATCH_ATTEMPTS,
-                        )
-                    else:
-                        deferred.append((batch, batch_id))
-                        logger.error(
-                            "Batch [%s] (size %d) na %d pogingen mislukt, uitstellen",
-                            batch_id,
-                            len(batch),
-                            _MAX_BATCH_ATTEMPTS,
-                        )
-                    continue
-                (
-                    rijksmonumenten,
-                    verblijfsobjecten_in_beschermd_gezicht,
-                    gemeentelijke_monumenten,
-                    aantal,
-                ) = batch_result
+    async def _run_batch_with_retry(batch: List[str], batch_id: str) -> None:
+        for attempt in range(_MAX_BATCH_ATTEMPTS):
+            try:
+                result = await _process_batch(session, batch, beschermde_gezichten_df)
+                results_list.append(result)
+                progress_bar.update(result[3])
                 if attempt >= 1:
                     logger.info(
                         "Batch [%s] (size %d) geslaagd na retry",
                         batch_id,
                         len(batch),
                     )
-                rijksmonumenten_result = pd.concat(
-                    [rijksmonumenten_result, rijksmonumenten]
-                )
-                verblijfsobjecten_in_beschermd_gezicht_result = pd.concat(
-                    [
-                        verblijfsobjecten_in_beschermd_gezicht_result,
-                        verblijfsobjecten_in_beschermd_gezicht,
-                    ]
-                )
-                gemeentelijke_monumenten_result = pd.concat(
-                    [gemeentelijke_monumenten_result, gemeentelijke_monumenten]
-                )
-                progress_bar.update(aantal)
-    finally:
-        for t in all_tasks:
-            if not t.done():
-                t.cancel()
-        if all_tasks:
-            await asyncio.gather(*all_tasks, return_exceptions=True)
+                return
+            except Exception:
+                if attempt < _MAX_BATCH_ATTEMPTS - 1:
+                    logger.warning(
+                        "Batch [%s] (size %d) mislukt, poging %d/%d, opnieuw proberen",
+                        batch_id,
+                        len(batch),
+                        attempt + 1,
+                        _MAX_BATCH_ATTEMPTS,
+                    )
+                else:
+                    deferred.append((batch, batch_id))
+                    logger.error(
+                        "Batch [%s] (size %d) na %d pogingen mislukt, uitstellen",
+                        batch_id,
+                        len(batch),
+                        _MAX_BATCH_ATTEMPTS,
+                    )
+
+    async with asyncio.TaskGroup() as tg:
+        for batch in batches:
+            tg.create_task(_run_batch_with_retry(batch, uuid.uuid4().hex[:8]))
+
+    for (
+        rijksmonumenten,
+        verblijfsobjecten_in_beschermd_gezicht,
+        gemeentelijke_monumenten,
+        _,
+    ) in results_list:
+        rijksmonumenten_result = pd.concat([rijksmonumenten_result, rijksmonumenten])
+        verblijfsobjecten_in_beschermd_gezicht_result = pd.concat(
+            [
+                verblijfsobjecten_in_beschermd_gezicht_result,
+                verblijfsobjecten_in_beschermd_gezicht,
+            ]
+        )
+        gemeentelijke_monumenten_result = pd.concat(
+            [gemeentelijke_monumenten_result, gemeentelijke_monumenten]
+        )
 
     # Phase 2: retry deferred batches; on failure, split in half and re-queue
     # queue entries are (batch, split_depth, batch_id)
