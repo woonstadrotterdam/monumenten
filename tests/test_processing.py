@@ -18,14 +18,14 @@ def _make_batch_result(identificaties, count=None):
     n = count if count is not None else len(identificaties)
     ids_df = pd.DataFrame({"identificatie": list(identificaties)[:n]})
     rm = ids_df.assign(rijksmonument_nummer="", rijksmonument_bron="")
-    bg = ids_df.assign(rijksbeschermd_gezicht_naam=pd.NA)
+    bg = ids_df.assign(beschermd_gezicht_naam=pd.NA)
     gm = ids_df.assign(grondslag_gemeentelijk_monument=pd.NA)
     return (rm, bg, gm, n)
 
 
 @pytest.fixture
 def empty_geodataframe():
-    return gpd.GeoDataFrame(columns=["rijksbeschermd_gezicht_naam", "geometry"])
+    return gpd.GeoDataFrame(columns=["beschermd_gezicht_naam", "geometry"])
 
 
 @pytest.mark.asyncio
@@ -52,7 +52,7 @@ async def test_query_success(empty_geodataframe):
         "identificatie",
         "rijksmonument_nummer",
         "rijksmonument_bron",
-        "rijksbeschermd_gezicht_naam",
+        "beschermd_gezicht_naam",
         "grondslag_gemeentelijk_monument",
     ]
 
@@ -80,7 +80,7 @@ async def test_query_batch_failure_logged(empty_geodataframe):
         "identificatie",
         "rijksmonument_nummer",
         "rijksmonument_bron",
-        "rijksbeschermd_gezicht_naam",
+        "beschermd_gezicht_naam",
         "grondslag_gemeentelijk_monument",
     ]
 
