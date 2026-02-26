@@ -13,6 +13,8 @@ import aiohttp
 
 MAX_ATTEMPTS = 2
 RETRY_SLEEP_SECONDS = 3
+MIN_BATCH_SIZE = 1
+MAX_SPLIT_DEPTH = 10
 RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 RETRYABLE_NETWORK_EXCEPTIONS: Tuple[Type[BaseException], ...] = (
     asyncio.TimeoutError,

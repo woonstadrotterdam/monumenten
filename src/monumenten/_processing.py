@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import uuid
 from typing import List, Tuple
 
 import aiohttp
@@ -24,9 +23,7 @@ from monumenten._api._kadaster import _query_verblijfsobjecten
 logger = logging.getLogger("monumenten.processing")
 
 _QUERY_BATCH_GROOTTE = 500  # lijkt meest optimaal qua performance
-_MAX_BATCH_ATTEMPTS = 2  # one retry per batch before deferring to end
-_MIN_BATCH_SIZE = 1  # do not split below this size
-_MAX_SPLIT_DEPTH = 10  # 500 -> ~1 ID
+_BATCH_CONCURRENCY = 4
 
 
 async def _process_batch(
@@ -169,16 +166,10 @@ async def _query(
 ) -> pd.DataFrame:
     """Voer queries uit voor een lijst verblijfsobjecten.
 
-    Batches worden één keer opnieuw geprobeerd; na twee mislukkingen gaan ze naar een
-    uitgestelde wachtrij. Aan het eind worden uitgestelde batches opnieuw geprobeerd;
-    bij opnieuw falen worden ze in tweeën gedeeld en opnieuw in de wachtrij gezet,
-    tot ze slagen of te klein zijn om verder te splitsen.
+    Batches worden parallel verwerkt. Retry en split-on-failure gebeuren per API
+    (cultureel erfgoed en kadaster) in hun eigen modules.
     """
     beschermde_gezichten_df = await _get_beschermde_gezichten(session)
-
-    rijksmonumenten_result = pd.DataFrame()
-    verblijfsobjecten_in_beschermd_gezicht_result = pd.DataFrame()
-    gemeentelijke_monumenten_result = pd.DataFrame()
 
     batches = [
         verblijfsobject_ids[i : i + _QUERY_BATCH_GROOTTE]
@@ -189,107 +180,58 @@ async def _query(
         total=len(verblijfsobject_ids), disable=len(batches) <= 1
     )
 
-    # Phase 1: process all batches, up to _MAX_BATCH_ATTEMPTS per batch; defer rest
     _BatchResult = Tuple[DataFrame, DataFrame, DataFrame, int]
     results_list: List[_BatchResult] = []
-    deferred: List[Tuple[List[str], str]] = []
 
-    async def _run_batch_with_retry(batch: List[str], batch_id: str) -> None:
-        for attempt in range(_MAX_BATCH_ATTEMPTS):
+    _empty_batch_result = (
+        pd.DataFrame(
+            columns=["identificatie", "rijksmonument_nummer", "rijksmonument_bron"]
+        ),
+        pd.DataFrame(columns=["identificatie", "rijksbeschermd_gezicht_naam"]),
+        pd.DataFrame(columns=["identificatie", "grondslag_gemeentelijk_monument"]),
+    )
+
+    batch_semaphore = asyncio.Semaphore(_BATCH_CONCURRENCY)
+
+    async def _run_batch(batch: List[str]) -> None:
+        async with batch_semaphore:
             try:
                 result = await _process_batch(session, batch, beschermde_gezichten_df)
                 results_list.append(result)
                 progress_bar.update(result[3])
-                if attempt >= 1:
-                    logger.info(
-                        "Batch [%s] (size %d) geslaagd na retry",
-                        batch_id,
-                        len(batch),
-                    )
-                return
             except Exception:
-                if attempt < _MAX_BATCH_ATTEMPTS - 1:
-                    logger.warning(
-                        "Batch [%s] (size %d) mislukt, poging %d/%d, opnieuw proberen",
-                        batch_id,
-                        len(batch),
-                        attempt + 1,
-                        _MAX_BATCH_ATTEMPTS,
-                    )
-                else:
-                    deferred.append((batch, batch_id))
-                    logger.error(
-                        "Batch [%s] (size %d) na %d pogingen mislukt, uitstellen",
-                        batch_id,
-                        len(batch),
-                        _MAX_BATCH_ATTEMPTS,
-                    )
+                logger.error(
+                    "Batch (size %d) mislukt na retry/split in API-laag, overgeslagen",
+                    len(batch),
+                )
+                results_list.append((*_empty_batch_result, len(batch)))
+                progress_bar.update(len(batch))
 
     async with asyncio.TaskGroup() as tg:
         for batch in batches:
-            tg.create_task(_run_batch_with_retry(batch, uuid.uuid4().hex[:8]))
+            tg.create_task(_run_batch(batch))
 
-    for (
-        rijksmonumenten,
-        verblijfsobjecten_in_beschermd_gezicht,
-        gemeentelijke_monumenten,
-        _,
-    ) in results_list:
-        rijksmonumenten_result = pd.concat([rijksmonumenten_result, rijksmonumenten])
-        verblijfsobjecten_in_beschermd_gezicht_result = pd.concat(
-            [
-                verblijfsobjecten_in_beschermd_gezicht_result,
-                verblijfsobjecten_in_beschermd_gezicht,
-            ]
-        )
-        gemeentelijke_monumenten_result = pd.concat(
-            [gemeentelijke_monumenten_result, gemeentelijke_monumenten]
-        )
+    rijksmonumenten_parts = [r[0] for r in results_list]
+    beschermd_gezicht_parts = [r[1] for r in results_list]
+    gemeentelijke_parts = [r[2] for r in results_list]
 
-    # Phase 2: retry deferred batches; on failure, split in half and re-queue
-    # queue entries are (batch, split_depth, batch_id)
-    queue: List[Tuple[List[str], int, str]] = [(b, 0, bid) for b, bid in deferred]
-    while queue:
-        batch, depth, batch_id = queue.pop(0)
-        try:
-            (
-                rijksmonumenten,
-                verblijfsobjecten_in_beschermd_gezicht,
-                gemeentelijke_monumenten,
-                aantal,
-            ) = await _process_batch(session, batch, beschermde_gezichten_df)
-            rijksmonumenten_result = pd.concat(
-                [rijksmonumenten_result, rijksmonumenten]
-            )
-            verblijfsobjecten_in_beschermd_gezicht_result = pd.concat(
-                [
-                    verblijfsobjecten_in_beschermd_gezicht_result,
-                    verblijfsobjecten_in_beschermd_gezicht,
-                ]
-            )
-            gemeentelijke_monumenten_result = pd.concat(
-                [gemeentelijke_monumenten_result, gemeentelijke_monumenten]
-            )
-            progress_bar.update(aantal)
-        except Exception:
-            if len(batch) > _MIN_BATCH_SIZE and depth < _MAX_SPLIT_DEPTH:
-                mid = len(batch) // 2
-                queue.append((batch[:mid], depth + 1, batch_id))
-                queue.append((batch[mid:], depth + 1, batch_id))
-                logger.info(
-                    "Uitgestelde batch [%s] (size %d) opnieuw mislukt, gesplitst in %d en %d",
-                    batch_id,
-                    len(batch),
-                    mid,
-                    len(batch) - mid,
-                )
-            else:
-                logger.warning(
-                    "Batch [%s] (size %d) definitief overgeslagen na splitsen",
-                    batch_id,
-                    len(batch),
-                )
-                progress_bar.update(len(batch))
+    rijksmonumenten_result = (
+        pd.concat(rijksmonumenten_parts, ignore_index=True)
+        if rijksmonumenten_parts
+        else pd.DataFrame(
+            columns=["identificatie", "rijksmonument_nummer", "rijksmonument_bron"]
+        )
+    )
+    verblijfsobjecten_in_beschermd_gezicht_result = (
+        pd.concat(beschermd_gezicht_parts, ignore_index=True)
+        if beschermd_gezicht_parts
+        else pd.DataFrame(columns=["identificatie", "rijksbeschermd_gezicht_naam"])
+    )
+    gemeentelijke_monumenten_result = (
+        pd.concat(gemeentelijke_parts, ignore_index=True)
+        if gemeentelijke_parts
+        else pd.DataFrame(columns=["identificatie", "grondslag_gemeentelijk_monument"])
+    )
 
     progress_bar.close()
 
