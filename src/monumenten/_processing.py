@@ -238,7 +238,6 @@ async def _query(
                             len(batch),
                             _MAX_BATCH_ATTEMPTS,
                         )
-                    progress_bar.update(len(batch))
                     continue
                 (
                     rijksmonumenten,
