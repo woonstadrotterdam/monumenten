@@ -66,9 +66,6 @@ Issues = "https://github.com/woonstadrotterdam/monumenten/issues"
 packages = ["monumenten"]
 package-dir = {"" = "src"}
 
-[tool.mypy]
-python_version = "3.11"
-
 [[tool.mypy.overrides]]
 module = [
     "geopandas.*",  # https://github.com/geopandas/geopandas/issues/1974
