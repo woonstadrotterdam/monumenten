@@ -191,9 +191,7 @@ flowchart TB
 
 ### Retry-gedrag
 
-Aanroepen naar Kadaster (BAG LV, KKG) en RCE gebruiken een gedeelde retry-logica: maximaal 2 pogingen per request, bij mislukking 3 seconden wachten en één keer opnieuw proberen. Alleen tijdelijke fouten worden herhaald: HTTP 429, 500, 502, 503, 504 en netwerk-/verbindingsfouten (timeout, connector error, server disconnected). Permanente 4xx worden niet herhaald en direct doorgegeven.
-
-Op batchniveau (verwerking van verblijfsobjecten): elke batch krijgt tot 2 pogingen; na twee mislukkingen gaat de batch naar een uitgestelde wachtrij. Aan het eind worden uitgestelde batches opnieuw geprobeerd; bij opnieuw falen worden ze in tweeën gedeeld en opnieuw in de wachtrij gezet, tot ze slagen of te klein zijn om verder te splitsen (minimaal 1 ID, max. splitdiepte 10). Batches die definitief falen worden overgeslagen met een waarschuwing.
+Aanroepen naar Kadaster (BAG LV, KKG) en RCE gebruiken een gedeelde retry-logica: maximaal 2 pogingen per request, bij mislukking 3 seconden wachten. Alleen tijdelijke fouten worden herhaald (HTTP 429, 500, 502, 503, 504 en netwerk-/verbindingsfouten); permanente 4xx worden direct doorgegeven. Faalt een aanroep na retries, dan wordt de set IDs/URIs in tweeën gedeeld en elk deel opnieuw geprobeerd (recursief, per API, tot min. 1 ID of max. splitdiepte 10); definitief falende aanroepen worden overgeslagen met een waarschuwing.
 
 ## Tutorial
 
