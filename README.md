@@ -20,15 +20,15 @@ pip install monumenten
 
 ## Voorbeeldoutput
 
-| bag_verblijfsobject_id | is_rijksmonument | rijksmonument_bron | rijksmonument_nummer | rijksmonument_url                                 | is_beschermd_gezicht | beschermd_gezicht_naam   | is_gemeentelijk_monument | grondslag_gemeentelijk_monument                                                        |
-| ---------------------- | ---------------- | ------------------ | -------------------- | ------------------------------------------------- | -------------------- | ------------------------ | ------------------------ | -------------------------------------------------------------------------------------- |
-| 0599010000360091       | True             | RCE, Kadaster      | 524327               | https://monumentenregister.cultureelerfgoed.nl... | False                | <NA>                     | False                    | <NA>                                                                                   |
-| 0599010000486642       | False            | <NA>               | <NA>                 | <NA>                                              | False                | <NA>                     | False                    | <NA>                                                                                   |
-| 0599010000281115       | False            | <NA>               | <NA>                 | <NA>                                              | True                 | Kralingen - Midden       | False                    | <NA>                                                                                   |
-| 0599010000076715       | False            | <NA>               | <NA>                 | <NA>                                              | False                | <NA>                     | True                     | Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift) |
-| 0599010000146141       | False            | <NA>               | <NA>                 | <NA>                                              | True                 | Rotterdam - Waterproject | True                     | Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift) |
-| 0232010000002251       | False            | <NA>               | <NA>                 | <NA>                                              | False                | <NA>                     | True                     | Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift) |
-| 0599010000341377       | True             | Kadaster           | <NA>                 | <NA>                                              | False                | <NA>                     | False                    | <NA>                                                                                   |
+| bag_verblijfsobject_id | rijksmonument | rijksmonument_bron | rijksmonument_nummer | rijksmonument_url                                 | rijksbeschermd_gezicht | rijksbeschermd_gezicht_naam | gemeentelijk_monument | grondslag_gemeentelijk_monument                                                        |
+| ---------------------- | ------------- | ------------------ | -------------------- | ------------------------------------------------- | ---------------------- | --------------------------- | --------------------- | -------------------------------------------------------------------------------------- |
+| 0599010000360091       | True          | RCE, Kadaster      | 524327               | https://monumentenregister.cultureelerfgoed.nl... | False                  | <NA>                        | False                 | <NA>                                                                                   |
+| 0599010000486642       | False         | <NA>               | <NA>                 | <NA>                                              | False                  | <NA>                        | False                 | <NA>                                                                                   |
+| 0599010000281115       | False         | <NA>               | <NA>                 | <NA>                                              | True                   | Kralingen - Midden          | False                 | <NA>                                                                                   |
+| 0599010000076715       | False         | <NA>               | <NA>                 | <NA>                                              | False                  | <NA>                        | True                  | Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift) |
+| 0599010000146141       | False         | <NA>               | <NA>                 | <NA>                                              | True                   | Rotterdam - Waterproject    | True                  | Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift) |
+| 0232010000002251       | False         | <NA>               | <NA>                 | <NA>                                              | False                  | <NA>                        | True                  | Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift) |
+| 0599010000341377       | True          | Kadaster           | <NA>                 | <NA>                                              | False                  | <NA>                        | False                 | <NA>                                                                                   |
 
 ## Architectuur
 
@@ -61,7 +61,7 @@ flowchart TB
             G1["Gezicht"]
             G2["GezichtGeometrie"]
             G3["gezichtWKT"]
-            G4["beschermd_gezicht_naam"]
+            G4["rijksbeschermd_gezicht_naam"]
         end
 
     end

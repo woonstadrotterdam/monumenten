@@ -63,7 +63,7 @@ async def _process_batch(
             pd.DataFrame(
                 columns=["identificatie", "rijksmonument_nummer", "rijksmonument_bron"]
             ),
-            pd.DataFrame(columns=["identificatie", "beschermd_gezicht_naam"]),
+            pd.DataFrame(columns=["identificatie", "rijksbeschermd_gezicht_naam"]),
             pd.DataFrame(columns=["identificatie", "grondslag_gemeentelijk_monument"]),
             len(batch),
         )
@@ -128,7 +128,7 @@ async def _process_batch(
         beschermde_gezichten_df,
         how="left",
         predicate="within",
-    )[["identificatie", "beschermd_gezicht_naam"]]
+    )[["identificatie", "rijksbeschermd_gezicht_naam"]]
 
     return (
         rijksmonumenten_df,
@@ -154,7 +154,7 @@ async def _get_beschermde_gezichten(
         beschermde_gezichten_df["gezichtWKT"]
     )
     beschermde_gezichten_df = gpd.GeoDataFrame(
-        beschermde_gezichten_df[["beschermd_gezicht_naam", "geometry"]],
+        beschermde_gezichten_df[["rijksbeschermd_gezicht_naam", "geometry"]],
         geometry="geometry",
     )
 
@@ -245,7 +245,7 @@ async def _query(
                 "identificatie",
                 "rijksmonument_nummer",
                 "rijksmonument_bron",
-                "beschermd_gezicht_naam",
+                "rijksbeschermd_gezicht_naam",
                 "grondslag_gemeentelijk_monument",
             ]
         )
@@ -260,14 +260,14 @@ async def _query(
 
     if not verblijfsobjecten_in_beschermd_gezicht_result.empty:
         # Aggregate beschermd gezicht names for the same identificatie
-        def _join_beschermd_gezicht_naam(x: pd.Series[str]) -> str | None:
+        def _join_rijksbeschermd_gezicht_naam(x: pd.Series[str]) -> str | None:
             if x.dropna().any():
                 return ", ".join(str(v) for v in x.dropna().unique())
             return None
 
         verblijfsobjecten_in_beschermd_gezicht_result = (
             verblijfsobjecten_in_beschermd_gezicht_result.groupby("identificatie")
-            .agg({"beschermd_gezicht_naam": _join_beschermd_gezicht_naam})
+            .agg({"rijksbeschermd_gezicht_naam": _join_rijksbeschermd_gezicht_naam})
             .reset_index()
         )
 
