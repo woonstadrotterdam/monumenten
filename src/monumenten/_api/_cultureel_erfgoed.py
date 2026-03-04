@@ -4,6 +4,15 @@ from typing import Any, Dict, List, Optional
 
 import aiohttp
 
+from monumenten._api._backoff import (
+    MAX_ATTEMPTS,
+    MAX_SPLIT_DEPTH,
+    MIN_BATCH_SIZE,
+    RETRYABLE_NETWORK_EXCEPTIONS,
+    RETRYABLE_STATUS_CODES,
+    RETRY_SLEEP_SECONDS,
+)
+
 # Create a module-level logger
 logger = logging.getLogger("monumenten.api.cultureel_erfgoed")
 
@@ -61,56 +70,114 @@ def _get_semaphore(loop: asyncio.AbstractEventLoop) -> asyncio.Semaphore:
 
 
 async def _query_rijksmonumenten(
-    session: aiohttp.ClientSession, identificaties: List[str]
+    session: aiohttp.ClientSession,
+    identificaties: List[str],
+    *,
+    _depth: int = 0,
 ) -> List[Dict[str, Any]]:
     """
     Voert een SPARQL-query uit om rijksmonumenten op te halen voor gegeven BAG-identificaties.
+    Bij falen na retries wordt de batch in tweeën gesplitst en opnieuw geprobeerd.
 
     Args:
         session (aiohttp.ClientSession): De aiohttp ClientSession voor het uitvoeren van de HTTP-aanvraag
         identificaties (List[str]): Lijst van BAG-identificaties waarvoor rijksmonumenten worden opgezocht
+        _depth (int): Interne recursiediepte bij batch-splitsing; standaard 0.
 
     Returns:
         List[Dict[str, Any]]: Lijst van dictionaries met informatie over gevonden rijksmonumenten
 
     Raises:
-        aiohttp.ClientResponseError: Bij fouten in de HTTP-aanvraag na 3 pogingen
+        aiohttp.ClientResponseError: Bij niet-herhaalbare HTTP-fouten of na uitgeputte retries.
+        asyncio.TimeoutError: Bij time-out na uitgeputte retries.
+        aiohttp.ClientConnectorError: Bij verbindingsfout na uitgeputte retries.
+        aiohttp.ServerDisconnectedError: Bij server-verbreking na uitgeputte retries.
     """
-    async with _get_semaphore(asyncio.get_running_loop()):
-        identificaties_str = " ".join(
-            f'"{identificatie}"' for identificatie in identificaties
-        )
-        query = _RIJKSMONUMENTEN_QUERY_TEMPLATE.format(
-            identificaties=identificaties_str
-        )
-        data = {"query": query, "format": "json"}
-        retries = 3
-        for poging in range(retries):
-            try:
-                async with session.post(
-                    _CULTUREEL_ERFGOED_SPARQL_ENDPOINT, data=data
-                ) as response:
-                    response.raise_for_status()
-                    resultaat = await response.json()
-                    if isinstance(resultaat, list):
-                        return resultaat
-                    else:
-                        logger.warning(
-                            "Unexpected response format on attempt %d: %s",
-                            poging + 1,
-                            resultaat,
-                        )
-            except aiohttp.ClientResponseError as e:
-                if poging != retries - 1:
+    try:
+        async with _get_semaphore(asyncio.get_running_loop()):
+            identificaties_str = " ".join(
+                f'"{identificatie}"' for identificatie in identificaties
+            )
+            query = _RIJKSMONUMENTEN_QUERY_TEMPLATE.format(
+                identificaties=identificaties_str
+            )
+            data = {"query": query, "format": "json"}
+            last_error: Optional[BaseException] = None
+            for poging in range(MAX_ATTEMPTS):
+                try:
+                    async with session.post(
+                        _CULTUREEL_ERFGOED_SPARQL_ENDPOINT, data=data
+                    ) as response:
+                        response.raise_for_status()
+                        resultaat = await response.json()
+                        if isinstance(resultaat, list):
+                            if poging >= 1:
+                                logger.info(
+                                    "Poging %d/%d voor rijksmonumenten query geslaagd na eerdere mislukking",
+                                    poging + 1,
+                                    MAX_ATTEMPTS,
+                                )
+                            if _depth > 0:
+                                logger.info(
+                                    "Rijksmonumenten query geslaagd na splitsing (depth %d)",
+                                    _depth,
+                                )
+                            return resultaat
+                        else:
+                            logger.warning(
+                                "Unexpected response format on attempt %d: %s",
+                                poging + 1,
+                                resultaat,
+                            )
+                except aiohttp.ClientResponseError as e:
+                    last_error = e
+                    if e.status not in RETRYABLE_STATUS_CODES:
+                        raise
+                    if poging == MAX_ATTEMPTS - 1:
+                        raise
                     logger.warning(
-                        "Poging %d/%d voor rijksmonumenten query mislukt: %s. Opnieuw proberen over 1 seconde...",
+                        "Poging %d/%d voor rijksmonumenten query mislukt: %s. Opnieuw proberen over %ds...",
                         poging + 1,
-                        retries,
+                        MAX_ATTEMPTS,
                         str(e),
+                        RETRY_SLEEP_SECONDS,
                     )
-                    await asyncio.sleep(1)
-                else:
-                    raise
+                    await asyncio.sleep(RETRY_SLEEP_SECONDS)
+                except RETRYABLE_NETWORK_EXCEPTIONS as e:
+                    last_error = e
+                    if poging == MAX_ATTEMPTS - 1:
+                        raise
+                    logger.warning(
+                        "Poging %d/%d voor rijksmonumenten query mislukt (netwerk): %s. Opnieuw proberen over %ds...",
+                        poging + 1,
+                        MAX_ATTEMPTS,
+                        str(e),
+                        RETRY_SLEEP_SECONDS,
+                    )
+                    await asyncio.sleep(RETRY_SLEEP_SECONDS)
+            if last_error is not None:
+                raise last_error
+            return []
+    except Exception:
+        if len(identificaties) > MIN_BATCH_SIZE and _depth < MAX_SPLIT_DEPTH:
+            mid = len(identificaties) // 2
+            logger.info(
+                "Rijksmonumenten query mislukt, splitsen in 2 batches van %d en %d IDs (depth %d)",
+                mid,
+                len(identificaties) - mid,
+                _depth + 1,
+            )
+            left = await _query_rijksmonumenten(
+                session, identificaties[:mid], _depth=_depth + 1
+            )
+            right = await _query_rijksmonumenten(
+                session, identificaties[mid:], _depth=_depth + 1
+            )
+            return left + right
+        logger.warning(
+            "Rijksmonumenten query definitief overgeslagen voor %d IDs",
+            len(identificaties),
+        )
         return []
 
 
@@ -127,19 +194,24 @@ async def _query_beschermde_gezichten(
         List[Dict[str, Any]]: Lijst van dictionaries met informatie over beschermde stads- en dorpsgezichten
 
     Raises:
-        aiohttp.ClientResponseError: Bij fouten in de HTTP-aanvraag na 3 pogingen
+        aiohttp.ClientResponseError: Bij fouten in de HTTP-aanvraag na alle pogingen
     """
-    retries = 3
-    for poging in range(retries):
+    data = {"query": _BESCHERMDE_GEZICHTEN_QUERY, "format": "json"}
+    last_error: Optional[BaseException] = None
+    for poging in range(MAX_ATTEMPTS):
         try:
-            data = {"query": _BESCHERMDE_GEZICHTEN_QUERY, "format": "json"}
-
             async with session.post(
                 _CULTUREEL_ERFGOED_SPARQL_ENDPOINT, data=data
             ) as response:
                 response.raise_for_status()
                 resultaat = await response.json()
                 if isinstance(resultaat, list):
+                    if poging >= 1:
+                        logger.info(
+                            "Poging %d/%d voor beschermde gezichten query geslaagd na eerdere mislukking",
+                            poging + 1,
+                            MAX_ATTEMPTS,
+                        )
                     return resultaat
                 else:
                     logger.warning(
@@ -148,14 +220,31 @@ async def _query_beschermde_gezichten(
                         resultaat,
                     )
         except aiohttp.ClientResponseError as e:
-            if poging != retries - 1:
-                logger.warning(
-                    "Poging %d/%d voor beschermde gezichten query mislukt: %s. Opnieuw proberen over 1 seconde...",
-                    poging + 1,
-                    retries,
-                    str(e),
-                )
-                await asyncio.sleep(1)
-            else:
+            last_error = e
+            if e.status not in RETRYABLE_STATUS_CODES:
                 raise
+            if poging == MAX_ATTEMPTS - 1:
+                raise
+            logger.warning(
+                "Poging %d/%d voor beschermde gezichten query mislukt: %s. Opnieuw proberen over %ds...",
+                poging + 1,
+                MAX_ATTEMPTS,
+                str(e),
+                RETRY_SLEEP_SECONDS,
+            )
+            await asyncio.sleep(RETRY_SLEEP_SECONDS)
+        except RETRYABLE_NETWORK_EXCEPTIONS as e:
+            last_error = e
+            if poging == MAX_ATTEMPTS - 1:
+                raise
+            logger.warning(
+                "Poging %d/%d voor beschermde gezichten query mislukt (netwerk): %s. Opnieuw proberen over %ds...",
+                poging + 1,
+                MAX_ATTEMPTS,
+                str(e),
+                RETRY_SLEEP_SECONDS,
+            )
+            await asyncio.sleep(RETRY_SLEEP_SECONDS)
+    if last_error is not None:
+        raise last_error
     return []

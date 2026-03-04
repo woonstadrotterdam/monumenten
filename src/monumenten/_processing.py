@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import List, Tuple
 
 import aiohttp
@@ -19,7 +20,10 @@ from monumenten._api._cultureel_erfgoed import (
 )
 from monumenten._api._kadaster import _query_verblijfsobjecten
 
+logger = logging.getLogger("monumenten.processing")
+
 _QUERY_BATCH_GROOTTE = 500  # lijkt meest optimaal qua performance
+_BATCH_CONCURRENCY = 4
 
 
 async def _process_batch(
@@ -37,9 +41,6 @@ async def _process_batch(
     Returns:
         Tuple[DataFrame, DataFrame, DataFrame, int]: Tuple met rijksmonumenten,
             beschermde gezichten, gemeentelijke monumenten en aantal verwerkte objecten
-
-    Raises:
-        ValueError: Als er geen geldige BAG verblijfsobjecten gevonden worden
     """
     # Get the current event loop
     loop = asyncio.get_running_loop()
@@ -54,8 +55,17 @@ async def _process_batch(
     )
 
     if not verblijfsobjecten:
-        raise ValueError(
-            "Geen geldige BAG verblijfsobjecten gevonden voor een batch van verblijfsobject ID's"
+        logger.warning(
+            "Geen geldige BAG verblijfsobjecten gevonden voor batch van %d ID's",
+            len(batch),
+        )
+        return (
+            pd.DataFrame(
+                columns=["identificatie", "rijksmonument_nummer", "rijksmonument_bron"]
+            ),
+            pd.DataFrame(columns=["identificatie", "beschermd_gezicht_naam"]),
+            pd.DataFrame(columns=["identificatie", "grondslag_gemeentelijk_monument"]),
+            len(batch),
         )
 
     verblijfsobjecten_df = pd.DataFrame(verblijfsobjecten).astype(
@@ -156,54 +166,89 @@ async def _query(
 ) -> pd.DataFrame:
     """Voer queries uit voor een lijst verblijfsobjecten.
 
-    Args:
-        session (aiohttp.ClientSession): De sessie voor HTTP requests
-        verblijfsobject_ids (List[str]): Lijst met verblijfsobject ID's
-
-    Returns:
-        pd.DataFrame: DataFrame met monumentinformatie
+    Batches worden parallel verwerkt. Retry en split-on-failure gebeuren per API
+    (cultureel erfgoed en kadaster) in hun eigen modules.
     """
-    # Load 'beschermde_gezichten' and convert to GeoDataFrame
     beschermde_gezichten_df = await _get_beschermde_gezichten(session)
 
-    rijksmonumenten_result = pd.DataFrame()
-    verblijfsobjecten_in_beschermd_gezicht_result = pd.DataFrame()
-    gemeentelijke_monumenten_result = pd.DataFrame()
-
-    # Prepare batches
     batches = [
         verblijfsobject_ids[i : i + _QUERY_BATCH_GROOTTE]
         for i in range(0, len(verblijfsobject_ids), _QUERY_BATCH_GROOTTE)
     ]
 
-    # Create tasks for each batch
-    tasks = [
-        _process_batch(session, batch, beschermde_gezichten_df) for batch in batches
-    ]
+    progress_bar = tqdm_asyncio(
+        total=len(verblijfsobject_ids), disable=len(batches) <= 1
+    )
 
-    progress_bar = tqdm_asyncio(total=len(verblijfsobject_ids), disable=len(tasks) <= 1)
+    _BatchResult = Tuple[DataFrame, DataFrame, DataFrame, int]
+    results_list: List[_BatchResult] = []
 
-    for task in asyncio.as_completed(tasks):
-        (
-            rijksmonumenten,
-            verblijfsobjecten_in_beschermd_gezicht,
-            gemeentelijke_monumenten,
-            aantal,
-        ) = await task
+    _empty_batch_result = (
+        pd.DataFrame(
+            columns=["identificatie", "rijksmonument_nummer", "rijksmonument_bron"]
+        ),
+        pd.DataFrame(columns=["identificatie", "rijksbeschermd_gezicht_naam"]),
+        pd.DataFrame(columns=["identificatie", "grondslag_gemeentelijk_monument"]),
+    )
 
-        rijksmonumenten_result = pd.concat([rijksmonumenten_result, rijksmonumenten])
-        verblijfsobjecten_in_beschermd_gezicht_result = pd.concat(
-            [
-                verblijfsobjecten_in_beschermd_gezicht_result,
-                verblijfsobjecten_in_beschermd_gezicht,
-            ]
+    batch_semaphore = asyncio.Semaphore(_BATCH_CONCURRENCY)
+
+    async def _run_batch(batch: List[str]) -> None:
+        async with batch_semaphore:
+            try:
+                result = await _process_batch(session, batch, beschermde_gezichten_df)
+                results_list.append(result)
+                progress_bar.update(result[3])
+            except Exception:
+                logger.error(
+                    "Batch (size %d) mislukt na retry/split in API-laag, overgeslagen",
+                    len(batch),
+                )
+                results_list.append((*_empty_batch_result, len(batch)))
+                progress_bar.update(len(batch))
+
+    async with asyncio.TaskGroup() as tg:
+        for batch in batches:
+            tg.create_task(_run_batch(batch))
+
+    rijksmonumenten_parts = [r[0] for r in results_list]
+    beschermd_gezicht_parts = [r[1] for r in results_list]
+    gemeentelijke_parts = [r[2] for r in results_list]
+
+    rijksmonumenten_result = (
+        pd.concat(rijksmonumenten_parts, ignore_index=True)
+        if rijksmonumenten_parts
+        else pd.DataFrame(
+            columns=["identificatie", "rijksmonument_nummer", "rijksmonument_bron"]
         )
-        gemeentelijke_monumenten_result = pd.concat(
-            [gemeentelijke_monumenten_result, gemeentelijke_monumenten]
-        )
-        progress_bar.update(aantal)
+    )
+    verblijfsobjecten_in_beschermd_gezicht_result = (
+        pd.concat(beschermd_gezicht_parts, ignore_index=True)
+        if beschermd_gezicht_parts
+        else pd.DataFrame(columns=["identificatie", "rijksbeschermd_gezicht_naam"])
+    )
+    gemeentelijke_monumenten_result = (
+        pd.concat(gemeentelijke_parts, ignore_index=True)
+        if gemeentelijke_parts
+        else pd.DataFrame(columns=["identificatie", "grondslag_gemeentelijk_monument"])
+    )
 
     progress_bar.close()
+
+    if (
+        rijksmonumenten_result.empty
+        and verblijfsobjecten_in_beschermd_gezicht_result.empty
+        and gemeentelijke_monumenten_result.empty
+    ):
+        return pd.DataFrame(
+            columns=[
+                "identificatie",
+                "rijksmonument_nummer",
+                "rijksmonument_bron",
+                "beschermd_gezicht_naam",
+                "grondslag_gemeentelijk_monument",
+            ]
+        )
 
     # The filtering in _process_batch already separates the data correctly:
     # - EWE/EWD rows go to rijksmonumenten_df
@@ -214,16 +259,27 @@ async def _query(
         rijksmonumenten_result = rijksmonumenten_result.drop_duplicates(keep="first")
 
     if not verblijfsobjecten_in_beschermd_gezicht_result.empty:
-        # Aggregate beschermd gezicht names for the same identificatie
-        def _join_beschermd_gezicht_naam(x: pd.Series[str]) -> str | None:
-            if x.dropna().any():
-                return ", ".join(str(v) for v in x.dropna().unique())
-            return None
-
-        verblijfsobjecten_in_beschermd_gezicht_result = (
-            verblijfsobjecten_in_beschermd_gezicht_result.groupby("identificatie")
-            .agg({"beschermd_gezicht_naam": _join_beschermd_gezicht_naam})
-            .reset_index()
+        # Deduplicate (id, name) pairs so we only aggregate unique names per id.
+        df_bg = verblijfsobjecten_in_beschermd_gezicht_result.drop_duplicates(
+            subset=["identificatie", "beschermd_gezicht_naam"]
+        )
+        # Use numpy for aggregation
+        ids = df_bg["identificatie"].to_numpy(dtype=object)
+        names = df_bg["beschermd_gezicht_naam"].to_numpy(dtype=object)
+        # Sort by id so all rows with the same identificatie are contiguous.
+        order = np.argsort(ids)
+        ids, names = ids[order], names[order]
+        # Get start index of each group; end is start of next group or length.
+        unique_ids, group_start = np.unique(ids, return_index=True)
+        group_end = np.concatenate([group_start[1:], [len(ids)]])
+        # For each id, join its beschermd_gezicht names (drop NaNs) with ", ".
+        parts = []
+        for i in range(len(unique_ids)):
+            valid = names[group_start[i] : group_end[i]]
+            valid = valid[~pd.isna(valid)]
+            parts.append(", ".join(valid.astype(str)) or None)
+        verblijfsobjecten_in_beschermd_gezicht_result = pd.DataFrame(
+            {"identificatie": unique_ids, "beschermd_gezicht_naam": parts}
         )
 
     if not gemeentelijke_monumenten_result.empty:
