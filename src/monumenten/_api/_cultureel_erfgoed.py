@@ -40,12 +40,12 @@ _BESCHERMDE_GEZICHTEN_QUERY = """
 PREFIX ceo:<https://linkeddata.cultureelerfgoed.nl/def/ceo#>
 PREFIX rn2:<https://data.cultureelerfgoed.nl/term/id/rn/2/>
 PREFIX geo: <http://www.opengis.net/ont/geosparql#>
-SELECT DISTINCT ?gezicht ?beschermd_gezicht_naam ?gezichtWKT
+SELECT DISTINCT ?gezicht ?rijksbeschermd_gezicht_naam ?gezichtWKT
 WHERE {{
   ?gezicht
       ceo:heeftGeometrie ?gezichtGeometrie ;
       ceo:heeftGezichtsstatus rn2:fd968529-bf70-4afa-8564-7c6c2fcfcc54;
-      ceo:heeftNaam/ceo:naam ?beschermd_gezicht_naam.
+      ceo:heeftNaam/ceo:naam ?rijksbeschermd_gezicht_naam.
   ?gezichtGeometrie geo:asWKT ?gezichtWKT.
 }}
 """

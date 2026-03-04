@@ -63,7 +63,7 @@ async def _process_batch(
             pd.DataFrame(
                 columns=["identificatie", "rijksmonument_nummer", "rijksmonument_bron"]
             ),
-            pd.DataFrame(columns=["identificatie", "beschermd_gezicht_naam"]),
+            pd.DataFrame(columns=["identificatie", "rijksbeschermd_gezicht_naam"]),
             pd.DataFrame(columns=["identificatie", "grondslag_gemeentelijk_monument"]),
             len(batch),
         )
@@ -128,7 +128,7 @@ async def _process_batch(
         beschermde_gezichten_df,
         how="left",
         predicate="within",
-    )[["identificatie", "beschermd_gezicht_naam"]]
+    )[["identificatie", "rijksbeschermd_gezicht_naam"]]
 
     return (
         rijksmonumenten_df,
@@ -154,7 +154,7 @@ async def _get_beschermde_gezichten(
         beschermde_gezichten_df["gezichtWKT"]
     )
     beschermde_gezichten_df = gpd.GeoDataFrame(
-        beschermde_gezichten_df[["beschermd_gezicht_naam", "geometry"]],
+        beschermde_gezichten_df[["rijksbeschermd_gezicht_naam", "geometry"]],
         geometry="geometry",
     )
 
@@ -245,7 +245,7 @@ async def _query(
                 "identificatie",
                 "rijksmonument_nummer",
                 "rijksmonument_bron",
-                "beschermd_gezicht_naam",
+                "rijksbeschermd_gezicht_naam",
                 "grondslag_gemeentelijk_monument",
             ]
         )
@@ -261,25 +261,25 @@ async def _query(
     if not verblijfsobjecten_in_beschermd_gezicht_result.empty:
         # Deduplicate (id, name) pairs so we only aggregate unique names per id.
         df_bg = verblijfsobjecten_in_beschermd_gezicht_result.drop_duplicates(
-            subset=["identificatie", "beschermd_gezicht_naam"]
+            subset=["identificatie", "rijksbeschermd_gezicht_naam"]
         )
         # Use numpy for aggregation
         ids = df_bg["identificatie"].to_numpy(dtype=object)
-        names = df_bg["beschermd_gezicht_naam"].to_numpy(dtype=object)
+        names = df_bg["rijksbeschermd_gezicht_naam"].to_numpy(dtype=object)
         # Sort by id so all rows with the same identificatie are contiguous.
         order = np.argsort(ids)
         ids, names = ids[order], names[order]
         # Get start index of each group; end is start of next group or length.
         unique_ids, group_start = np.unique(ids, return_index=True)
         group_end = np.concatenate([group_start[1:], [len(ids)]])
-        # For each id, join its beschermd_gezicht names (drop NaNs) with ", ".
+        # For each id, join its rijksbeschermd_gezicht names (drop NaNs) with ", ".
         parts = []
         for i in range(len(unique_ids)):
             valid = names[group_start[i] : group_end[i]]
             valid = valid[~pd.isna(valid)]
             parts.append(", ".join(valid.astype(str)) or None)
         verblijfsobjecten_in_beschermd_gezicht_result = pd.DataFrame(
-            {"identificatie": unique_ids, "beschermd_gezicht_naam": parts}
+            {"identificatie": unique_ids, "rijksbeschermd_gezicht_naam": parts}
         )
 
     if not gemeentelijke_monumenten_result.empty:

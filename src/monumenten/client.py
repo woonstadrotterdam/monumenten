@@ -40,7 +40,7 @@ class MonumentenClient:
 
     def _naar_referentiedata(self, row: pd.Series[bool]) -> List[Dict[str, object]]:
         statuses = []
-        if row.is_rijksmonument:
+        if row.rijksmonument:
             statuses.append(
                 {
                     "code": "RIJ",
@@ -48,9 +48,9 @@ class MonumentenClient:
                     "bron": row.rijksmonument_bron,
                 }
             )
-        if row.is_beschermd_gezicht:
+        if row.rijksbeschermd_gezicht:
             statuses.append({"code": "SGR", "naam": "Rijksbeschermd stadsgezicht"})
-        if row.is_gemeentelijk_monument:
+        if row.gemeentelijk_monument:
             statuses.append({"code": "GEM", "naam": "Gemeentelijk monument"})
         return statuses
 
@@ -128,7 +128,7 @@ class MonumentenClient:
 
         merged.insert(
             rijksmonument_nummer_position,
-            "is_rijksmonument",
+            "rijksmonument",
             merged["rijksmonument_bron"].notna(),
         )
 
@@ -139,19 +139,19 @@ class MonumentenClient:
         columns.insert(rijksmonument_nummer_position + 1, "rijksmonument_bron")
         merged = merged[columns]
 
-        beschermd_gezicht_naam_position = merged.columns.get_loc(
-            "beschermd_gezicht_naam"
+        rijksbeschermd_gezicht_naam_position = merged.columns.get_loc(
+            "rijksbeschermd_gezicht_naam"
         )
 
-        if not isinstance(beschermd_gezicht_naam_position, int):
+        if not isinstance(rijksbeschermd_gezicht_naam_position, int):
             raise RuntimeError(
-                "Interne fout: Kan kolomnummer voor 'beschermd_gezicht_naam' niet bepalen"
+                "Interne fout: Kan kolomnummer voor 'rijksbeschermd_gezicht_naam' niet bepalen"
             )
 
         merged.insert(
-            beschermd_gezicht_naam_position,
-            "is_beschermd_gezicht",
-            merged["beschermd_gezicht_naam"].notna(),
+            rijksbeschermd_gezicht_naam_position,
+            "rijksbeschermd_gezicht",
+            merged["rijksbeschermd_gezicht_naam"].notna(),
         )
 
         gemeentelijk_monument_position = merged.columns.get_loc(
@@ -165,7 +165,7 @@ class MonumentenClient:
 
         merged.insert(
             gemeentelijk_monument_position,
-            "is_gemeentelijk_monument",
+            "gemeentelijk_monument",
             merged["grondslag_gemeentelijk_monument"].notna(),
         )
 
