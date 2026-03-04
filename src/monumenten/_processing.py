@@ -259,16 +259,27 @@ async def _query(
         rijksmonumenten_result = rijksmonumenten_result.drop_duplicates(keep="first")
 
     if not verblijfsobjecten_in_beschermd_gezicht_result.empty:
-        # Aggregate beschermd gezicht names for the same identificatie
-        def _join_rijksbeschermd_gezicht_naam(x: pd.Series[str]) -> str | None:
-            if x.dropna().any():
-                return ", ".join(str(v) for v in x.dropna().unique())
-            return None
-
-        verblijfsobjecten_in_beschermd_gezicht_result = (
-            verblijfsobjecten_in_beschermd_gezicht_result.groupby("identificatie")
-            .agg({"rijksbeschermd_gezicht_naam": _join_rijksbeschermd_gezicht_naam})
-            .reset_index()
+        # Deduplicate (id, name) pairs so we only aggregate unique names per id.
+        df_bg = verblijfsobjecten_in_beschermd_gezicht_result.drop_duplicates(
+            subset=["identificatie", "rijksbeschermd_gezicht_naam"]
+        )
+        # Use numpy for aggregation
+        ids = df_bg["identificatie"].to_numpy(dtype=object)
+        names = df_bg["rijksbeschermd_gezicht_naam"].to_numpy(dtype=object)
+        # Sort by id so all rows with the same identificatie are contiguous.
+        order = np.argsort(ids)
+        ids, names = ids[order], names[order]
+        # Get start index of each group; end is start of next group or length.
+        unique_ids, group_start = np.unique(ids, return_index=True)
+        group_end = np.concatenate([group_start[1:], [len(ids)]])
+        # For each id, join its rijksbeschermd_gezicht names (drop NaNs) with ", ".
+        parts = []
+        for i in range(len(unique_ids)):
+            valid = names[group_start[i] : group_end[i]]
+            valid = valid[~pd.isna(valid)]
+            parts.append(", ".join(valid.astype(str)) or None)
+        verblijfsobjecten_in_beschermd_gezicht_result = pd.DataFrame(
+            {"identificatie": unique_ids, "rijksbeschermd_gezicht_naam": parts}
         )
 
     if not gemeentelijke_monumenten_result.empty:
