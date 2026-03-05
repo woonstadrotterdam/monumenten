@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 
 import aiohttp
 
+from monumenten._api._accept_encoding_middleware import accept_encoding_middleware
 from monumenten._api._backoff import (
     MAX_ATTEMPTS,
     MAX_SPLIT_DEPTH,
@@ -89,7 +90,12 @@ async def _post_sparql_json(
     last_error: Optional[BaseException] = None
     for poging in range(MAX_ATTEMPTS):
         try:
-            async with session.post(endpoint, data=data) as response:
+            async with session.post(
+                endpoint,
+                data=data,
+                # avoid zstd for this endpoint (see _accept_encoding_middleware)
+                middlewares=(accept_encoding_middleware,),
+            ) as response:
                 response.raise_for_status()
                 if poging >= 1:
                     logger.info(
