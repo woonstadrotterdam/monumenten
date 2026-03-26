@@ -75,3 +75,6 @@ module = [
     "aiocache.*",  # https://github.com/aio-libs/aiocache/issues/512, https://github.com/aio-libs/aiocache/issues/667
 ]
 ignore_missing_imports = true
+
+[tool.uv]
+exclude-newer = "1 week"
