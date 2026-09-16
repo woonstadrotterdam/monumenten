@@ -1,3 +1,6 @@
+from unittest.mock import AsyncMock, patch
+
+import numpy as np
 import pandas as pd
 import pytest
 import pytest_asyncio
@@ -40,10 +43,12 @@ async def test_process_from_list(client: MonumentenClient):
         == "https://monumentenregister.cultureelerfgoed.nl/monumenten/524327"
     )
     assert result["0599010000360091"]["rijksbeschermd_gezicht"] is False
+    assert result["0599010000360091"]["rijksmonument_voorbescherming"] is False
 
     # Test non-monument
     assert "0599010000486642" in result
     assert isinstance(result["0599010000486642"], dict)
+    assert result["0599010000486642"]["rijksmonument_voorbescherming"] is False
     assert result["0599010000486642"]["rijksmonument"] is False
     assert result["0599010000486642"]["rijksmonument_bron"] is None
     assert result["0599010000486642"]["rijksmonument_nummer"] is None
@@ -110,6 +115,7 @@ async def test_process_from_list(client: MonumentenClient):
     assert result["0599010000341377"]["rijksbeschermd_gezicht_naam"] is None
     assert result["0599010000341377"]["gemeentelijk_monument"] is False
     assert result["0599010000341377"]["grondslag_gemeentelijk_monument"] is None
+    assert result["0599010000341377"]["rijksmonument_voorbescherming"] is False
 
 
 @pytest.mark.asyncio
@@ -498,3 +504,72 @@ async def test_process_from_df_multiple_beschermd_gezichten(client: MonumentenCl
     # Controleer gemeentelijk monument details
     assert not pd.isna(row["grondslag_gemeentelijk_monument"])
     assert "Gemeentewet" in row["grondslag_gemeentelijk_monument"]
+
+
+# ---------------------------------------------------------------------------
+# Voorbescherming rijksmonument (Kadaster grondslagcode EWD)
+# ---------------------------------------------------------------------------
+
+
+def _query_result_met_voorbescherming(identificatie: str) -> pd.DataFrame:
+    """Nabootsing van _query-output voor een verblijfsobject met alleen EWD."""
+    return pd.DataFrame(
+        {
+            "identificatie": [identificatie],
+            "rijksmonument_nummer": pd.array([pd.NA], dtype="string"),
+            "rijksmonument_bron": [np.nan],
+            "rijksmonument_voorbescherming": [True],
+            "rijksbeschermd_gezicht_naam": [np.nan],
+            "grondslag_gemeentelijk_monument": [np.nan],
+            "provinciaal_monument_omschrijving": [np.nan],
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_voorbescherming_gemockt_df(client: MonumentenClient):
+    """Voorbescherming: rijksmonument False, aparte vlag True, juiste kolomvolgorde."""
+    vo = "0599010000000001"
+    with patch(
+        "monumenten.client._query",
+        AsyncMock(return_value=_query_result_met_voorbescherming(vo)),
+    ):
+        result = await client.process_from_df(
+            pd.DataFrame({"bag_verblijfsobject_id": [vo]}), "bag_verblijfsobject_id"
+        )
+
+    assert list(result.columns) == [
+        "bag_verblijfsobject_id",
+        "rijksmonument",
+        "rijksmonument_bron",
+        "rijksmonument_nummer",
+        "rijksmonument_url",
+        "rijksmonument_voorbescherming",
+        "rijksbeschermd_gezicht",
+        "rijksbeschermd_gezicht_naam",
+        "gemeentelijk_monument",
+        "grondslag_gemeentelijk_monument",
+        "provinciaal_monument",
+        "provinciaal_monument_omschrijving",
+    ]
+    row = result.iloc[0]
+    assert bool(row["rijksmonument"]) is False
+    assert pd.isna(row["rijksmonument_bron"])
+    assert pd.isna(row["rijksmonument_nummer"])
+    assert pd.isna(row["rijksmonument_url"])
+    assert bool(row["rijksmonument_voorbescherming"]) is True
+    assert bool(row["gemeentelijk_monument"]) is False
+    assert bool(row["provinciaal_monument"]) is False
+
+
+@pytest.mark.asyncio
+async def test_voorbescherming_gemockt_vera(client: MonumentenClient):
+    """Voorbescherming heeft geen VERA-code (EENHEIDMONUMENT kent geen voorbescherming)."""
+    vo = "0599010000000001"
+    with patch(
+        "monumenten.client._query",
+        AsyncMock(return_value=_query_result_met_voorbescherming(vo)),
+    ):
+        result = await client.process_from_list([vo], to_vera=True)
+
+    assert result[vo] == []

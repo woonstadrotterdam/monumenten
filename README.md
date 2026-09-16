@@ -12,6 +12,9 @@ Door middel van de package is het mogelijk om, indienst gewenst, voor tienduizen
 > [!WARNING]
 > Het is mogelijk dat een verblijfsobject ten onrechte wel of geen monumentstatus heeft. Dit hangt af van hoe het verblijfsobject staat geregistreerd bij het Kadaster en de Rijksdienst voor het Cultureel Erfgoed. Neem contact met hen op als u denkt u een verkeerde monumentale status terugkrijgt.
 
+> [!NOTE]
+> Een **voorbescherming** van een rijksmonument (Kadaster grondslagcode `EWD`: het ontwerpbesluit tot aanwijzing is toegezonden, maar het monument is nog niet ingeschreven in het rijksmonumentenregister) telt **niet** als rijksmonument. Artikel 8a van het Besluit huurprijzen woonruimte kent de opslag toe aan "een rijksmonument als bedoeld in artikel 1.1 van de Erfgoedwet", en dat is uitsluitend een monument dat in het rijksmonumentenregister is ingeschreven. Voorbescherming wordt daarom apart teruggegeven in de kolom `rijksmonument_voorbescherming` en heeft geen VERA-code. Voor gemeentelijke monumenten is dit onderscheid niet te maken: het Kadaster bundelt voorbescherming, aanwijzing en afschrift in één grondslagcode (`GWA`), waardoor `gemeentelijk_monument` ook voorbeschermde gemeentelijke monumenten omvat.
+
 > [!TIP]
 > Op [deze website](https://huggingface.co/spaces/woonstadrotterdam/monumenten-space) kun je via een gebruikersinterface gebruik maken van de package.
 
@@ -23,16 +26,16 @@ pip install monumenten
 
 ## Voorbeeldoutput
 
-| bag_verblijfsobject_id | rijksmonument | rijksmonument_bron | rijksmonument_nummer | rijksmonument_url                                 | rijksbeschermd_gezicht | rijksbeschermd_gezicht_naam | gemeentelijk_monument | grondslag_gemeentelijk_monument                                                        | provinciaal_monument | provinciaal_monument_omschrijving |
-| ---------------------- | ------------- | ------------------ | -------------------- | ------------------------------------------------- | ---------------------- | --------------------------- | --------------------- | -------------------------------------------------------------------------------------- | -------------------- | --------------------------------- |
-| 0599010000360091       | True          | RCE, Kadaster      | 524327               | https://monumentenregister.cultureelerfgoed.nl... | False                  | <NA>                        | False                 | <NA>                                                                                   | False                | <NA>                              |
-| 0599010000486642       | False         | <NA>               | <NA>                 | <NA>                                              | False                  | <NA>                        | False                 | <NA>                                                                                   | False                | <NA>                              |
-| 0599010000281115       | False         | <NA>               | <NA>                 | <NA>                                              | True                   | Kralingen - Midden          | False                 | <NA>                                                                                   | False                | <NA>                              |
-| 0599010000076715       | False         | <NA>               | <NA>                 | <NA>                                              | False                  | <NA>                        | True                  | Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift) | False                | <NA>                              |
-| 0599010000146141       | False         | <NA>               | <NA>                 | <NA>                                              | True                   | Rotterdam - Waterproject    | True                  | Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift) | False                | <NA>                              |
-| 0232010000002251       | False         | <NA>               | <NA>                 | <NA>                                              | False                  | <NA>                        | True                  | Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift) | False                | <NA>                              |
-| 0599010000341377       | True          | Kadaster           | <NA>                 | <NA>                                              | False                  | <NA>                        | False                 | <NA>                                                                                   | False                | <NA>                              |
-| 1680010000004810       | False         | <NA>               | <NA>                 | <NA>                                              | False                  | <NA>                        | False                 | <NA>                                                                                   | True                 | PM1-0001 Dwarshuisboerderij Rolde |
+| bag_verblijfsobject_id | rijksmonument | rijksmonument_bron | rijksmonument_nummer | rijksmonument_url                                 | rijksmonument_voorbescherming | rijksbeschermd_gezicht | rijksbeschermd_gezicht_naam | gemeentelijk_monument | grondslag_gemeentelijk_monument                                                        | provinciaal_monument | provinciaal_monument_omschrijving |
+| ---------------------- | ------------- | ------------------ | -------------------- | ------------------------------------------------- | ----------------------------- | ---------------------- | --------------------------- | --------------------- | -------------------------------------------------------------------------------------- | -------------------- | --------------------------------- |
+| 0599010000360091       | True          | RCE, Kadaster      | 524327               | https://monumentenregister.cultureelerfgoed.nl... | False                         | False                  | <NA>                        | False                 | <NA>                                                                                   | False                | <NA>                              |
+| 0599010000486642       | False         | <NA>               | <NA>                 | <NA>                                              | False                         | False                  | <NA>                        | False                 | <NA>                                                                                   | False                | <NA>                              |
+| 0599010000281115       | False         | <NA>               | <NA>                 | <NA>                                              | False                         | True                   | Kralingen - Midden          | False                 | <NA>                                                                                   | False                | <NA>                              |
+| 0599010000076715       | False         | <NA>               | <NA>                 | <NA>                                              | False                         | False                  | <NA>                        | True                  | Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift) | False                | <NA>                              |
+| 0599010000146141       | False         | <NA>               | <NA>                 | <NA>                                              | False                         | True                   | Rotterdam - Waterproject    | True                  | Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift) | False                | <NA>                              |
+| 0232010000002251       | False         | <NA>               | <NA>                 | <NA>                                              | False                         | False                  | <NA>                        | True                  | Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift) | False                | <NA>                              |
+| 0599010000341377       | True          | Kadaster           | <NA>                 | <NA>                                              | False                         | False                  | <NA>                        | False                 | <NA>                                                                                   | False                | <NA>                              |
+| 1680010000004810       | False         | <NA>               | <NA>                 | <NA>                                              | False                         | False                  | <NA>                        | False                 | <NA>                                                                                   | True                 | PM1-0001 Dwarshuisboerderij Rolde |
 
 ## Architectuur
 
@@ -104,10 +107,11 @@ flowchart TB
     %% PROCESSING
     %% ========================
     subgraph Processing["Verwerking"]
-        P1["Merge rijksmonumenten<br>RCE nummer + Kadaster EWE/EWD"]
+        P1["Merge rijksmonumenten<br>RCE nummer + Kadaster EWE"]
         P2["Spatial join<br>adres WKT ∈ gezicht WKT"]
         P3["Filter gemeentelijke<br>grondslagcode GG/GWA"]
         P4["Spatial join<br>adres WKT ∈ monumentvlak"]
+        P5["Filter voorbescherming<br>grondslagcode EWD"]
     end
 
     %% ========================
@@ -118,6 +122,7 @@ flowchart TB
         O2["Beschermd Gezicht<br>bron: RCE"]
         O3["Gemeentelijk Monument<br>bron: Kadaster"]
         O4["Provinciaal Monument<br>bron: provincie"]
+        O5["Voorbescherming rijksmonument<br>bron: Kadaster"]
     end
 
     %% ========================
@@ -155,7 +160,8 @@ flowchart TB
     %% Processing
     R4 --> P1
     R5 --> P1
-    K6 -->|"EWE/EWD"| P1
+    K6 -->|"EWE"| P1
+    K6 -->|"EWD"| P5
     K2 --> P2
     G3 --> P2
     G4 --> P2
@@ -172,15 +178,17 @@ flowchart TB
     P2 --> O2
     P3 --> O3
     P4 --> O4
+    P5 --> O5
 ```
 
 ### Bronlogica per Monumenttype
 
-| Monumenttype               | Primaire Bron     | Secundaire Bron    | Logica                                                                        |
-| -------------------------- | ----------------- | ------------------ | ----------------------------------------------------------------------------- |
-| **Rijksmonument**          | RCE               | Kadaster (EWE/EWD) | `rijksmonument_bron` = "RCE, Kadaster" als beide, "RCE" of "Kadaster" als één |
-| **Rijksbeschermd Gezicht** | RCE               | -                  | Spatial join: verblijfsobject geometrie ∈ gezicht geometrie                   |
-| **Gemeentelijk Monument**  | Kadaster (GG/GWA) | -                  | Direct uit Kadaster beperking met grondslagcode GG of GWA                     |
+| Monumenttype                      | Primaire Bron     | Secundaire Bron | Logica                                                                                           |
+| --------------------------------- | ----------------- | --------------- | ------------------------------------------------------------------------------------------------ |
+| **Rijksmonument**                 | RCE               | Kadaster (EWE)  | `rijksmonument_bron` = "RCE, Kadaster" als beide, "RCE" of "Kadaster" als één                    |
+| **Rijksbeschermd Gezicht**        | RCE               | -               | Spatial join: verblijfsobject geometrie ∈ gezicht geometrie                                      |
+| **Gemeentelijk Monument**         | Kadaster (GG/GWA) | -               | Direct uit Kadaster beperking met grondslagcode GG of GWA                                        |
+| **Voorbescherming rijksmonument** | Kadaster (EWD)    | -               | `rijksmonument_voorbescherming` = True; telt niet mee voor `rijksmonument` (art. 1.1 Erfgoedwet) |
 
 ### Afkortingen
 
@@ -194,12 +202,12 @@ flowchart TB
 
 ### Grondslagcodes (Kadaster)
 
-| Code    | Wet                                                        | Monumenttype          |
-| ------- | ---------------------------------------------------------- | --------------------- |
-| **EWE** | Erfgoedwet: Afschrift inschrijving rijksmonumentenregister | Rijksmonument         |
-| **EWD** | Erfgoedwet: Ontwerpbesluit aanwijzing (voorbescherming)    | Rijksmonument         |
-| **GG**  | Gemeentewet: Besluit monument                              | Gemeentelijk monument |
-| **GWA** | Gemeentewet: Aanwijzing gemeentelijk monument              | Gemeentelijk monument |
+| Code    | Wet                                                                                                  | Monumenttype                                       |
+| ------- | ---------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| **EWE** | Erfgoedwet: Afschrift inschrijving rijksmonumentenregister                                           | Rijksmonument                                      |
+| **EWD** | Erfgoedwet: Ontwerpbesluit aanwijzing (voorbescherming)                                              | Voorbescherming rijksmonument (geen rijksmonument) |
+| **GG**  | Gemeentewet: Besluit monument                                                                        | Gemeentelijk monument                              |
+| **GWA** | Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing en afschrift in één code) | Gemeentelijk monument                              |
 
 ### SPARQL Endpoints
 
