@@ -87,6 +87,7 @@ flowchart TB
             K5["Beperking"]
             K6["grondslagcode"]
             K7["grondslag"]
+            K8["Beperkingsgebied"]
         end
 
     end
@@ -140,6 +141,8 @@ flowchart TB
     K4 -->|"imx:isBeperkingOpPerceel"| K5
     K5 -->|"imx:grondslagcode"| K6
     K5 -->|"imx:grondslag"| K7
+    K5 -->|"geo:hasGeometry/geo:asWKT"| K8
+    K2 -->|"geof:sfWithin(adrespunt, gebied)"| K8
 
     %% Processing
     R4 --> P1
@@ -159,21 +162,23 @@ flowchart TB
 
 ### Bronlogica per Monumenttype
 
-| Monumenttype               | Primaire Bron     | Secundaire Bron    | Logica                                                                        |
-| -------------------------- | ----------------- | ------------------ | ----------------------------------------------------------------------------- |
-| **Rijksmonument**          | RCE               | Kadaster (EWE/EWD) | `rijksmonument_bron` = "RCE, Kadaster" als beide, "RCE" of "Kadaster" als één |
-| **Rijksbeschermd Gezicht** | RCE               | -                  | Spatial join: verblijfsobject geometrie ∈ gezicht geometrie                   |
-| **Gemeentelijk Monument**  | Kadaster (GG/GWA) | -                  | Direct uit Kadaster beperking met grondslagcode GG of GWA                     |
+| Monumenttype               | Primaire Bron     | Secundaire Bron    | Logica                                                                                                                                                                                             |
+| -------------------------- | ----------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Rijksmonument**          | RCE               | Kadaster (EWE/EWD) | `rijksmonument_bron` = "RCE, Kadaster" als beide, "RCE" of "Kadaster" als één. Kadaster telt alleen als het adrespunt binnen het beperkingsgebied ligt (zie [Beperkingsgebied](#beperkingsgebied)) |
+| **Rijksbeschermd Gezicht** | RCE               | -                  | Spatial join: verblijfsobject geometrie ∈ gezicht geometrie                                                                                                                                        |
+| **Gemeentelijk Monument**  | Kadaster (GG/GWA) | -                  | Kadaster beperking met grondslagcode GG of GWA, alleen als het adrespunt binnen het beperkingsgebied ligt (zie [Beperkingsgebied](#beperkingsgebied))                                              |
 
 ### Afkortingen
 
-| Afkorting | Betekenis                              |
-| --------- | -------------------------------------- |
-| **BAG**   | Basisregistratie Adressen en Gebouwen  |
-| **KKG**   | Kadaster Knowledge Graph               |
-| **RCE**   | Rijksdienst voor het Cultureel Erfgoed |
-| **VERA**  | Vastgoed Referentie Architectuur       |
-| **WKT**   | Well-Known Text (geometrie formaat)    |
+| Afkorting | Betekenis                                                                                                                             |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| **BAG**   | Basisregistratie Adressen en Gebouwen: alle adressen, verblijfsobjecten en panden in Nederland                                        |
+| **BGT**   | Basisregistratie Grootschalige Topografie: gedetailleerde kaart van Nederland met onder meer gebouwen, wegen, water, muren en bruggen |
+| **BRK**   | Basisregistratie Kadaster: kadastrale percelen, met hun eigenaren, rechten en beperkingen                                             |
+| **KKG**   | Kadaster Knowledge Graph                                                                                                              |
+| **RCE**   | Rijksdienst voor het Cultureel Erfgoed                                                                                                |
+| **VERA**  | Vastgoed Referentie Architectuur                                                                                                      |
+| **WKT**   | Well-Known Text (geometrie formaat)                                                                                                   |
 
 ### Grondslagcodes (Kadaster)
 
@@ -183,6 +188,23 @@ flowchart TB
 | **EWD** | Erfgoedwet: Ontwerpbesluit aanwijzing (voorbescherming)    | Rijksmonument         |
 | **GG**  | Gemeentewet: Besluit monument                              | Gemeentelijk monument |
 | **GWA** | Gemeentewet: Aanwijzing gemeentelijk monument              | Gemeentelijk monument |
+
+### Beperkingsgebied
+
+Monumentstatus staat in het Kadaster geregistreerd als een _publiekrechtelijke beperking_: een aantekening dat de overheid regels stelt aan wat je met een stuk grond of gebouw mag doen. Zo'n beperking is gekoppeld aan een _perceel_, een stuk grond met een eigen kadastraal nummer. Op één perceel kunnen meerdere gebouwen staan, en een gebouw kan op meerdere percelen staan.
+
+Daarnaast legt de overheid die de beperking registreert (bijvoorbeeld de gemeente of de RCE) vast voor welk gebied de beperking precies geldt: het _beperkingsgebied_. Zonder extra controle zou elk adres in een gebouw dat het perceel raakt de status krijgen, ook als het monument een ander gebouw op dat perceel is, of als het gebouw maar met een strookje op het perceel staat. Daarom telt een beperking alleen als het _adrespunt_ van het verblijfsobject (de locatie van het adres in de BAG, een punt binnen het pand) binnen het beperkingsgebied ligt. Die controle (`geof:sfWithin`) wordt door het Kadaster zelf uitgevoerd als onderdeel van de KKG-query.
+
+Hoe nauwkeurig dat werkt, hangt af van hoe het beperkingsgebied is vastgelegd. Het Kadaster kent vier manieren (in de data het veld `typeBeperkingsgebied`):
+
+| Type in de data                   | Het beperkingsgebied is…                                                            | Welke adressen krijgen de status                                                                                  |
+| --------------------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `BAG`                             | de omtrek van één pand, overgenomen uit de BAG                                      | alleen adressen in dat pand                                                                                       |
+| `Handmatig ingetekende geometrie` | een vlak dat de overheid zelf op de kaart heeft getekend                            | alleen adressen in dat vlak                                                                                       |
+| `BGT`                             | één object van de BGT-kaart, bijvoorbeeld een gebouw, muur of brug                  | alleen adressen in dat object                                                                                     |
+| `BRK`                             | het hele perceel (of meerdere percelen), zonder aan te geven welk gebouw bedoeld is | alle adressen waarvan het adrespunt op het perceel ligt; gebouwen op hetzelfde perceel zijn niet te onderscheiden |
+
+Alle rijksmonumenten (grondslagcodes EWE/EWD) zijn door de RCE met type `BRK` vastgelegd. Bij een rijksmonument met bron "Kadaster" kan het daarom zo zijn dat niet dit gebouw, maar een ander gebouw op hetzelfde perceel het eigenlijke monument is.
 
 ### SPARQL Endpoints
 

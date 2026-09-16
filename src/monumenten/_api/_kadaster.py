@@ -38,6 +38,7 @@ _KKG_VERBLIJFSOBJECTEN_QUERY_TEMPLATE = """
 PREFIX imx: <http://modellen.geostandaarden.nl/def/imx-geo#>
 PREFIX prov: <http://www.w3.org/ns/prov#>
 PREFIX geo: <http://www.opengis.net/ont/geosparql#>
+PREFIX geof: <http://www.opengis.net/def/function/geosparql/>
 
 SELECT DISTINCT ?nummeraanduiding ?verblijfsobjectWKT ?grondslagcode ?grondslag_gemeentelijk_monument
 WHERE {{
@@ -58,6 +59,14 @@ WHERE {{
       ?beperking imx:isBeperkingOpPerceel ?perceel .
       ?beperking imx:grondslagcode ?grondslagcode .
       ?beperking imx:grondslag ?grondslag_gemeentelijk_monument .
+      # Een beperking hangt aan een perceel, maar geldt voor haar beperkingsgebied
+      # (BAG-pand, BGT-object, handmatige contour of het perceel zelf). Alleen tellen
+      # als het adrespunt binnen dat gebied ligt, anders krijgt elk adres in een gebouw
+      # dat het perceel raakt de status. Het adrespunt wordt hier opnieuw opgehaald:
+      # een FILTER in deze geneste OPTIONAL ziet ?verblijfsobjectWKT niet.
+      ?beperking geo:hasGeometry/geo:asWKT ?beperkingWKT .
+      ?adres geo:hasGeometry/geo:asWKT ?adresWKT .
+      FILTER(geof:sfWithin(?adresWKT, ?beperkingWKT))
       VALUES ?grondslagcode {{
         "GG"  # Besluit monument, Gemeentewet
         "GWA" # Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift)
