@@ -10,17 +10,27 @@ import pytest
 from monumenten._api._backoff import MAX_SPLIT_DEPTH, MIN_BATCH_SIZE
 from monumenten._api._cultureel_erfgoed import _query_rijksmonumenten
 from monumenten._api._kadaster import _query_verblijfsobjecten
-from monumenten._processing import _QUERY_BATCH_GROOTTE, _query
+from monumenten._api._provincies import (
+    DRENTHE,
+    NOORD_HOLLAND,
+    ProvincialeMonumentenError,
+)
+from monumenten._processing import (
+    _QUERY_BATCH_GROOTTE,
+    _koppel_provinciale_monumenten,
+    _query,
+)
 
 
 def _make_batch_result(identificaties, count=None):
-    """Minimal valid (rm, beschermd_gezicht, gemeentelijk) triple + count."""
+    """Minimal valid (rm, beschermd_gezicht, gemeentelijk, provinciaal) frames + count."""
     n = count if count is not None else len(identificaties)
     ids_df = pd.DataFrame({"identificatie": list(identificaties)[:n]})
     rm = ids_df.assign(rijksmonument_nummer="", rijksmonument_bron="")
     bg = ids_df.assign(rijksbeschermd_gezicht_naam=pd.NA)
     gm = ids_df.assign(grondslag_gemeentelijk_monument=pd.NA)
-    return (rm, bg, gm, n)
+    pm = ids_df.assign(provinciaal_monument_omschrijving=pd.NA)
+    return (rm, bg, gm, pm, n)
 
 
 @pytest.fixture
@@ -54,6 +64,7 @@ async def test_query_success(empty_geodataframe):
         "rijksmonument_bron",
         "rijksbeschermd_gezicht_naam",
         "grondslag_gemeentelijk_monument",
+        "provinciaal_monument_omschrijving",
     ]
 
 
@@ -82,6 +93,7 @@ async def test_query_batch_failure_logged(empty_geodataframe):
         "rijksmonument_bron",
         "rijksbeschermd_gezicht_naam",
         "grondslag_gemeentelijk_monument",
+        "provinciaal_monument_omschrijving",
     ]
 
 
@@ -266,3 +278,81 @@ def test_constants():
     assert _QUERY_BATCH_GROOTTE == 500
     assert MIN_BATCH_SIZE == 1
     assert MAX_SPLIT_DEPTH == 10
+
+
+@pytest.mark.asyncio
+async def test_query_provinciale_fout_wordt_niet_overgeslagen(empty_geodataframe):
+    """Een ProvincialeMonumentenError mag niet als lege batch eindigen: dan zou een
+    hele provincie stil False krijgen. De fout komt onverpakt (geen ExceptionGroup)
+    bij de aanroeper."""
+
+    async def mock_process_batch(session, batch, bg_df):
+        raise ProvincialeMonumentenError("Drenthe onbereikbaar")
+
+    with (
+        patch(
+            "monumenten._processing._get_beschermde_gezichten",
+            return_value=empty_geodataframe,
+        ),
+        patch("monumenten._processing._process_batch", side_effect=mock_process_batch),
+    ):
+        async with aiohttp.ClientSession() as session:
+            with pytest.raises(
+                ProvincialeMonumentenError, match="Drenthe onbereikbaar"
+            ):
+                await _query(session, ["id1", "id2"])
+
+
+@pytest.mark.asyncio
+async def test_koppel_provinciale_monumenten_alleen_benodigde_provincie():
+    """Alleen provincies met een adrespunt in hun bounding box worden opgehaald."""
+    from shapely.geometry import Point, box
+
+    geo_df = gpd.GeoDataFrame(
+        {"identificatie": ["rolde_in", "rolde_uit", "rotterdam"]},
+        geometry=[Point(6.646, 52.9885), Point(6.70, 52.95), Point(4.48, 51.92)],
+    )
+    drenthe_df = gpd.GeoDataFrame(
+        {"provinciaal_monument_omschrijving": ["PM1-0001 Dwarshuisboerderij Rolde"]},
+        geometry=[box(6.645, 52.988, 6.647, 52.989)],
+    )
+    opgehaald = []
+
+    async def mock_get(session, provincie):
+        opgehaald.append(provincie.naam)
+        assert provincie is DRENTHE
+        return drenthe_df
+
+    with patch(
+        "monumenten._processing._get_provinciale_monumenten", side_effect=mock_get
+    ):
+        result = await _koppel_provinciale_monumenten(MagicMock(), geo_df)
+
+    assert opgehaald == ["Drenthe"]
+    assert NOORD_HOLLAND.naam not in opgehaald
+    assert result.to_dict(orient="records") == [
+        {
+            "identificatie": "rolde_in",
+            "provinciaal_monument_omschrijving": "PM1-0001 Dwarshuisboerderij Rolde",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_koppel_provinciale_monumenten_buiten_nh_en_dr_geen_download():
+    from shapely.geometry import Point
+
+    geo_df = gpd.GeoDataFrame(
+        {"identificatie": ["rotterdam"]}, geometry=[Point(4.48, 51.92)]
+    )
+    with patch(
+        "monumenten._processing._get_provinciale_monumenten",
+        side_effect=AssertionError("mag niet worden aangeroepen"),
+    ):
+        result = await _koppel_provinciale_monumenten(MagicMock(), geo_df)
+
+    assert result.empty
+    assert list(result.columns) == [
+        "identificatie",
+        "provinciaal_monument_omschrijving",
+    ]
