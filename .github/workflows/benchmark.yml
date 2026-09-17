@@ -1,4 +1,4 @@
-name: Snelheid
+name: Benchmark
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - "benchmarks/**"
-      - ".github/workflows/snelheid.yml"
+      - ".github/workflows/benchmark.yml"
 
 permissions:
   contents: read
@@ -17,7 +17,7 @@ permissions:
 
 # Een nieuwe push annuleert de lopende meting op dezelfde PR
 concurrency:
-  group: snelheid-${{ github.event.pull_request.number || github.ref }}
+  group: benchmark-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 30
     # Eén meting tegelijk voor alle PR's, zodat ze niet samen de Kadaster-limiet opmaken
     concurrency:
-      group: snelheid-kadaster
+      group: benchmark-kadaster
 
     steps:
       - uses: actions/checkout@v4
@@ -39,11 +39,11 @@ jobs:
       - name: Meet basis en kandidaat
         env:
           BASIS: ${{ github.event.pull_request.base.sha || 'origin/main' }}
-        run: python3 benchmarks/snelheid.py --basis "$BASIS" --kandidaat "$GITHUB_SHA" --uitvoer snelheid.md --ruwe-data snelheid.json
+        run: python3 benchmarks/snelheid.py --basis "$BASIS" --kandidaat "$GITHUB_SHA" --uitvoer benchmark.md --ruwe-data benchmark.json
 
       - name: Zet rapport in job summary
-        if: always() && hashFiles('snelheid.md') != ''
-        run: cat snelheid.md >> "$GITHUB_STEP_SUMMARY"
+        if: always() && hashFiles('benchmark.md') != ''
+        run: cat benchmark.md >> "$GITHUB_STEP_SUMMARY"
 
       # Dependabot-PR's krijgen alleen leesrechten; daar blijft het bij de job summary
       - name: Plaats of werk PR-comment bij
@@ -56,14 +56,14 @@ jobs:
           id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
             --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- monumenten-snelheid -->"))) | .id' | head -n 1)
           if [ -n "$id" ]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@snelheid.md > /dev/null
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@benchmark.md > /dev/null
           else
-            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -F body=@snelheid.md > /dev/null
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -F body=@benchmark.md > /dev/null
           fi
 
       - name: Bewaar ruwe metingen
-        if: always() && hashFiles('snelheid.json') != ''
+        if: always() && hashFiles('benchmark.json') != ''
         uses: actions/upload-artifact@v4
         with:
-          name: snelheid
-          path: snelheid.json
+          name: benchmark
+          path: benchmark.json

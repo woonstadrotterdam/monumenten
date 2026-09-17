@@ -1,6 +1,6 @@
 # Snelheidsmeting
 
-Dit script meet of een versie van de package trager is dan een andere. Bij een PR naar `main` die code, dependencies of de meting zelf raakt, draait het automatisch (workflow `Snelheid`). De uitkomst verschijnt in een PR-comment.
+Dit script meet of een versie van de package trager is dan een andere. Bij een PR naar `main` die code, dependencies of de meting zelf raakt, draait het automatisch (workflow `Benchmark`). De uitkomst verschijnt in een PR-comment.
 
 ## Lokaal draaien
 
