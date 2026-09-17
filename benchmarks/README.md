@@ -10,7 +10,7 @@ python benchmarks/snelheid.py --basis origin/main --kandidaat HEAD
 
 Daarvoor zijn git en [uv](https://docs.astral.sh/uv/) nodig. Het script zet beide refs in een tijdelijke worktree, installeert ze met `uv sync --frozen` en meet ze om en om. Alleen gecommitte wijzigingen tellen mee.
 
-Een volledige meting duurt ongeveer 5 minuten. Met `--adressen 1000 --rondes 1` is het in ruim een minuut klaar.
+Een volledige meting duurt ongeveer 5 minuten, of ongeveer 8 als er doorgemeten wordt (zie hieronder). Met `--adressen 1000 --rondes 1` is het in ruim een minuut klaar.
 
 ## Wat er gemeten wordt
 
@@ -29,11 +29,11 @@ Een volledige meting duurt ongeveer 5 minuten. Met `--adressen 1000 --rondes 1` 
 
   Het ophalen van de beschermde gezichten bij het opstarten telt niet mee.
 
-- **Verschil:** het verschil staat als percentage. De API's zijn niet op elk moment even snel, dus een verschil kan toeval zijn. Daarom berekent het script ook tussen welke waarden het echte verschil met 90% zekerheid ligt (met bootstrap).
+- **Verschil:** het verschil staat als percentage. De API's zijn niet op elk moment even snel, dus een verschil kan toeval zijn. Daarom berekent het script ook tussen welke waarden het echte verschil met 90% zekerheid ligt. Verzoeken uit dezelfde ronde lijken op elkaar, omdat de API op dat moment even snel of traag is. De berekening (een bootstrap) trekt daarom eerst rondes en pas daarbinnen verzoeken; anders wordt de marge te smal en volgen er vaker onterechte waarschuwingen.
 - **Oordeel per onderdeel:**
 
   - ⚠️ trager: minstens 20% trager, en ook in het gunstigste geval nog trager.
-  - ❔ mogelijk trager: minstens 20% trager gemeten, maar het kan toeval zijn. Start de benchmark opnieuw om het te controleren.
+  - ❔ mogelijk trager: minstens 20% trager gemeten, maar het kan toeval zijn. Dan meet het script voor die soort adressen automatisch nog eens zoveel, met nieuwe adressen, en beoordeelt het beide metingen samen. Blijft het ❔, start de benchmark dan opnieuw.
   - ✅ geen duidelijk verschil.
   - 🚀 sneller: minstens 20% sneller, en ook in het ongunstigste geval nog sneller.
 

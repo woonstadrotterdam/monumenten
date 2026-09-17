@@ -52,6 +52,10 @@ KKG_PER_MINUUT = 50  # onder de limiet van het Kadaster (60) en van de package (
 BATCH_GROOTTE = 500  # alleen om het aantal Kadaster-verzoeken per ronde te schatten
 KKG_TREFFER_MS = 80  # servertijd waaronder een antwoord vermoedelijk uit de cache komt
 DREMPEL = 0.20  # verschil vanaf waar een onderdeel trager of sneller heet
+TRAGER = "⚠️ trager"
+MOGELIJK_TRAGER = "❔ mogelijk trager"
+GEEN_VERSCHIL = "✅ geen duidelijk verschil"
+SNELLER = "🚀 sneller"
 BOOTSTRAP_TREKKINGEN = 2000
 
 
@@ -97,18 +101,22 @@ def _installeer(naam: str, ref: str, map_: Path, python_versie: str) -> Versie:
 def _trek_steekproeven(
     adressen: int, rng: random.Random
 ) -> Dict[str, Tuple[List[str], List[str]]]:
-    """Trek per set twee disjuncte steekproeven: één voor de basis, één voor de kandidaat."""
+    """Trek per set twee disjuncte steekproeven: één voor de basis, één voor de kandidaat.
+
+    Elke steekproef is twee keer zo groot als nodig, zodat er bij twijfel met nieuwe
+    adressen doorgemeten kan worden.
+    """
     gebruikt: set[str] = set()
     steekproeven = {}
     # monumentvlag eerst, zodat willekeurig geen adressen van die set hergebruikt
     for set_ in sorted(SETS, key=lambda s: s != "monumentvlag"):
         with gzip.open(HIER / "pool" / f"{set_}.txt.gz", "rt") as f:
             pool = [i for i in f.read().split() if i not in gebruikt]
-        if len(pool) < 2 * adressen:
+        if len(pool) < 4 * adressen:
             raise SystemExit(f"Pool {set_} heeft maar {len(pool)} ID's")
-        keuze = rng.sample(pool, 2 * adressen)
+        keuze = rng.sample(pool, 4 * adressen)
         gebruikt.update(keuze)
-        steekproeven[set_] = (keuze[:adressen], keuze[adressen:])
+        steekproeven[set_] = (keuze[0::2], keuze[1::2])
     return steekproeven
 
 
@@ -190,16 +198,27 @@ def _waarden(rondes: List[Dict[str, Any]], host: str) -> List[float]:
 
 
 def _verhouding(
-    basis: List[float], kandidaat: List[float], rng: random.Random
+    basis: List[List[float]], kandidaat: List[List[float]], rng: random.Random
 ) -> Tuple[float, float, float]:
-    """Verhouding van de medianen (kandidaat / basis) met een bootstrap-interval van 90%."""
+    """Verhouding van de medianen (kandidaat / basis) met een bootstrap-interval van 90%.
+
+    Verzoeken uit dezelfde ronde lijken op elkaar, omdat de API op dat moment even snel
+    of traag is. Daarom trekt de bootstrap eerst rondes en pas daarbinnen verzoeken;
+    anders wordt het interval te smal en volgt vaker een onterechte waarschuwing.
+    """
+
+    def trek(rondes: List[List[float]]) -> float:
+        gekozen = rng.choices(rondes, k=len(rondes))
+        return statistics.median(
+            [x for ronde in gekozen for x in rng.choices(ronde, k=len(ronde))]
+        )
+
     trekkingen = sorted(
-        statistics.median(rng.choices(kandidaat, k=len(kandidaat)))
-        / statistics.median(rng.choices(basis, k=len(basis)))
-        for _ in range(BOOTSTRAP_TREKKINGEN)
+        trek(kandidaat) / trek(basis) for _ in range(BOOTSTRAP_TREKKINGEN)
     )
     return (
-        statistics.median(kandidaat) / statistics.median(basis),
+        statistics.median([x for r in kandidaat for x in r])
+        / statistics.median([x for r in basis for x in r]),
         trekkingen[int(0.05 * BOOTSTRAP_TREKKINGEN)],
         trekkingen[int(0.95 * BOOTSTRAP_TREKKINGEN) - 1],
     )
@@ -222,74 +241,114 @@ def _procent(verhouding: float) -> str:
 def _oordeel(verhouding: float, laag: float, hoog: float) -> str:
     """Vat een verschil samen, rekening houdend met de marge."""
     if verhouding >= 1 + DREMPEL:
-        return "⚠️ trager" if laag > 1 else "❔ mogelijk trager"
+        return TRAGER if laag > 1 else MOGELIJK_TRAGER
     if verhouding <= 1 - DREMPEL and hoog < 1:
-        return "🚀 sneller"
-    return "✅ geen duidelijk verschil"
+        return SNELLER
+    return GEEN_VERSCHIL
+
+
+def _beoordeel(
+    versies: Tuple[Versie, Versie], resultaten: List[Dict[str, Any]], seed: int
+) -> List[Dict[str, Any]]:
+    """Vergelijk per set en per onderdeel de basis met de kandidaat."""
+    uitkomsten = []
+    for set_ in SETS:
+        for host in BRONNEN:
+            # per versie een lijst met de waarden van elke ronde
+            b, k = (
+                [
+                    waarden
+                    for r in resultaten
+                    if r["set"] == set_ and r["versie"] == v.naam
+                    for waarden in [_waarden([r], host)]
+                    if waarden
+                ]
+                for v in versies
+            )
+            uitkomst: Dict[str, Any] = {
+                "set": set_,
+                "host": host,
+                "b": [x for r in b for x in r],
+                "k": [x for r in k for x in r],
+            }
+            if b and k:
+                # eigen rng per regel: doormeten bij de ene set verandert de andere niet
+                rng = random.Random(f"{seed}-{set_}-{host}")
+                verhouding, laag, hoog = _verhouding(b, k, rng)
+                uitkomst.update(
+                    verhouding=verhouding,
+                    laag=laag,
+                    hoog=hoog,
+                    oordeel=_oordeel(verhouding, laag, hoog),
+                )
+            uitkomsten.append(uitkomst)
+    return uitkomsten
 
 
 def _rapport(
     versies: Tuple[Versie, Versie],
     resultaten: List[Dict[str, Any]],
-    args: argparse.Namespace,
+    rondes: int,
     seed: int,
     duur_s: float,
 ) -> str:
     basis, kandidaat = versies
-    rng = random.Random(seed)
     drempel = f"{_getal(DREMPEL * 100)}%"
-
-    def rondes(set_: str, versie: Versie) -> List[Dict[str, Any]]:
-        return [
-            r for r in resultaten if r["set"] == set_ and r["versie"] == versie.naam
-        ]
 
     regels = []
     per_oordeel: Dict[str, List[str]] = {}
     aantallen = set()
-    for set_, (set_kolom, set_zin) in SETS.items():
-        for host, (bron_kolom, bron_zin) in BRONNEN.items():
-            b = _waarden(rondes(set_, basis), host)
-            k = _waarden(rondes(set_, kandidaat), host)
-            aantallen.update([len(b), len(k)])
-            if not b or not k:
-                regels.append(
-                    f"| {set_kolom} | {bron_kolom} | – | – | – | te weinig metingen |"
-                )
-                continue
-            verhouding, laag, hoog = _verhouding(b, k, rng)
-            oordeel = _oordeel(verhouding, laag, hoog)
-            per_oordeel.setdefault(oordeel, []).append(
-                f"{bron_zin} bij {set_zin} ({_procent(verhouding)})"
-            )
+    for u in _beoordeel(versies, resultaten, seed):
+        set_kolom, set_zin = SETS[u["set"]]
+        bron_kolom, bron_zin = BRONNEN[u["host"]]
+        aantallen.update([len(u["b"]), len(u["k"])])
+        if "oordeel" not in u:
             regels.append(
-                f"| {set_kolom} | {bron_kolom} "
-                f"| {_getal(statistics.median(b))} ms "
-                f"| {_getal(statistics.median(k))} ms "
-                f"| {_procent(verhouding)}<br><sub>{_procent(laag)} tot {_procent(hoog)}</sub> "
-                f"| {oordeel} |"
+                f"| {set_kolom} | {bron_kolom} | – | – | – | te weinig metingen |"
             )
-
-    samenvatting = []
-    if "⚠️ trager" in per_oordeel:
-        samenvatting.append(
-            f"⚠️ **Trager dan {basis.naam}:** "
-            + "; ".join(per_oordeel["⚠️ trager"])
-            + "."
+            continue
+        per_oordeel.setdefault(u["oordeel"], []).append(
+            f"{bron_zin} bij {set_zin} ({_procent(u['verhouding'])})"
         )
-    if "❔ mogelijk trager" in per_oordeel:
+        regels.append(
+            f"| {set_kolom} | {bron_kolom} "
+            f"| {_getal(statistics.median(u['b']))} ms "
+            f"| {_getal(statistics.median(u['k']))} ms "
+            f"| {_procent(u['verhouding'])}<br>"
+            f"<sub>{_procent(u['laag'])} tot {_procent(u['hoog'])}</sub> "
+            f"| {u['oordeel']} |"
+        )
+
+    doorgemeten = [
+        set_
+        for set_ in SETS
+        if any(r["set"] == set_ and r["ronde"] >= rondes for r in resultaten)
+    ]
+    samenvatting = []
+    if TRAGER in per_oordeel:
+        samenvatting.append(
+            f"⚠️ **Trager dan {basis.naam}:** " + "; ".join(per_oordeel[TRAGER]) + "."
+        )
+    if MOGELIJK_TRAGER in per_oordeel:
         samenvatting.append(
             f"❔ **Mogelijk trager dan {basis.naam}:** "
-            + "; ".join(per_oordeel["❔ mogelijk trager"])
-            + ". Dit kan toeval zijn; start de benchmark opnieuw om het te controleren."
+            + "; ".join(per_oordeel[MOGELIJK_TRAGER])
+            + ". Dit kan toeval zijn"
+            + (", ook na automatisch doormeten" if doorgemeten else "")
+            + "; start de benchmark opnieuw om het te controleren."
         )
     if not samenvatting:
         samenvatting.append(f"✅ **Niet trager dan {basis.naam}.**")
-    if "🚀 sneller" in per_oordeel:
+    if SNELLER in per_oordeel:
         samenvatting.append(
-            f"🚀 **Sneller dan {basis.naam}:** "
-            + "; ".join(per_oordeel["🚀 sneller"])
-            + "."
+            f"🚀 **Sneller dan {basis.naam}:** " + "; ".join(per_oordeel[SNELLER]) + "."
+        )
+    if doorgemeten:
+        samenvatting.append(
+            "Na de eerste meting was er twijfel bij "
+            + " en ".join(SETS[set_][1] for set_ in doorgemeten)
+            + ". Daarom is daar automatisch nog eens zoveel gemeten, met nieuwe "
+            "adressen; de tabel telt beide metingen mee."
         )
 
     def per_versie(tel: Dict[str, int]) -> str:
@@ -350,6 +409,16 @@ def _rapport(
         if len(aantallen) == 1
         else f"{min(aantallen)} tot {max(aantallen)}"
     )
+    adressen = {
+        set_: _getal(
+            sum(
+                r["adressen"]
+                for r in resultaten
+                if r["set"] == set_ and r["versie"] == basis.naam
+            )
+        )
+        for set_ in SETS
+    }
     verwerking = ", ".join(
         f"{v.naam} "
         + _getal(sum(r["totaal_s"] or 0 for r in resultaten if r["versie"] == v.naam))
@@ -378,17 +447,19 @@ def _rapport(
         "toeval zijn. Klein eronder staat tussen welke waarden het echte verschil met "
         "90% zekerheid ligt.",
         "- **Oordeel:**",
-        f"  - ⚠️ trager: minstens {drempel} trager, en ook in het gunstigste geval nog "
+        f"  - {TRAGER}: minstens {drempel} trager, en ook in het gunstigste geval nog "
         "trager.",
-        f"  - ❔ mogelijk trager: minstens {drempel} trager gemeten, maar het kan toeval "
-        "zijn. Start de benchmark opnieuw om het te controleren.",
-        "  - ✅ geen duidelijk verschil.",
-        f"  - 🚀 sneller: minstens {drempel} sneller, en ook in het ongunstigste geval "
+        f"  - {MOGELIJK_TRAGER}: minstens {drempel} trager gemeten, maar het kan toeval "
+        "zijn. Bij twijfel meet de benchmark automatisch nog eens zoveel. Blijft het "
+        f"{MOGELIJK_TRAGER}, start de benchmark dan opnieuw.",
+        f"  - {GEEN_VERSCHIL}.",
+        f"  - {SNELLER}: minstens {drempel} sneller, en ook in het ongunstigste geval "
         "nog sneller.",
-        f"- **Adressen:** per versie {_getal(args.adressen)} willekeurige adressen uit heel "
-        f"Nederland en {_getal(args.adressen)} adressen van monumenten. Bij monumenten "
-        "doet het Kadaster het meeste werk. Elke versie krijgt eigen adressen, zodat "
-        "geen van beide sneller lijkt doordat de API een antwoord nog in de cache had.",
+        f"- **Adressen:** per versie {adressen['willekeurig']} willekeurige adressen uit "
+        f"heel Nederland en {adressen['monumentvlag']} adressen van monumenten. Bij "
+        "monumenten doet het Kadaster het meeste werk. Elke versie krijgt eigen "
+        "adressen, zodat geen van beide sneller lijkt doordat de API een antwoord nog "
+        "in de cache had.",
         "- **Onderdelen:** BAG zoekt bij elk verblijfsobject het adres. Het Kadaster "
         "zoekt waar het adres ligt en welke beperkingen, zoals een monumentstatus, "
         "erop rusten. RCE zoekt de rijksmonumenten.",
@@ -400,6 +471,51 @@ def _rapport(
         f"{int(duur_s % 60)} s · herhalen met `--seed {seed}`</sub>",
     ]
     return "\n".join(uit) + "\n"
+
+
+def _meet(
+    versies: Tuple[Versie, Versie],
+    steekproeven: Dict[str, Tuple[List[str], List[str]]],
+    sets: List[str],
+    rondes: range,
+    ronde_grootte: int,
+    tmp: Path,
+    kkg_starts: Deque[float],
+    resultaten: List[Dict[str, Any]],
+) -> None:
+    """Meet de rondes, om en om per set en per versie, en voeg ze toe aan de resultaten."""
+    for ronde in rondes:
+        for set_ in sets:
+            # wissel per ronde en per set wie eerst gaat, zodat schommelingen in de
+            # tijd beide versies even hard raken
+            eerst_basis = (ronde + list(SETS).index(set_)) % 2 == 0
+            for v in [0, 1] if eerst_basis else [1, 0]:
+                ids = steekproeven[set_][v][
+                    ronde * ronde_grootte : (ronde + 1) * ronde_grootte
+                ]
+                _wacht_op_kadaster(kkg_starts, -(-len(ids) // BATCH_GROOTTE))
+                resultaat = _meet_ronde(versies[v], ids, tmp)
+                kkg_starts.extend(
+                    r["start_epoch"]
+                    for r in resultaat["verzoeken"]
+                    if r["host"] == KKG_HOST
+                )
+                resultaten.append(
+                    {
+                        "set": set_,
+                        "ronde": ronde,
+                        "versie": versies[v].naam,
+                        "adressen": len(ids),
+                        **resultaat,
+                    }
+                )
+                totaal = resultaat["totaal_s"]
+                print(
+                    f"ronde {ronde + 1} · {set_} · {versies[v].naam}: "
+                    f"{len(ids)} adressen in "
+                    + (f"{totaal:.1f} s" if totaal is not None else "mislukt"),
+                    file=sys.stderr,
+                )
 
 
 def main() -> None:
@@ -442,43 +558,45 @@ def main() -> None:
                 _installeer(args.namen[0], args.basis, mappen[0], args.python),
                 _installeer(args.namen[1], args.kandidaat, mappen[1], args.python),
             )
-            resultaten = []
+            resultaten: List[Dict[str, Any]] = []
             kkg_starts: Deque[float] = deque()
-            for ronde in range(args.rondes):
-                for i, set_ in enumerate(SETS):
-                    volgorde = [0, 1] if (ronde + i) % 2 == 0 else [1, 0]
-                    for v in volgorde:
-                        ids = steekproeven[set_][v][
-                            ronde * ronde_grootte : (ronde + 1) * ronde_grootte
-                        ]
-                        _wacht_op_kadaster(kkg_starts, -(-len(ids) // BATCH_GROOTTE))
-                        resultaat = _meet_ronde(versies[v], ids, tmp)
-                        kkg_starts.extend(
-                            r["start_epoch"]
-                            for r in resultaat["verzoeken"]
-                            if r["host"] == KKG_HOST
-                        )
-                        resultaten.append(
-                            {
-                                "set": set_,
-                                "ronde": ronde,
-                                "versie": versies[v].naam,
-                                **resultaat,
-                            }
-                        )
-                        totaal = resultaat["totaal_s"]
-                        print(
-                            f"ronde {ronde + 1}/{args.rondes} · {set_} · "
-                            f"{versies[v].naam}: {len(ids)} adressen in "
-                            + (f"{totaal:.1f} s" if totaal is not None else "mislukt"),
-                            file=sys.stderr,
-                        )
+            _meet(
+                versies,
+                steekproeven,
+                list(SETS),
+                range(args.rondes),
+                ronde_grootte,
+                tmp,
+                kkg_starts,
+                resultaten,
+            )
+            # Bij twijfel nog eens zoveel meten, met nieuwe adressen
+            twijfel = [
+                set_
+                for set_ in SETS
+                if any(
+                    u["set"] == set_ and u.get("oordeel") == MOGELIJK_TRAGER
+                    for u in _beoordeel(versies, resultaten, seed)
+                )
+            ]
+            if twijfel:
+                print(f"twijfel bij {', '.join(twijfel)}: doormeten", file=sys.stderr)
+                _meet(
+                    versies,
+                    steekproeven,
+                    twijfel,
+                    range(args.rondes, 2 * args.rondes),
+                    ronde_grootte,
+                    tmp,
+                    kkg_starts,
+                    resultaten,
+                )
         finally:
             for map_ in mappen:
                 if map_.exists():
                     _voer_uit(["git", "worktree", "remove", "--force", str(map_)])
 
-    rapport = _rapport(versies, resultaten, args, seed, time.time() - start)
+    rapport = _rapport(versies, resultaten, args.rondes, seed, time.time() - start)
     print(rapport)
     if args.uitvoer:
         args.uitvoer.write_text(rapport)
