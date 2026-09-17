@@ -25,7 +25,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections import Counter, deque
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Tuple
@@ -34,19 +34,24 @@ HIER = Path(__file__).resolve().parent
 REPO = HIER.parent
 MARKER = "<!-- monumenten-snelheid -->"
 
-SETS = {"willekeurig": "Willekeurig", "monumentvlag": "Monumentvlag"}
+# set -> (naam in de tabel, naam in een zin)
+SETS = {
+    "willekeurig": ("Willekeurig", "willekeurige adressen"),
+    "monumentvlag": ("Monumenten", "monumenten"),
+}
 KKG_HOST = "data.kkg.kadaster.nl"
 RCE_HOST = "api.linkeddata.cultureelerfgoed.nl"
+# host -> (naam in de tabel, naam in een zin)
 BRONNEN = {
-    KKG_HOST: "Kadaster (servertijd)",
-    "api.labs.kadaster.nl": "BAG",
-    RCE_HOST: "RCE",
+    KKG_HOST: ("Kadaster: ligging en beperkingen", "Kadaster"),
+    "api.labs.kadaster.nl": ("BAG: adressen", "BAG"),
+    RCE_HOST: ("RCE: rijksmonumenten", "RCE"),
 }
 
 KKG_PER_MINUUT = 50  # onder de limiet van het Kadaster (60) en van de package (55)
 BATCH_GROOTTE = 500  # alleen om het aantal Kadaster-verzoeken per ronde te schatten
 KKG_TREFFER_MS = 80  # servertijd waaronder een antwoord vermoedelijk uit de cache komt
-DREMPEL = 1.20
+DREMPEL = 0.20  # verschil vanaf waar een onderdeel trager of sneller heet
 BOOTSTRAP_TREKKINGEN = 2000
 
 
@@ -204,6 +209,25 @@ def _getal(x: float, decimalen: int = 0) -> str:
     return f"{x:,.{decimalen}f}".replace(",", "_").replace(".", ",").replace("_", ".")
 
 
+def _procent(verhouding: float) -> str:
+    """Schrijf een verhouding als procentueel verschil, bijvoorbeeld 1,26 als +26%."""
+    verschil = round((verhouding - 1) * 100)
+    if verschil > 0:
+        return f"+{_getal(verschil)}%"
+    if verschil < 0:
+        return f"−{_getal(-verschil)}%"
+    return "0%"
+
+
+def _oordeel(verhouding: float, laag: float, hoog: float) -> str:
+    """Vat een verschil samen, rekening houdend met de marge."""
+    if verhouding >= 1 + DREMPEL:
+        return "⚠️ trager" if laag > 1 else "❔ mogelijk trager"
+    if verhouding <= 1 - DREMPEL and hoog < 1:
+        return "🚀 sneller"
+    return "✅ geen duidelijk verschil"
+
+
 def _rapport(
     versies: Tuple[Versie, Versie],
     resultaten: List[Dict[str, Any]],
@@ -213,6 +237,7 @@ def _rapport(
 ) -> str:
     basis, kandidaat = versies
     rng = random.Random(seed)
+    drempel = f"{_getal(DREMPEL * 100)}%"
 
     def rondes(set_: str, versie: Versie) -> List[Dict[str, Any]]:
         return [
@@ -220,109 +245,159 @@ def _rapport(
         ]
 
     regels = []
-    trager = []
-    for set_, set_naam in SETS.items():
-        for host, bron in BRONNEN.items():
+    per_oordeel: Dict[str, List[str]] = {}
+    aantallen = set()
+    for set_, (set_kolom, set_zin) in SETS.items():
+        for host, (bron_kolom, bron_zin) in BRONNEN.items():
             b = _waarden(rondes(set_, basis), host)
             k = _waarden(rondes(set_, kandidaat), host)
+            aantallen.update([len(b), len(k)])
             if not b or not k:
                 regels.append(
-                    f"| {set_naam} | {bron} | – | – | – | – | {len(b)} / {len(k)} |"
+                    f"| {set_kolom} | {bron_kolom} | – | – | – | te weinig metingen |"
                 )
                 continue
             verhouding, laag, hoog = _verhouding(b, k, rng)
-            teken = ""
-            if verhouding >= DREMPEL and laag > 1:
-                teken = "⚠️ "
-                trager.append(f"{set_naam} – {bron} ({_getal(verhouding, 2)}×)")
+            oordeel = _oordeel(verhouding, laag, hoog)
+            per_oordeel.setdefault(oordeel, []).append(
+                f"{bron_zin} bij {set_zin} ({_procent(verhouding)})"
+            )
             regels.append(
-                f"| {set_naam} | {bron} "
+                f"| {set_kolom} | {bron_kolom} "
                 f"| {_getal(statistics.median(b))} ms "
                 f"| {_getal(statistics.median(k))} ms "
-                f"| {teken}{_getal(verhouding, 2)} "
-                f"| {_getal(laag, 2)}–{_getal(hoog, 2)} "
-                f"| {len(b)} / {len(k)} |"
+                f"| {_procent(verhouding)}<br><sub>{_procent(laag)} tot {_procent(hoog)}</sub> "
+                f"| {oordeel} |"
             )
 
-    def controle(versie: Versie) -> Dict[str, str]:
+    samenvatting = []
+    if "⚠️ trager" in per_oordeel:
+        samenvatting.append(
+            f"⚠️ **Trager dan {basis.naam}:** "
+            + "; ".join(per_oordeel["⚠️ trager"])
+            + "."
+        )
+    if "❔ mogelijk trager" in per_oordeel:
+        samenvatting.append(
+            f"❔ **Mogelijk trager dan {basis.naam}:** "
+            + "; ".join(per_oordeel["❔ mogelijk trager"])
+            + ". Dit kan toeval zijn; start de benchmark opnieuw om het te controleren."
+        )
+    if not samenvatting:
+        samenvatting.append(f"✅ **Niet trager dan {basis.naam}.**")
+    if "🚀 sneller" in per_oordeel:
+        samenvatting.append(
+            f"🚀 **Sneller dan {basis.naam}:** "
+            + "; ".join(per_oordeel["🚀 sneller"])
+            + "."
+        )
+
+    def per_versie(tel: Dict[str, int]) -> str:
+        return f"{basis.naam} {tel[basis.naam]}, {kandidaat.naam} {tel[kandidaat.naam]}"
+
+    cache: Dict[str, int] = {}
+    kkg_snel: Dict[str, int] = {}
+    mislukt: Dict[str, int] = {}
+    for versie in versies:
         eigen = [r for r in resultaten if r["versie"] == versie.naam]
         meet = [v for r in eigen for v in _meetverzoeken(r)]
-        alle = [v for r in eigen for v in r["verzoeken"]]
-        mislukt = Counter(
-            str(v["fout"] or v["status"])
-            for v in alle
-            if v["fout"] or v["status"] != 200
+        cache[versie.naam] = sum(v["cache"] == "HIT" for v in meet)
+        kkg_snel[versie.naam] = sum(
+            v["host"] == KKG_HOST
+            and v["server_ms"] is not None
+            and v["server_ms"] <= KKG_TREFFER_MS
+            for v in meet
         )
-        uitsplitsing = ", ".join(f"{k}: {n}" for k, n in sorted(mislukt.items()))
-        cel = {
-            f"Totale duur {set_}": _getal(
-                sum(r["totaal_s"] or 0 for r in eigen if r["set"] == set_), 1
-            )
-            + " s"
-            for set_ in SETS
-        }
-        cel["Cachetreffers BAG en RCE (`x-t-cache: HIT`)"] = str(
-            sum(v["cache"] == "HIT" for v in meet)
+        mislukt[versie.naam] = sum(
+            bool(v["fout"]) or v["status"] != 200 for r in eigen for v in r["verzoeken"]
         )
-        cel[f"Kadaster-verzoeken ≤{KKG_TREFFER_MS} ms (mogelijk cache)"] = str(
-            sum(
-                v["host"] == KKG_HOST
-                and v["server_ms"] is not None
-                and v["server_ms"] <= KKG_TREFFER_MS
-                for v in meet
-            )
+    problemen = []
+    if sum(cache.values()):
+        problemen.append(
+            f"{sum(cache.values())} antwoorden van BAG of RCE kwamen uit de cache "
+            f"({per_versie(cache)}). Zo'n antwoord is sneller dan normaal."
         )
-        cel["Mislukte verzoeken"] = str(sum(mislukt.values())) + (
-            f" ({uitsplitsing})" if uitsplitsing else ""
+    if sum(kkg_snel.values()):
+        problemen.append(
+            f"{sum(kkg_snel.values())} antwoorden van het Kadaster waren zo snel "
+            f"(hooguit {KKG_TREFFER_MS} ms) dat ze waarschijnlijk uit de cache kwamen "
+            f"({per_versie(kkg_snel)})."
         )
-        cel["Mislukte rondes"] = str(sum(r["fout"] is not None for r in eigen))
-        return cel
-
-    controle_basis, controle_kandidaat = controle(basis), controle(kandidaat)
-    ronde_fouten = [
-        f"- {r['set']}, ronde {r['ronde'] + 1}, {r['versie']}: {r['fout']}"
+    if sum(mislukt.values()):
+        problemen.append(
+            f"{sum(mislukt.values())} verzoeken mislukten ({per_versie(mislukt)}). "
+            "Details staan in de ruwe metingen (in CI: het artifact `benchmark`)."
+        )
+    problemen += [
+        f"Ronde {r['ronde'] + 1} ({SETS[r['set']][1]}, {r['versie']}) mislukte: {r['fout']}"
         for r in resultaten
         if r["fout"]
     ]
-
-    if trager:
-        samenvatting = (
-            f"⚠️ **{kandidaat.naam} is aantoonbaar trager** bij: " + "; ".join(trager)
-        )
+    if problemen:
+        betrouwbaarheid = [
+            "⚠️ **De meting is mogelijk niet betrouwbaar:**",
+            "",
+            *(f"- {p}" for p in problemen),
+        ]
     else:
-        samenvatting = (
-            f"Geen aantoonbare vertraging: nergens is {kandidaat.naam} minstens "
-            f"{_getal((DREMPEL - 1) * 100)}% trager met een interval dat boven 1 ligt."
-        )
+        betrouwbaarheid = [
+            "✅ De meting is betrouwbaar: geen antwoorden uit de cache en geen "
+            "mislukte verzoeken."
+        ]
 
+    n = (
+        f"{min(aantallen)}"
+        if len(aantallen) == 1
+        else f"{min(aantallen)} tot {max(aantallen)}"
+    )
+    verwerking = ", ".join(
+        f"{v.naam} "
+        + _getal(sum(r["totaal_s"] or 0 for r in resultaten if r["versie"] == v.naam))
+        + " s"
+        for v in versies
+    )
     uit = [
         MARKER,
-        f"## Snelheid: {kandidaat.naam} tegenover {basis.naam}",
+        f"## Benchmark: is {kandidaat.naam} trager dan {basis.naam}?",
         "",
-        samenvatting,
-        "",
-        f"| Set | Bron | {basis.naam} | {kandidaat.naam} "
-        f"| {kandidaat.naam} / {basis.naam} | 90%-interval | Verzoeken |",
-        "|---|---|--:|--:|--:|--:|--:|",
+        *(regel for zin in samenvatting for regel in (zin, "")),
+        f"| Adressen | Onderdeel | {basis.naam} | {kandidaat.naam} | Verschil | Oordeel |",
+        "|---|---|--:|--:|--:|---|",
         *regels,
         "",
-        "Mediaan per verzoek. Voor het Kadaster is dat de servertijd uit "
-        "`server-timing`; voor BAG en RCE de tijd tot het hele antwoord binnen is. "
-        f"⚠️ betekent minstens {_getal((DREMPEL - 1) * 100)}% trager, waarbij ook "
-        "de ondergrens van het interval boven 1 ligt.",
+        *betrouwbaarheid,
         "",
-        f"| Controle | {basis.naam} | {kandidaat.naam} |",
-        "|---|--:|--:|",
-        *(
-            f"| {label} | {controle_basis[label]} | {controle_kandidaat[label]} |"
-            for label in controle_basis
-        ),
+        "<details><summary>Hoe lees je dit?</summary>",
         "",
-        *(["**Mislukte rondes**", "", *ronde_fouten, ""] if ronde_fouten else []),
+        f"- **{basis.naam} en {kandidaat.naam}:** hoe lang één verzoek aan de API typisch "
+        f"duurt. Per versie en per onderdeel zijn {n} verzoeken gemeten; de tabel toont "
+        "de middelste waarde, zodat losse uitschieters niet meetellen. Bij het Kadaster "
+        "is dat de rekentijd op hun server, zonder internetvertraging.",
+        f"- **Verschil:** hoeveel langer (+) of korter (−) {kandidaat.naam} er typisch "
+        "over doet. De API's zijn niet op elk moment even snel, dus een verschil kan "
+        "toeval zijn. Klein eronder staat tussen welke waarden het echte verschil met "
+        "90% zekerheid ligt.",
+        "- **Oordeel:**",
+        f"  - ⚠️ trager: minstens {drempel} trager, en ook in het gunstigste geval nog "
+        "trager.",
+        f"  - ❔ mogelijk trager: minstens {drempel} trager gemeten, maar het kan toeval "
+        "zijn. Start de benchmark opnieuw om het te controleren.",
+        "  - ✅ geen duidelijk verschil.",
+        f"  - 🚀 sneller: minstens {drempel} sneller, en ook in het ongunstigste geval "
+        "nog sneller.",
+        f"- **Adressen:** per versie {_getal(args.adressen)} willekeurige adressen uit heel "
+        f"Nederland en {_getal(args.adressen)} adressen van monumenten. Bij monumenten "
+        "doet het Kadaster het meeste werk. Elke versie krijgt eigen adressen, zodat "
+        "geen van beide sneller lijkt doordat de API een antwoord nog in de cache had.",
+        "- **Onderdelen:** BAG zoekt bij elk verblijfsobject het adres. Het Kadaster "
+        "zoekt waar het adres ligt en welke beperkingen, zoals een monumentstatus, "
+        "erop rusten. RCE zoekt de rijksmonumenten.",
+        "",
+        "</details>",
+        "",
         f"<sub>{basis.naam} `{basis.sha[:7]}` · {kandidaat.naam} `{kandidaat.sha[:7]}` · "
-        f"{_getal(args.adressen)} adressen per set per versie, in {args.rondes} ronde{'s' if args.rondes != 1 else ''} · "
-        f"seed `{seed}` · Python {args.python} · meting duurde "
-        f"{int(duur_s // 60)} min {int(duur_s % 60)} s</sub>",
+        f"totale verwerkingstijd: {verwerking} · meting duurde {int(duur_s // 60)} min "
+        f"{int(duur_s % 60)} s · herhalen met `--seed {seed}`</sub>",
     ]
     return "\n".join(uit) + "\n"
 
@@ -335,7 +410,7 @@ def main() -> None:
     parser.add_argument("--basis", default="origin/main", help="git-ref van de basis")
     parser.add_argument("--kandidaat", default="HEAD", help="git-ref van de kandidaat")
     parser.add_argument(
-        "--namen", nargs=2, default=["main", "PR"], metavar=("BASIS", "KANDIDAAT")
+        "--namen", nargs=2, default=["main", "deze PR"], metavar=("BASIS", "KANDIDAAT")
     )
     parser.add_argument(
         "--adressen", type=int, default=25_000, help="per set per versie"

@@ -14,22 +14,29 @@ Een volledige meting duurt ongeveer 5 minuten. Met `--adressen 1000 --rondes 1` 
 
 ## Wat er gemeten wordt
 
-- **Adressen:** twee sets uit heel Nederland.
+- **Adressen:** twee soorten, uit heel Nederland.
 
-  - **Willekeurig:** gewone adressen.
-  - **Monumentvlag:** adressen die in de dataset als monument staan. Voor die adressen vindt het Kadaster beperkingen, zodat de zwaarste delen van de query werk doen.
+  - **Willekeurig:** willekeurige adressen.
+  - **Monumenten:** adressen die in de dataset als monument staan. Daar doet het Kadaster het meeste werk.
 
-  Elke versie verwerkt van elke set 25.000 adressen, verdeeld over 5 rondes.
+  Elke versie verwerkt van elke soort 25.000 adressen, verdeeld over 5 rondes.
 
 - **Hoe:** elke ronde draait in een eigen proces, via `MonumentenClient.process_from_list`. Het proces gebruikt een aiohttp-sessie die elk verzoek vastlegt.
-- **Tijd per verzoek:** per bron telt de mediaan.
+- **Tijd per verzoek:** per onderdeel telt de middelste waarde (mediaan), zodat losse uitschieters niet meetellen.
 
-  - **Kadaster:** de servertijd uit de header `server-timing`, dus zonder netwerk.
+  - **Kadaster:** de rekentijd op hun server, uit de header `server-timing`, dus zonder internetvertraging.
   - **BAG en RCE:** de tijd tot het hele antwoord binnen is.
 
   Het ophalen van de beschermde gezichten bij het opstarten telt niet mee.
 
-- **Waarschuwing:** de verhouding tussen de medianen krijgt een bootstrap-interval van 90%. ⚠️ verschijnt als de kandidaat minstens 20% trager is en ook de ondergrens van het interval boven 1 ligt.
+- **Verschil:** het verschil staat als percentage. De API's zijn niet op elk moment even snel, dus een verschil kan toeval zijn. Daarom berekent het script ook tussen welke waarden het echte verschil met 90% zekerheid ligt (met bootstrap).
+- **Oordeel per onderdeel:**
+
+  - ⚠️ trager: minstens 20% trager, en ook in het gunstigste geval nog trager.
+  - ❔ mogelijk trager: minstens 20% trager gemeten, maar het kan toeval zijn. Start de benchmark opnieuw om het te controleren.
+  - ✅ geen duidelijk verschil.
+  - 🚀 sneller: minstens 20% sneller, en ook in het ongunstigste geval nog sneller.
+
 - **Tempo:** het script houdt alle rondes samen onder 50 Kadaster-verzoeken per minuut.
 
 ## Cache
