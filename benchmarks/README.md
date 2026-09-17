@@ -25,10 +25,11 @@ Een volledige meting duurt ongeveer 5 minuten, of ongeveer 8 als er doorgemeten 
 - **Tijd per verzoek:** per onderdeel telt de middelste waarde (mediaan), zodat losse uitschieters niet meetellen.
 
   - **Kadaster:** de rekentijd op hun server, uit de header `server-timing`, dus zonder internetvertraging.
-  - **BAG en RCE:** de tijd tot het hele antwoord binnen is.
+  - **Alle andere onderdelen:** de tijd tot het hele antwoord binnen is.
 
   Het ophalen van de beschermde gezichten bij het opstarten telt niet mee.
 
+- **Onderdelen:** Kadaster, BAG en RCE staan altijd in de tabel. Roept een versie nog een andere host aan, dan krijgt die ook een regel. Een leesbare naam en uitleg voor zo'n host staan in `BRONNEN` in `snelheid.py`; zonder die naam staat de hostnaam in de tabel.
 - **Verschil:** het verschil staat als percentage. De API's zijn niet op elk moment even snel, dus een verschil kan toeval zijn. Daarom berekent het script ook tussen welke waarden het echte verschil met 90% zekerheid ligt. Verzoeken uit dezelfde ronde lijken op elkaar, omdat de API op dat moment even snel of traag is. De berekening (een bootstrap) trekt daarom eerst rondes en pas daarbinnen verzoeken; anders wordt de marge te smal en volgen er vaker onterechte waarschuwingen.
 - **Oordeel per onderdeel:**
 
@@ -36,6 +37,8 @@ Een volledige meting duurt ongeveer 5 minuten, of ongeveer 8 als er doorgemeten 
   - ❔ mogelijk trager: minstens 20% trager gemeten, maar het kan toeval zijn. Dan meet het script voor die soort adressen automatisch nog eens zoveel, met nieuwe adressen, en beoordeelt het beide metingen samen. Blijft het ❔, start de benchmark dan opnieuw.
   - ✅ geen duidelijk verschil.
   - 🚀 sneller: minstens 20% sneller, en ook in het ongunstigste geval nog sneller.
+  - 🆕 nieuw onderdeel: alleen de nieuwe versie roept deze host aan, dus er is niets om mee te vergelijken. De tabel toont wel hoe lang de verzoeken duren.
+  - ➖ niet meer gebruikt: alleen de oude versie roept deze host aan.
 
 - **Tempo:** het script houdt alle rondes samen onder 50 Kadaster-verzoeken per minuut.
 
@@ -50,6 +53,8 @@ De API's cachen antwoorden op exact dezelfde query, minstens 15 minuten. Ook een
   - Bij het Kadaster: verzoeken met een servertijd van hooguit 80 ms.
 
 Eerdere runs kunnen adressen in de pool opwarmen, maar dat raakt beide versies even hard.
+
+Verzoeken die niet van de adressen afhangen, zoals het downloaden van een volledige lijst, zijn in elke ronde en voor beide versies gelijk. Daar helpt een eigen steekproef niet. Hooguit de allereerste meting treft zo'n verzoek met een koude cache; daarna is het voor beide versies even warm.
 
 ## Pool vernieuwen
 

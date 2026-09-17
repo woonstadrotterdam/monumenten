@@ -40,13 +40,35 @@ SETS = {
     "monumentvlag": ("Monumenten", "monumenten"),
 }
 KKG_HOST = "data.kkg.kadaster.nl"
+BAG_HOST = "api.labs.kadaster.nl"
 RCE_HOST = "api.linkeddata.cultureelerfgoed.nl"
-# host -> (naam in de tabel, naam in een zin)
+PROVINCIES_UITLEG = (
+    "De provincies leveren de vlakken van hun provinciale monumenten. De package haalt "
+    "die per ronde in een paar grote pagina's op, los van de adressen."
+)
+# host -> (naam in de tabel, naam in een zin, uitleg in het rapport)
 BRONNEN = {
-    KKG_HOST: ("Kadaster: ligging en beperkingen", "Kadaster"),
-    "api.labs.kadaster.nl": ("BAG: adressen", "BAG"),
-    RCE_HOST: ("RCE: rijksmonumenten", "RCE"),
+    KKG_HOST: (
+        "Kadaster: ligging en beperkingen",
+        "Kadaster",
+        "Het Kadaster zoekt waar het adres ligt en welke beperkingen, zoals een "
+        "monumentstatus, erop rusten.",
+    ),
+    BAG_HOST: ("BAG: adressen", "BAG", "BAG zoekt bij elk verblijfsobject het adres."),
+    RCE_HOST: ("RCE: rijksmonumenten", "RCE", "RCE zoekt de rijksmonumenten."),
+    "geoservices.noord-holland.nl": (
+        "Noord-Holland: provinciale monumenten",
+        "Noord-Holland",
+        PROVINCIES_UITLEG,
+    ),
+    "kaartportaal.drenthe.nl": (
+        "Drenthe: provinciale monumenten",
+        "Drenthe",
+        PROVINCIES_UITLEG,
+    ),
 }
+# deze onderdelen staan altijd in de tabel, ook als er geen metingen zijn
+VASTE_BRONNEN = (KKG_HOST, BAG_HOST, RCE_HOST)
 
 KKG_PER_MINUUT = 50  # onder de limiet van het Kadaster (60) en van de package (55)
 BATCH_GROOTTE = 500  # alleen om het aantal Kadaster-verzoeken per ronde te schatten
@@ -56,6 +78,8 @@ TRAGER = "⚠️ trager"
 MOGELIJK_TRAGER = "❔ mogelijk trager"
 GEEN_VERSCHIL = "✅ geen duidelijk verschil"
 SNELLER = "🚀 sneller"
+NIEUW = "🆕 nieuw onderdeel"
+NIET_MEER = "➖ niet meer gebruikt"
 BOOTSTRAP_TREKKINGEN = 2000
 
 
@@ -185,6 +209,27 @@ def _meetverzoeken(ronde: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
 
 
+def _bron(host: str) -> Tuple[str, str, str]:
+    """Namen en uitleg van een host, ook als de benchmark de host nog niet kent."""
+    return BRONNEN.get(
+        host,
+        (
+            host,
+            host,
+            "Een onderdeel zonder naam is een host die de benchmark nog niet kent; "
+            "voeg een naam toe aan `BRONNEN` in `benchmarks/snelheid.py`.",
+        ),
+    )
+
+
+def _hosts(resultaten: List[Dict[str, Any]]) -> List[str]:
+    """De vaste onderdelen, plus elke andere host die een van de versies aanroept."""
+    gezien = {v["host"] for r in resultaten for v in _meetverzoeken(r)}
+    return [h for h in BRONNEN if h in VASTE_BRONNEN or h in gezien] + sorted(
+        gezien - BRONNEN.keys()
+    )
+
+
 def _waarden(rondes: List[Dict[str, Any]], host: str) -> List[float]:
     waarden = []
     for ronde in rondes:
@@ -250,20 +295,34 @@ def _oordeel(verhouding: float, laag: float, hoog: float) -> str:
 def _beoordeel(
     versies: Tuple[Versie, Versie], resultaten: List[Dict[str, Any]], seed: int
 ) -> List[Dict[str, Any]]:
-    """Vergelijk per set en per onderdeel de basis met de kandidaat."""
+    """Vergelijk per set en per onderdeel de basis met de kandidaat.
+
+    Roept maar één versie een host aan, dan is er niets te vergelijken: het oordeel is
+    dan NIEUW of NIET_MEER.
+    """
     uitkomsten = []
+    hosts = _hosts(resultaten)
     for set_ in SETS:
-        for host in BRONNEN:
+        for host in hosts:
+            rondes_b, rondes_k = (
+                [r for r in resultaten if r["set"] == set_ and r["versie"] == v.naam]
+                for v in versies
+            )
+            aangeroepen_b, aangeroepen_k = (
+                any(v["host"] == host for r in rondes for v in _meetverzoeken(r))
+                for rondes in (rondes_b, rondes_k)
+            )
+            if not (aangeroepen_b or aangeroepen_k or host in VASTE_BRONNEN):
+                continue
             # per versie een lijst met de waarden van elke ronde
             b, k = (
                 [
                     waarden
-                    for r in resultaten
-                    if r["set"] == set_ and r["versie"] == v.naam
+                    for r in rondes
                     for waarden in [_waarden([r], host)]
                     if waarden
                 ]
-                for v in versies
+                for rondes in (rondes_b, rondes_k)
             )
             uitkomst: Dict[str, Any] = {
                 "set": set_,
@@ -281,6 +340,10 @@ def _beoordeel(
                     hoog=hoog,
                     oordeel=_oordeel(verhouding, laag, hoog),
                 )
+            elif aangeroepen_k and not aangeroepen_b:
+                uitkomst["oordeel"] = NIEUW
+            elif aangeroepen_b and not aangeroepen_k:
+                uitkomst["oordeel"] = NIET_MEER
             uitkomsten.append(uitkomst)
     return uitkomsten
 
@@ -295,25 +358,40 @@ def _rapport(
     basis, kandidaat = versies
     drempel = f"{_getal(DREMPEL * 100)}%"
 
+    def mediaan(waarden: List[float]) -> str:
+        return f"{_getal(statistics.median(waarden))} ms" if waarden else "–"
+
+    def opsomming(namen: List[str]) -> str:
+        return " en ".join([", ".join(namen[:-1]), namen[-1]] if namen[1:] else namen)
+
     regels = []
     per_oordeel: Dict[str, List[str]] = {}
-    aantallen = set()
+    aantallen: set[int] = set()
+    uitleg: Dict[str, None] = {}  # geordende set
     for u in _beoordeel(versies, resultaten, seed):
         set_kolom, set_zin = SETS[u["set"]]
-        bron_kolom, bron_zin = BRONNEN[u["host"]]
-        aantallen.update([len(u["b"]), len(u["k"])])
+        bron_kolom, bron_zin, bron_uitleg = _bron(u["host"])
+        aantallen.update(len(w) for w in (u["b"], u["k"]) if w)
+        uitleg[bron_uitleg] = None
         if "oordeel" not in u:
             regels.append(
                 f"| {set_kolom} | {bron_kolom} | – | – | – | te weinig metingen |"
+            )
+            continue
+        if u["oordeel"] in (NIEUW, NIET_MEER):
+            namen = per_oordeel.setdefault(u["oordeel"], [])
+            if bron_zin not in namen:
+                namen.append(bron_zin)
+            regels.append(
+                f"| {set_kolom} | {bron_kolom} | {mediaan(u['b'])} | {mediaan(u['k'])} "
+                f"| – | {u['oordeel']} |"
             )
             continue
         per_oordeel.setdefault(u["oordeel"], []).append(
             f"{bron_zin} bij {set_zin} ({_procent(u['verhouding'])})"
         )
         regels.append(
-            f"| {set_kolom} | {bron_kolom} "
-            f"| {_getal(statistics.median(u['b']))} ms "
-            f"| {_getal(statistics.median(u['k']))} ms "
+            f"| {set_kolom} | {bron_kolom} | {mediaan(u['b'])} | {mediaan(u['k'])} "
             f"| {_procent(u['verhouding'])}<br>"
             f"<sub>{_procent(u['laag'])} tot {_procent(u['hoog'])}</sub> "
             f"| {u['oordeel']} |"
@@ -338,10 +416,27 @@ def _rapport(
             + "; start de benchmark opnieuw om het te controleren."
         )
     if not samenvatting:
-        samenvatting.append(f"✅ **Niet trager dan {basis.naam}.**")
+        samenvatting.append(
+            f"✅ **Niet trager dan {basis.naam}** bij de onderdelen die beide gebruiken."
+            if NIEUW in per_oordeel
+            else f"✅ **Niet trager dan {basis.naam}.**"
+        )
     if SNELLER in per_oordeel:
         samenvatting.append(
             f"🚀 **Sneller dan {basis.naam}:** " + "; ".join(per_oordeel[SNELLER]) + "."
+        )
+    if NIEUW in per_oordeel:
+        samenvatting.append(
+            f"🆕 **Nieuw in {kandidaat.naam}:** verzoeken naar "
+            + opsomming(per_oordeel[NIEUW])
+            + f". Die kosten extra tijd, maar zijn niet met {basis.naam} te "
+            "vergelijken; de tabel toont hoe lang ze duren."
+        )
+    if NIET_MEER in per_oordeel:
+        samenvatting.append(
+            f"➖ **Niet meer gebruikt in {kandidaat.naam}:** verzoeken naar "
+            + opsomming(per_oordeel[NIET_MEER])
+            + "."
         )
     if doorgemeten:
         samenvatting.append(
@@ -405,9 +500,22 @@ def _rapport(
         ]
 
     n = (
-        f"{min(aantallen)}"
-        if len(aantallen) == 1
+        f"{min(aantallen, default=0)}"
+        if len(aantallen) <= 1
         else f"{min(aantallen)} tot {max(aantallen)}"
+    )
+    oordeel_nieuw = (
+        [
+            f"  - {NIEUW}: alleen {kandidaat.naam} doet deze verzoeken, dus er is "
+            "niets om mee te vergelijken."
+        ]
+        if NIEUW in per_oordeel
+        else []
+    )
+    oordeel_niet_meer = (
+        [f"  - {NIET_MEER}: alleen {basis.naam} doet deze verzoeken."]
+        if NIET_MEER in per_oordeel
+        else []
     )
     adressen = {
         set_: _getal(
@@ -455,14 +563,14 @@ def _rapport(
         f"  - {GEEN_VERSCHIL}.",
         f"  - {SNELLER}: minstens {drempel} sneller, en ook in het ongunstigste geval "
         "nog sneller.",
+        *oordeel_nieuw,
+        *oordeel_niet_meer,
         f"- **Adressen:** per versie {adressen['willekeurig']} willekeurige adressen uit "
         f"heel Nederland en {adressen['monumentvlag']} adressen van monumenten. Bij "
         "monumenten doet het Kadaster het meeste werk. Elke versie krijgt eigen "
         "adressen, zodat geen van beide sneller lijkt doordat de API een antwoord nog "
         "in de cache had.",
-        "- **Onderdelen:** BAG zoekt bij elk verblijfsobject het adres. Het Kadaster "
-        "zoekt waar het adres ligt en welke beperkingen, zoals een monumentstatus, "
-        "erop rusten. RCE zoekt de rijksmonumenten.",
+        "- **Onderdelen:** " + " ".join(uitleg),
         "",
         "</details>",
         "",
