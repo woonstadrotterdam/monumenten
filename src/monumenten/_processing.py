@@ -31,6 +31,14 @@ logger = logging.getLogger("monumenten.processing")
 _QUERY_BATCH_GROOTTE = 500  # lijkt meest optimaal qua performance
 _BATCH_CONCURRENCY = 4
 
+# Kadaster grondslagcodes (publiekrechtelijke beperkingen, BRK)
+# EWE: inschrijving in het rijksmonumentenregister -> rijksmonument (art. 1.1 Erfgoedwet)
+_RIJKSMONUMENT_GRONDSLAGCODES = ["EWE"]
+# EWD: toezending ontwerpbesluit aanwijzing (voorbescherming) -> nog geen rijksmonument
+_VOORBESCHERMING_GRONDSLAGCODES = ["EWD"]
+# GG/GWA: gemeentelijk monument (GWA bundelt voorbescherming, aanwijzing en afschrift)
+_GEMEENTELIJK_GRONDSLAGCODES = ["GG", "GWA"]
+
 _BatchFrames = Tuple[DataFrame, DataFrame, DataFrame, DataFrame]
 _BatchResult = Tuple[DataFrame, DataFrame, DataFrame, DataFrame, int]
 
@@ -38,6 +46,7 @@ _RESULTAAT_KOLOMMEN = [
     "identificatie",
     "rijksmonument_nummer",
     "rijksmonument_bron",
+    "rijksmonument_voorbescherming",
     "rijksbeschermd_gezicht_naam",
     "grondslag_gemeentelijk_monument",
     "provinciaal_monument_omschrijving",
@@ -48,7 +57,12 @@ def _lege_batch_frames() -> _BatchFrames:
     """Lege resultaatframes voor een batch, in de volgorde van _process_batch."""
     return (
         pd.DataFrame(
-            columns=["identificatie", "rijksmonument_nummer", "rijksmonument_bron"]
+            columns=[
+                "identificatie",
+                "rijksmonument_nummer",
+                "rijksmonument_bron",
+                "rijksmonument_voorbescherming",
+            ]
         ),
         pd.DataFrame(columns=["identificatie", "rijksbeschermd_gezicht_naam"]),
         pd.DataFrame(columns=["identificatie", "grondslag_gemeentelijk_monument"]),
@@ -102,7 +116,7 @@ async def _process_batch(
             dtype="string",
         ),
         verblijfsobjecten_df[
-            verblijfsobjecten_df["grondslagcode"].isin(["EWE", "EWD"])
+            verblijfsobjecten_df["grondslagcode"].isin(_RIJKSMONUMENT_GRONDSLAGCODES)
         ][["identificatie", "grondslagcode"]],
         on="identificatie",
         how="outer",
@@ -112,15 +126,15 @@ async def _process_batch(
     condition_choice_map = {
         "RCE, Kadaster": (
             rijksmonumenten_df["rijksmonument_nummer"].notna()
-            & rijksmonumenten_df["grondslagcode"].isin(["EWE", "EWD"])
+            & rijksmonumenten_df["grondslagcode"].isin(_RIJKSMONUMENT_GRONDSLAGCODES)
         ),
         "RCE": (
             rijksmonumenten_df["rijksmonument_nummer"].notna()
-            & ~rijksmonumenten_df["grondslagcode"].isin(["EWE", "EWD"])
+            & ~rijksmonumenten_df["grondslagcode"].isin(_RIJKSMONUMENT_GRONDSLAGCODES)
         ),
         "Kadaster": (
             rijksmonumenten_df["rijksmonument_nummer"].isna()
-            & rijksmonumenten_df["grondslagcode"].isin(["EWE", "EWD"])
+            & rijksmonumenten_df["grondslagcode"].isin(_RIJKSMONUMENT_GRONDSLAGCODES)
         ),
     }
 
@@ -132,9 +146,25 @@ async def _process_batch(
 
     rijksmonumenten_df.drop(columns=["grondslagcode"], inplace=True)
 
+    # Voorbescherming (EWD) is geen rijksmonument in de zin van art. 1.1 Erfgoedwet
+    # en telt dus niet mee voor rijksmonument/rijksmonument_bron. Wel apart teruggeven.
+    voorbescherming_df = (
+        verblijfsobjecten_df[
+            verblijfsobjecten_df["grondslagcode"].isin(_VOORBESCHERMING_GRONDSLAGCODES)
+        ][["identificatie"]]
+        .drop_duplicates()
+        .assign(rijksmonument_voorbescherming=True)
+    )
+    rijksmonumenten_df = pd.merge(
+        rijksmonumenten_df, voorbescherming_df, on="identificatie", how="outer"
+    )
+    rijksmonumenten_df["rijksmonument_voorbescherming"] = rijksmonumenten_df[
+        "rijksmonument_voorbescherming"
+    ].eq(True)
+
     # Process gemeentelijke monumenten
     gemeentelijke_monumenten_df = verblijfsobjecten_df[
-        verblijfsobjecten_df["grondslagcode"].isin(["GG", "GWA"])
+        verblijfsobjecten_df["grondslagcode"].isin(_GEMEENTELIJK_GRONDSLAGCODES)
     ][["identificatie", "grondslag_gemeentelijk_monument"]]
 
     # Process beschermde gezichten
@@ -362,7 +392,7 @@ async def _query(
         return pd.DataFrame(columns=_RESULTAAT_KOLOMMEN)
 
     # The filtering in _process_batch already separates the data correctly:
-    # - EWE/EWD rows go to rijksmonumenten_df
+    # - EWE rows go to rijksmonumenten_df (EWD only sets rijksmonument_voorbescherming)
     # - GG/GWA rows go to gemeentelijke_monumenten_df
     # We only remove truly duplicate rows (all columns identical) to preserve unique information
 

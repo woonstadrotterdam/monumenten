@@ -18,6 +18,7 @@ from monumenten._api._provincies import (
 from monumenten._processing import (
     _QUERY_BATCH_GROOTTE,
     _koppel_provinciale_monumenten,
+    _process_batch,
     _query,
 )
 
@@ -26,7 +27,11 @@ def _make_batch_result(identificaties, count=None):
     """Minimal valid (rm, beschermd_gezicht, gemeentelijk, provinciaal) frames + count."""
     n = count if count is not None else len(identificaties)
     ids_df = pd.DataFrame({"identificatie": list(identificaties)[:n]})
-    rm = ids_df.assign(rijksmonument_nummer="", rijksmonument_bron="")
+    rm = ids_df.assign(
+        rijksmonument_nummer="",
+        rijksmonument_bron="",
+        rijksmonument_voorbescherming=False,
+    )
     bg = ids_df.assign(rijksbeschermd_gezicht_naam=pd.NA)
     gm = ids_df.assign(grondslag_gemeentelijk_monument=pd.NA)
     pm = ids_df.assign(provinciaal_monument_omschrijving=pd.NA)
@@ -62,6 +67,7 @@ async def test_query_success(empty_geodataframe):
         "identificatie",
         "rijksmonument_nummer",
         "rijksmonument_bron",
+        "rijksmonument_voorbescherming",
         "rijksbeschermd_gezicht_naam",
         "grondslag_gemeentelijk_monument",
         "provinciaal_monument_omschrijving",
@@ -91,6 +97,7 @@ async def test_query_batch_failure_logged(empty_geodataframe):
         "identificatie",
         "rijksmonument_nummer",
         "rijksmonument_bron",
+        "rijksmonument_voorbescherming",
         "rijksbeschermd_gezicht_naam",
         "grondslag_gemeentelijk_monument",
         "provinciaal_monument_omschrijving",
@@ -356,3 +363,152 @@ async def test_koppel_provinciale_monumenten_buiten_nh_en_dr_geen_download():
         "identificatie",
         "provinciaal_monument_omschrijving",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Grondslagcodes: EWE = rijksmonument, EWD = voorbescherming (geen rijksmonument)
+# ---------------------------------------------------------------------------
+
+
+def _beperking(identificatie, grondslagcode=None, grondslag=None):
+    # POINT (0 0) ligt buiten Nederland, dus er wordt geen provincie bevraagd
+    return {
+        "identificatie": identificatie,
+        "verblijfsobjectWKT": "POINT (0 0)",
+        "grondslagcode": grondslagcode,
+        "grondslag_gemeentelijk_monument": grondslag,
+    }
+
+
+_EWD_GRONDSLAG = (
+    "Erfgoedwet: Toezending ontwerpbesluit aanwijzing rijksmonument "
+    "door minister OCW (voorbescherming)"
+)
+_EWE_GRONDSLAG = (
+    "Erfgoedwet: Afschrift inschrijving monument of archeologisch monument "
+    "in rijksmonumentenregister door minister OCW"
+)
+
+
+async def _run_process_batch(
+    rijksmonumenten, verblijfsobjecten, beschermde_gezichten_df
+):
+    ids = sorted({r["identificatie"] for r in verblijfsobjecten})
+    with (
+        patch(
+            "monumenten._processing._query_rijksmonumenten",
+            AsyncMock(return_value=rijksmonumenten),
+        ),
+        patch(
+            "monumenten._processing._query_verblijfsobjecten",
+            AsyncMock(return_value=verblijfsobjecten),
+        ),
+    ):
+        async with aiohttp.ClientSession() as session:
+            return await _process_batch(session, ids, beschermde_gezichten_df)
+
+
+def _rij(rm_df, identificatie):
+    rows = rm_df[rm_df["identificatie"] == identificatie]
+    assert len(rows) == 1, (
+        f"verwacht precies 1 rij voor {identificatie}, kreeg {len(rows)}"
+    )
+    return rows.iloc[0]
+
+
+@pytest.mark.asyncio
+async def test_process_batch_ewd_is_geen_rijksmonument(empty_geodataframe):
+    """EWD (voorbescherming) zet alleen rijksmonument_voorbescherming, geen bron."""
+    rm_df, _, gm_df, _, n = await _run_process_batch(
+        rijksmonumenten=[],
+        verblijfsobjecten=[_beperking("vo_ewd", "EWD", _EWD_GRONDSLAG)],
+        beschermde_gezichten_df=empty_geodataframe,
+    )
+
+    assert n == 1
+    assert list(rm_df.columns) == [
+        "identificatie",
+        "rijksmonument_nummer",
+        "rijksmonument_bron",
+        "rijksmonument_voorbescherming",
+    ]
+    row = _rij(rm_df, "vo_ewd")
+    assert pd.isna(row["rijksmonument_nummer"])
+    assert pd.isna(row["rijksmonument_bron"]) or row["rijksmonument_bron"] == ""
+    assert bool(row["rijksmonument_voorbescherming"]) is True
+    # EWD is ook geen gemeentelijk monument
+    assert gm_df.empty
+
+
+@pytest.mark.asyncio
+async def test_process_batch_ewe_is_rijksmonument_zonder_voorbescherming(
+    empty_geodataframe,
+):
+    rm_df, _, _, _, _ = await _run_process_batch(
+        rijksmonumenten=[],
+        verblijfsobjecten=[_beperking("vo_ewe", "EWE", _EWE_GRONDSLAG)],
+        beschermde_gezichten_df=empty_geodataframe,
+    )
+
+    row = _rij(rm_df, "vo_ewe")
+    assert row["rijksmonument_bron"] == "Kadaster"
+    assert bool(row["rijksmonument_voorbescherming"]) is False
+
+
+@pytest.mark.asyncio
+async def test_process_batch_ewe_en_ewd_op_zelfde_verblijfsobject(empty_geodataframe):
+    """EWE + EWD: één rij, bron Kadaster én voorbescherming True."""
+    rm_df, _, _, _, _ = await _run_process_batch(
+        rijksmonumenten=[],
+        verblijfsobjecten=[
+            _beperking("vo_beide", "EWE", _EWE_GRONDSLAG),
+            _beperking("vo_beide", "EWD", _EWD_GRONDSLAG),
+        ],
+        beschermde_gezichten_df=empty_geodataframe,
+    )
+
+    row = _rij(rm_df, "vo_beide")
+    assert row["rijksmonument_bron"] == "Kadaster"
+    assert bool(row["rijksmonument_voorbescherming"]) is True
+
+
+@pytest.mark.asyncio
+async def test_process_batch_rce_en_ewd(empty_geodataframe):
+    """RCE-nummer + EWD: bron is alleen RCE (EWD telt niet als Kadaster-bron)."""
+    rm_df, _, _, _, _ = await _run_process_batch(
+        rijksmonumenten=[{"identificatie": "vo_rce", "rijksmonument_nummer": "12345"}],
+        verblijfsobjecten=[_beperking("vo_rce", "EWD", _EWD_GRONDSLAG)],
+        beschermde_gezichten_df=empty_geodataframe,
+    )
+
+    row = _rij(rm_df, "vo_rce")
+    assert row["rijksmonument_nummer"] == "12345"
+    assert row["rijksmonument_bron"] == "RCE"
+    assert bool(row["rijksmonument_voorbescherming"]) is True
+
+
+@pytest.mark.asyncio
+async def test_process_batch_rce_en_ewe(empty_geodataframe):
+    rm_df, _, _, _, _ = await _run_process_batch(
+        rijksmonumenten=[{"identificatie": "vo_rce", "rijksmonument_nummer": "12345"}],
+        verblijfsobjecten=[_beperking("vo_rce", "EWE", _EWE_GRONDSLAG)],
+        beschermde_gezichten_df=empty_geodataframe,
+    )
+
+    row = _rij(rm_df, "vo_rce")
+    assert row["rijksmonument_bron"] == "RCE, Kadaster"
+    assert bool(row["rijksmonument_voorbescherming"]) is False
+
+
+@pytest.mark.asyncio
+async def test_process_batch_zonder_beperking(empty_geodataframe):
+    """Verblijfsobject zonder beperking komt niet in rijksmonumenten_df."""
+    rm_df, _, gm_df, pm_df, _ = await _run_process_batch(
+        rijksmonumenten=[],
+        verblijfsobjecten=[_beperking("vo_leeg")],
+        beschermde_gezichten_df=empty_geodataframe,
+    )
+
+    assert rm_df.empty
+    assert gm_df.empty
+    assert pm_df.empty
