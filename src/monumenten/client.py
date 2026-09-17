@@ -116,11 +116,10 @@ class MonumentenClient:
         merged.insert(
             rijksmonument_nummer_position + 1,
             "rijksmonument_url",
-            "https://monumentenregister.cultureelerfgoed.nl/monumenten/"
-            + merged["rijksmonument_nummer"]
-            .fillna("")
-            .astype(str)
-            .where(
+            (
+                "https://monumentenregister.cultureelerfgoed.nl/monumenten/"
+                + merged["rijksmonument_nummer"].fillna("").astype(str)
+            ).where(
                 merged["rijksmonument_nummer"].notna(),
                 np.nan,
             ),

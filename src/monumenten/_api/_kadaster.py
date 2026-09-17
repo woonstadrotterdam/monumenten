@@ -1,14 +1,18 @@
 import asyncio
+import collections
 import logging
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Deque, Dict, List, Optional
 
 import aiohttp
 
 from monumenten._api._accept_encoding_middleware import accept_encoding_middleware
 from monumenten._api._backoff import (
+    KKG_MAX_REQUESTS_PER_MINUTE,
     MAX_ATTEMPTS,
     MAX_SPLIT_DEPTH,
     MIN_BATCH_SIZE,
+    RATE_LIMIT_SLEEP_SECONDS,
     RETRYABLE_NETWORK_EXCEPTIONS,
     RETRYABLE_STATUS_CODES,
     RETRY_SLEEP_SECONDS,
@@ -71,6 +75,9 @@ WHERE {{
 
 _kadaster_semaphore: Optional[asyncio.Semaphore] = None
 
+# Starttijden van KKG requests in de afgelopen minuut, gedeeld over alle batches
+_kkg_request_times: Deque[float] = collections.deque()
+
 # Create a module-level logger
 logger = logging.getLogger("monumenten.api.kadaster")
 
@@ -82,6 +89,22 @@ def _get_semaphore(loop: asyncio.AbstractEventLoop) -> asyncio.Semaphore:
     return _kadaster_semaphore
 
 
+async def _wait_for_kkg_rate_limit() -> None:
+    """Wacht tot er een KKG request verstuurd mag worden (max KKG_MAX_REQUESTS_PER_MINUTE per 60s)."""
+    while True:
+        now = time.monotonic()
+        while _kkg_request_times and _kkg_request_times[0] <= now - 60:
+            _kkg_request_times.popleft()
+        if len(_kkg_request_times) < KKG_MAX_REQUESTS_PER_MINUTE:
+            _kkg_request_times.append(now)
+            return
+        await asyncio.sleep(_kkg_request_times[0] + 60 - now)
+
+
+def _is_rate_limited(error: BaseException) -> bool:
+    return isinstance(error, aiohttp.ClientResponseError) and error.status == 429
+
+
 async def _post_sparql_json(
     session: aiohttp.ClientSession, endpoint: str, query: str, context: str
 ) -> Any:
@@ -89,6 +112,8 @@ async def _post_sparql_json(
     data = {"query": query, "format": "json"}
     last_error: Optional[BaseException] = None
     for poging in range(MAX_ATTEMPTS):
+        if endpoint == _KKG_ENDPOINT:
+            await _wait_for_kkg_rate_limit()
         try:
             async with session.post(
                 endpoint,
@@ -124,15 +149,23 @@ async def _post_sparql_json(
                     str(e),
                 )
                 raise
+            wacht = RETRY_SLEEP_SECONDS
+            if e.status == 429:
+                retry_after = e.headers.get("Retry-After", "") if e.headers else ""
+                wacht = (
+                    int(retry_after)
+                    if retry_after.isdigit()
+                    else RATE_LIMIT_SLEEP_SECONDS
+                )
             logger.warning(
                 "Poging %d/%d voor %s mislukt: %s. Opnieuw proberen over %ds...",
                 poging + 1,
                 MAX_ATTEMPTS,
                 context,
                 str(e),
-                RETRY_SLEEP_SECONDS,
+                wacht,
             )
-            await asyncio.sleep(RETRY_SLEEP_SECONDS)
+            await asyncio.sleep(wacht)
         except RETRYABLE_NETWORK_EXCEPTIONS as e:
             last_error = e
             if poging == MAX_ATTEMPTS - 1:
@@ -164,7 +197,8 @@ async def _query_kkg(
     _depth: int = 0,
 ) -> List[Dict[str, Any]]:
     """Stage 2: query KKG for given nummeraanduiding URIs.
-    Bij falen na retries wordt de set nummeraanduidingen in tweeën gesplitst en opnieuw geprobeerd.
+    Bij falen na retries wordt de set nummeraanduidingen in tweeën gesplitst en opnieuw geprobeerd,
+    behalve bij een rate limit (429): splitsen levert dan alleen meer requests op.
     """
     na_uris = list(na_to_vo_ids.keys())
     try:
@@ -231,8 +265,12 @@ async def _query_kkg(
                     _depth,
                 )
             return resultaten
-    except Exception:
-        if len(na_uris) > MIN_BATCH_SIZE and _depth < MAX_SPLIT_DEPTH:
+    except Exception as e:
+        if (
+            not _is_rate_limited(e)
+            and len(na_uris) > MIN_BATCH_SIZE
+            and _depth < MAX_SPLIT_DEPTH
+        ):
             mid = len(na_uris) // 2
             logger.info(
                 "KKG query mislukt, splitsen in 2 batches van %d en %d nummeraanduidingen (depth %d)",
@@ -293,8 +331,12 @@ async def _query_verblijfsobjecten(
                         ),
                     }
                 )
-    except Exception:
-        if len(identificaties) > MIN_BATCH_SIZE and _depth < MAX_SPLIT_DEPTH:
+    except Exception as e:
+        if (
+            not _is_rate_limited(e)
+            and len(identificaties) > MIN_BATCH_SIZE
+            and _depth < MAX_SPLIT_DEPTH
+        ):
             mid = len(identificaties) // 2
             logger.info(
                 "BAG nummeraanduiding query mislukt, splitsen in 2 batches van %d en %d IDs (depth %d)",
