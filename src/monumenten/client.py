@@ -52,6 +52,8 @@ class MonumentenClient:
             statuses.append({"code": "SGR", "naam": "Rijksbeschermd stadsgezicht"})
         if row.gemeentelijk_monument:
             statuses.append({"code": "GEM", "naam": "Gemeentelijk monument"})
+        if row.provinciaal_monument:
+            statuses.append({"code": "PRO", "naam": "Provinciaal monument"})
         return statuses
 
     async def process_from_df(
@@ -166,6 +168,21 @@ class MonumentenClient:
             gemeentelijk_monument_position,
             "gemeentelijk_monument",
             merged["grondslag_gemeentelijk_monument"].notna(),
+        )
+
+        provinciaal_monument_position = merged.columns.get_loc(
+            "provinciaal_monument_omschrijving",
+        )
+
+        if not isinstance(provinciaal_monument_position, int):
+            raise RuntimeError(
+                "Interne fout: Kan kolomnummer voor 'provinciaal_monument_omschrijving' niet bepalen"
+            )
+
+        merged.insert(
+            provinciaal_monument_position,
+            "provinciaal_monument",
+            merged["provinciaal_monument_omschrijving"].notna(),
         )
 
         merged = merged.replace([np.nan, ""], pd.NA)
