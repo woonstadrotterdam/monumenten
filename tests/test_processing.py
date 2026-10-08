@@ -9,7 +9,7 @@ import pytest
 
 from monumenten._api._backoff import MAX_SPLIT_DEPTH, MIN_BATCH_SIZE
 from monumenten._api._cultureel_erfgoed import _query_rijksmonumenten
-from monumenten._api._kadaster import _query_verblijfsobjecten
+from monumenten._api._kadaster import _koppel_beperkingen, _query_verblijfsobjecten
 from monumenten._processing import _QUERY_BATCH_GROOTTE, _query
 
 
@@ -135,111 +135,112 @@ async def test_rijksmonumenten_splits_on_failure():
     assert {r["identificatie"] for r in result} == {"id1", "id2"}
 
 
+def _bag_response(identificaties):
+    """Minimal BAG WFS response: one verblijfsobject per identificatie."""
+    return {
+        "features": [
+            {
+                "properties": {"identificatie": identificatie},
+                "geometry": {"type": "Point", "coordinates": [nummer, 0.0]},
+            }
+            for nummer, identificatie in enumerate(identificaties)
+        ]
+    }
+
+
 @pytest.mark.asyncio
 async def test_verblijfsobjecten_bag_failure_splits_on_identificaties():
-    """BAG LV failure → split on identificaties → both halves run full pipeline (BAG + KKG).
+    """BAG failure → split on identificaties → BRK-PB runs once for all adrespunten.
 
-    BAG LV call 1 (["id1","id2"]) fails → split into ["id1"] and ["id2"].
-    BAG LV is called twice more (once per half). KKG is called twice (once per half).
-    BAG LV is never called again for the full batch after the failure.
+    BAG call 1 (["id1","id2"]) fails → split into ["id1"] and ["id2"].
+    BAG is called twice more (once per half). BRK-PB is called once with both adrespunten.
     """
     call_order = []
 
-    async def mock_post_sparql(session, endpoint, query, context):
+    async def mock_post_wfs(session, endpoint, query, context):
         call_order.append(context)
         if len(call_order) == 1:
             raise RuntimeError("BAG transient fail")
         if "BAG" in context:
-            if '"id1"' in query:
-                return [{"voId": "id1", "nummeraanduiding": "http://na/1"}]
-            if '"id2"' in query:
-                return [{"voId": "id2", "nummeraanduiding": "http://na/2"}]
-            return []
-        # KKG
-        if "na/1" in query:
-            return [
-                {
-                    "nummeraanduiding": "http://na/1",
-                    "verblijfsobjectWKT": "POINT(0 0)",
-                    "grondslagcode": None,
-                    "grondslag_gemeentelijk_monument": None,
-                }
-            ]
-        return [
-            {
-                "nummeraanduiding": "http://na/2",
-                "verblijfsobjectWKT": "POINT(0 0)",
-                "grondslagcode": None,
-                "grondslag_gemeentelijk_monument": None,
-            }
-        ]
+            return _bag_response([i for i in ("id1", "id2") if i in query])
+        return {"features": []}
 
-    with patch(
-        "monumenten._api._kadaster._post_sparql_json", side_effect=mock_post_sparql
-    ):
+    with patch("monumenten._api._kadaster._post_wfs_json", side_effect=mock_post_wfs):
         session = AsyncMock()
         result = await _query_verblijfsobjecten(session, ["id1", "id2"])
 
     assert len(result) == 2
     assert {r["identificatie"] for r in result} == {"id1", "id2"}
     bag_calls = [c for c in call_order if "BAG" in c]
-    kkg_calls = [c for c in call_order if "KKG" in c]
+    brk_pb_calls = [c for c in call_order if "BRK-PB" in c]
     assert len(bag_calls) == 3  # 1 failed + 2 per-half successes
-    assert len(kkg_calls) == 2  # one KKG per half
+    assert len(brk_pb_calls) == 1  # both adrespunten in one request
 
 
 @pytest.mark.asyncio
-async def test_verblijfsobjecten_kkg_failure_splits_on_nummeraanduidingen():
-    """KKG failure → split on nummeraanduiding URIs → BAG LV is NOT re-run.
+async def test_verblijfsobjecten_brk_pb_failure_splits_on_adrespunten():
+    """BRK-PB failure → split on adrespunten → BAG is NOT re-run.
 
-    BAG LV call 1 (["id1","id2"]) succeeds → na/1 + na/2.
-    KKG call 1 (both URIs) fails → split into [na/1] and [na/2].
-    KKG is called twice more (once per half). BAG LV is called exactly once total.
+    BAG call 1 (["id1","id2"]) succeeds → two adrespunten.
+    BRK-PB call 1 (both adrespunten) fails → split into one adrespunt each.
+    BRK-PB is called twice more (once per half). BAG is called exactly once total.
     """
     call_order = []
-    kkg_call_count = 0
+    brk_pb_call_count = 0
 
-    async def mock_post_sparql(session, endpoint, query, context):
-        nonlocal kkg_call_count
+    async def mock_post_wfs(session, endpoint, query, context):
+        nonlocal brk_pb_call_count
         call_order.append(context)
         if "BAG" in context:
-            return [
-                {"voId": "id1", "nummeraanduiding": "http://na/1"},
-                {"voId": "id2", "nummeraanduiding": "http://na/2"},
-            ]
-        # KKG
-        kkg_call_count += 1
-        if kkg_call_count == 1:
-            raise RuntimeError("KKG transient fail")
-        if "na/1" in query:
-            return [
-                {
-                    "nummeraanduiding": "http://na/1",
-                    "verblijfsobjectWKT": "POINT(0 0)",
-                    "grondslagcode": None,
-                    "grondslag_gemeentelijk_monument": None,
-                }
-            ]
-        return [
-            {
-                "nummeraanduiding": "http://na/2",
-                "verblijfsobjectWKT": "POINT(0 0)",
-                "grondslagcode": None,
-                "grondslag_gemeentelijk_monument": None,
-            }
-        ]
+            return _bag_response(["id1", "id2"])
+        brk_pb_call_count += 1
+        if brk_pb_call_count == 1:
+            raise RuntimeError("BRK-PB transient fail")
+        return {"features": []}
 
-    with patch(
-        "monumenten._api._kadaster._post_sparql_json", side_effect=mock_post_sparql
-    ):
+    with patch("monumenten._api._kadaster._post_wfs_json", side_effect=mock_post_wfs):
         session = AsyncMock()
         result = await _query_verblijfsobjecten(session, ["id1", "id2"])
 
     assert len(result) == 2
     assert {r["identificatie"] for r in result} == {"id1", "id2"}
     bag_calls = [c for c in call_order if "BAG" in c]
-    assert len(bag_calls) == 1  # BAG LV called exactly once, never re-run
-    assert kkg_call_count == 3  # 1 failed + 2 per-half successes
+    assert len(bag_calls) == 1  # BAG called exactly once, never re-run
+    assert brk_pb_call_count == 3  # 1 failed + 2 per-half successes
+
+
+def test_koppel_beperkingen_alleen_binnen_beperkingsgebied():
+    """Alleen het adrespunt binnen het beperkingsgebied krijgt de grondslag."""
+    beperking = {
+        "type": "Feature",
+        "properties": {
+            "grondslagCode": "GWA",
+            "grondslagOmschrijving": "Gemeentewet: Aanwijzing gemeentelijk monument",
+        },
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]]],
+        },
+    }
+
+    result = _koppel_beperkingen(
+        {"binnen": (5.0, 5.0), "buiten": (15.0, 5.0)}, [beperking]
+    )
+
+    assert result == [
+        {
+            "identificatie": "binnen",
+            "verblijfsobjectWKT": "POINT (5 5)",
+            "grondslagcode": "GWA",
+            "grondslag_gemeentelijk_monument": "Gemeentewet: Aanwijzing gemeentelijk monument",
+        },
+        {
+            "identificatie": "buiten",
+            "verblijfsobjectWKT": "POINT (15 5)",
+            "grondslagcode": None,
+            "grondslag_gemeentelijk_monument": None,
+        },
+    ]
 
 
 @pytest.mark.asyncio

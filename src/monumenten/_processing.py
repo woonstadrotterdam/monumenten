@@ -18,7 +18,7 @@ from monumenten._api._cultureel_erfgoed import (
     _query_beschermde_gezichten,
     _query_rijksmonumenten,
 )
-from monumenten._api._kadaster import _query_verblijfsobjecten
+from monumenten._api._kadaster import _RD, _query_verblijfsobjecten
 
 logger = logging.getLogger("monumenten.processing")
 
@@ -120,6 +120,7 @@ async def _process_batch(
             geometry=lambda x: gpd.GeoSeries.from_wkt(x["verblijfsobjectWKT"])
         )[["identificatie", "geometry"]],
         geometry="geometry",
+        crs=_RD,
     )
 
     # Find objects within beschermde gezichten
@@ -153,10 +154,12 @@ async def _get_beschermde_gezichten(
     beschermde_gezichten_df["geometry"] = gpd.GeoSeries.from_wkt(
         beschermde_gezichten_df["gezichtWKT"]
     )
+    # De RCE levert de gezichten in WGS84, de adrespunten van het Kadaster zijn in RD
     beschermde_gezichten_df = gpd.GeoDataFrame(
         beschermde_gezichten_df[["rijksbeschermd_gezicht_naam", "geometry"]],
         geometry="geometry",
-    )
+        crs="EPSG:4326",
+    ).to_crs(_RD)
 
     return beschermde_gezichten_df
 

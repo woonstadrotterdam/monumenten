@@ -72,21 +72,17 @@ flowchart TB
     %% ========================
     %% KADASTER
     %% ========================
-    subgraph Kadaster["Kadaster"]
+    subgraph Kadaster["Kadaster (via PDOK)"]
 
-        subgraph BAG["BAG LV – Stage 1"]
+        subgraph BAG["BAG – Stage 1"]
             B1["Verblijfsobject"]
-            B2["Nummeraanduiding"]
+            B2["Adrespunt"]
         end
 
-        subgraph KKG["KKG – Stage 2"]
-            K1["Adres"]
-            K2["AdresGeometrie"]
-            K3["Gebouw"]
-            K4["Perceel"]
+        subgraph BRKPB["BRK-PB – Stage 2"]
             K5["Beperking"]
-            K6["grondslagcode"]
-            K7["grondslag"]
+            K6["grondslagCode"]
+            K7["grondslagOmschrijving"]
             K8["Beperkingsgebied"]
         end
 
@@ -96,8 +92,9 @@ flowchart TB
     %% PROCESSING
     %% ========================
     subgraph Processing["Verwerking"]
+        P0["Spatial join<br>adrespunt ∈ beperkingsgebied"]
         P1["Merge rijksmonumenten<br>RCE nummer + Kadaster EWE/EWD"]
-        P2["Spatial join<br>adres WKT ∈ gezicht WKT"]
+        P2["Spatial join<br>adrespunt ∈ gezicht WKT"]
         P3["Filter gemeentelijke<br>grondslagcode GG/GWA"]
     end
 
@@ -129,30 +126,27 @@ flowchart TB
     G2 -->|"geo:asWKT"| G3
 
     %% Kadaster BAG
-    A -->|"VALUES ?voId"| B1
-    B1 -->|"nen3610:identificatie"| B1
-    B1 -->|"bag:heeftAlsHoofdadres"| B2
+    A -->|"identificatie"| B1
+    B1 -->|"geom"| B2
 
-    %% Kadaster KKG
-    B2 -->|"prov:wasDerivedFrom"| K1
-    K1 -->|"geo:hasGeometry/geo:asWKT"| K2
-    K1 -->|"imx:heeftAlsAdres"| K3
-    K3 -->|"imx:bevindtZichOpPerceel"| K4
-    K4 -->|"imx:isBeperkingOpPerceel"| K5
-    K5 -->|"imx:grondslagcode"| K6
-    K5 -->|"imx:grondslag"| K7
-    K5 -->|"geo:hasGeometry/geo:asWKT"| K8
-    K2 -->|"geof:sfWithin(adrespunt, gebied)"| K8
+    %% Kadaster BRK-PB
+    B2 -->|"Intersects(geom, adrespunten)"| K5
+    K5 -->|"grondslagCode"| K6
+    K5 -->|"grondslagOmschrijving"| K7
+    K5 -->|"geom"| K8
 
     %% Processing
+    B2 --> P0
+    K6 --> P0
+    K7 --> P0
+    K8 --> P0
     R4 --> P1
     R5 --> P1
-    K6 -->|"EWE/EWD"| P1
-    K2 --> P2
+    P0 -->|"EWE/EWD"| P1
+    B2 --> P2
     G3 --> P2
     G4 --> P2
-    K6 -->|"GG/GWA"| P3
-    K7 --> P3
+    P0 -->|"GG/GWA"| P3
 
     %% Output
     P1 --> O1
@@ -170,15 +164,17 @@ flowchart TB
 
 ### Afkortingen
 
-| Afkorting | Betekenis                                                                                                                             |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| **BAG**   | Basisregistratie Adressen en Gebouwen: alle adressen, verblijfsobjecten en panden in Nederland                                        |
-| **BGT**   | Basisregistratie Grootschalige Topografie: gedetailleerde kaart van Nederland met onder meer gebouwen, wegen, water, muren en bruggen |
-| **BRK**   | Basisregistratie Kadaster: kadastrale percelen, met hun eigenaren, rechten en beperkingen                                             |
-| **KKG**   | Kadaster Knowledge Graph                                                                                                              |
-| **RCE**   | Rijksdienst voor het Cultureel Erfgoed                                                                                                |
-| **VERA**  | Vastgoed Referentie Architectuur                                                                                                      |
-| **WKT**   | Well-Known Text (geometrie formaat)                                                                                                   |
+| Afkorting  | Betekenis                                                                                                                             |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| **BAG**    | Basisregistratie Adressen en Gebouwen: alle adressen, verblijfsobjecten en panden in Nederland                                        |
+| **BGT**    | Basisregistratie Grootschalige Topografie: gedetailleerde kaart van Nederland met onder meer gebouwen, wegen, water, muren en bruggen |
+| **BRK**    | Basisregistratie Kadaster: kadastrale percelen, met hun eigenaren, rechten en beperkingen                                             |
+| **BRK-PB** | BRK Publiekrechtelijke Beperkingen: de beperkingen uit de BRK, zoals een monumentstatus                                               |
+| **PDOK**   | Publieke Dienstverlening Op de Kaart: platform waarop de overheid geodata beschikbaar stelt                                           |
+| **RCE**    | Rijksdienst voor het Cultureel Erfgoed                                                                                                |
+| **VERA**   | Vastgoed Referentie Architectuur                                                                                                      |
+| **WFS**    | Web Feature Service (standaard voor het opvragen van geodata)                                                                         |
+| **WKT**    | Well-Known Text (geometrie formaat)                                                                                                   |
 
 ### Grondslagcodes (Kadaster)
 
@@ -193,7 +189,7 @@ flowchart TB
 
 Monumentstatus staat in het Kadaster geregistreerd als een _publiekrechtelijke beperking_: een aantekening dat de overheid regels stelt aan wat je met een stuk grond of gebouw mag doen. Zo'n beperking is gekoppeld aan een _perceel_, een stuk grond met een eigen kadastraal nummer. Op één perceel kunnen meerdere gebouwen staan, en een gebouw kan op meerdere percelen staan.
 
-Daarnaast legt de overheid die de beperking registreert (bijvoorbeeld de gemeente of de RCE) vast voor welk gebied de beperking precies geldt: het _beperkingsgebied_. Zonder extra controle zou elk adres in een gebouw dat het perceel raakt de status krijgen, ook als het monument een ander gebouw op dat perceel is, of als het gebouw maar met een strookje op het perceel staat. Daarom telt een beperking alleen als het _adrespunt_ van het verblijfsobject (de locatie van het adres in de BAG, een punt binnen het pand) binnen het beperkingsgebied ligt. Die controle (`geof:sfWithin`) wordt door het Kadaster zelf uitgevoerd als onderdeel van de KKG-query.
+Daarnaast legt de overheid die de beperking registreert (bijvoorbeeld de gemeente of de RCE) vast voor welk gebied de beperking precies geldt: het _beperkingsgebied_. Zonder extra controle zou elk adres in een gebouw dat het perceel raakt de status krijgen, ook als het monument een ander gebouw op dat perceel is, of als het gebouw maar met een strookje op het perceel staat. Daarom telt een beperking alleen als het _adrespunt_ van het verblijfsobject (de locatie van het adres in de BAG, een punt binnen het pand) binnen het beperkingsgebied ligt. De BRK-PB WFS geeft de beperkingen terug waarvan het gebied minstens één van de opgevraagde adrespunten raakt; de package bepaalt daarna zelf per adrespunt binnen welke gebieden het ligt.
 
 Hoe nauwkeurig dat werkt, hangt af van hoe het beperkingsgebied is vastgelegd. Het Kadaster kent vier manieren (in de data het veld `typeBeperkingsgebied`):
 
@@ -206,17 +202,17 @@ Hoe nauwkeurig dat werkt, hangt af van hoe het beperkingsgebied is vastgelegd. H
 
 Alle rijksmonumenten (grondslagcodes EWE/EWD) zijn door de RCE met type `BRK` vastgelegd. Bij een rijksmonument met bron "Kadaster" kan het daarom zo zijn dat niet dit gebouw, maar een ander gebouw op hetzelfde perceel het eigenlijke monument is.
 
-### SPARQL Endpoints
+### Endpoints
 
-| Bron             | Endpoint                                                             |
-| ---------------- | -------------------------------------------------------------------- |
-| **BAG LV**       | `https://api.labs.kadaster.nl/datasets/bag/lv/services/baglv/sparql` |
-| **Kadaster KKG** | `https://data.kkg.kadaster.nl/service/sparql`                        |
-| **RCE**          | `https://api.linkeddata.cultureelerfgoed.nl/datasets/rce/cho/sparql` |
+| Bron                | Type       | Endpoint                                                                            |
+| ------------------- | ---------- | ----------------------------------------------------------------------------------- |
+| **Kadaster BAG**    | WFS (PDOK) | `https://service.pdok.nl/kadaster/bag/wfs/v2_0`                                     |
+| **Kadaster BRK-PB** | WFS (PDOK) | `https://service.pdok.nl/kadaster/brk-publiekrechtelijke-beperkingen-wkpb/wfs/v1_0` |
+| **RCE**             | SPARQL     | `https://api.linkeddata.cultureelerfgoed.nl/datasets/rce/cho/sparql`                |
 
 ### Retry-gedrag
 
-Aanroepen naar Kadaster (BAG LV, KKG) en RCE gebruiken een gedeelde retry-logica: maximaal 2 pogingen per request, bij mislukking 3 seconden wachten. Alleen tijdelijke fouten worden herhaald (HTTP 429, 500, 502, 503, 504 en netwerk-/verbindingsfouten); permanente 4xx worden direct doorgegeven. Faalt een aanroep na retries, dan wordt de set IDs/URIs in tweeën gedeeld en elk deel opnieuw geprobeerd (recursief, per API, tot min. 1 ID of max. splitdiepte 10); definitief falende aanroepen worden overgeslagen met een waarschuwing.
+Aanroepen naar Kadaster (BAG, BRK-PB) en RCE gebruiken een gedeelde retry-logica: maximaal 2 pogingen per request, bij mislukking 3 seconden wachten. Alleen tijdelijke fouten worden herhaald (HTTP 429, 500, 502, 503, 504 en netwerk-/verbindingsfouten); permanente 4xx worden direct doorgegeven. Faalt een aanroep na retries, dan wordt de set IDs/adrespunten in tweeën gedeeld en elk deel opnieuw geprobeerd (recursief, per API, tot min. 1 ID of max. splitdiepte 10); definitief falende aanroepen worden overgeslagen met een waarschuwing.
 
 ## Tutorial
 
