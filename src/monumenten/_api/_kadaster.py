@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
@@ -21,9 +22,13 @@ _BRK_PB_ENDPOINT = (
     "https://service.pdok.nl/kadaster/brk-publiekrechtelijke-beperkingen-wkpb/wfs/v1_0"
 )
 
-# De BAG WFS weigert een filter met enkele honderden ID's en de BRK-PB WFS wordt
-# traag bij meer adrespunten per request
-_MAX_PER_REQUEST = 100
+# De BAG WFS weigert een filter met enkele honderden ID's
+_MAX_PER_BAG_REQUEST = 100
+_MAX_PER_BRK_PB_REQUEST = 500
+# De BRK-PB WFS doorzoekt de omhullende rechthoek van alle adrespunten in een request.
+# De duur groeit met het aantal adrespunten maal de oppervlakte van die rechthoek;
+# boven deze waarde (adrespunten × km²) zijn twee kleinere requests sneller dan één.
+_MAX_ADRESPUNTEN_KEER_KM2 = 150_000
 # Een WFS response bevat maximaal 1000 features; bij meer is het resultaat afgekapt
 _WFS_MAX_FEATURES = 1000
 
@@ -264,9 +269,45 @@ async def _query_beperkingen(
     _depth: int = 0,
 ) -> List[Dict[str, Any]]:
     """Stage 2: query BRK-PB for the beperkingen at the given adrespunten.
+
+    De BRK-PB WFS doorzoekt de omhullende rechthoek van alle adrespunten in een request
+    en wordt traag als die groot is. Opeenvolgende adrespunten horen daarom bij elkaar
+    te liggen; per request gaan er maximaal _MAX_PER_BRK_PB_REQUEST mee. Is de rechthoek
+    te groot voor het aantal adrespunten, dan wordt de set gesplitst op de grootste
+    sprong tussen twee opeenvolgende adrespunten.
     Bij falen na retries wordt de set adrespunten in tweeën gesplitst en opnieuw geprobeerd,
     behalve bij een rate limit (429): splitsen levert dan alleen meer requests op.
     """
+    if not adrespunten:
+        return []
+
+    punten = list(adrespunten.items())
+    if len(punten) > _MAX_PER_BRK_PB_REQUEST:
+        delen = await asyncio.gather(
+            *(
+                _query_beperkingen(
+                    session, dict(punten[i : i + _MAX_PER_BRK_PB_REQUEST])
+                )
+                for i in range(0, len(punten), _MAX_PER_BRK_PB_REQUEST)
+            )
+        )
+        return [rij for deel in delen for rij in deel]
+
+    xs, ys = zip(*adrespunten.values())
+    omhullende_km2 = (max(xs) - min(xs)) * (max(ys) - min(ys)) / 1e6
+    if len(punten) * omhullende_km2 > _MAX_ADRESPUNTEN_KEER_KM2:
+        # Zoek de sprong in de middelste helft, zodat beide delen groot genoeg blijven
+        kwart = len(punten) // 4
+        sprong = max(
+            range(max(kwart, 1), len(punten) - kwart),
+            key=lambda i: math.dist(punten[i - 1][1], punten[i][1]),
+        )
+        left, right = await asyncio.gather(
+            _query_beperkingen(session, dict(punten[:sprong])),
+            _query_beperkingen(session, dict(punten[sprong:])),
+        )
+        return left + right
+
     try:
         async with _get_semaphore(asyncio.get_running_loop()):
             brk_pb_query = _BRK_PB_BEPERKINGEN_QUERY_TEMPLATE.format(
@@ -295,7 +336,6 @@ async def _query_beperkingen(
             and len(adrespunten) > MIN_BATCH_SIZE
             and _depth < MAX_SPLIT_DEPTH
         ):
-            punten = list(adrespunten.items())
             mid = len(punten) // 2
             logger.info(
                 "BRK-PB query mislukt, splitsen in 2 batches van %d en %d adrespunten (depth %d)",
@@ -324,9 +364,27 @@ async def _query_adrespunten(
     _depth: int = 0,
 ) -> _Adrespunten:
     """Stage 1: query BAG for the adrespunt of the given verblijfsobject IDs.
+
+    Per request gaan er maximaal _MAX_PER_BAG_REQUEST verblijfsobjecten mee.
     Bij falen na retries wordt de batch in tweeën gesplitst en opnieuw geprobeerd,
     behalve bij een rate limit (429): splitsen levert dan alleen meer requests op.
     """
+    if not identificaties:
+        return {}
+
+    if len(identificaties) > _MAX_PER_BAG_REQUEST:
+        gevonden: _Adrespunten = {}
+        for deel in await asyncio.gather(
+            *(
+                _query_adrespunten(
+                    session, identificaties[i : i + _MAX_PER_BAG_REQUEST]
+                )
+                for i in range(0, len(identificaties), _MAX_PER_BAG_REQUEST)
+            )
+        ):
+            gevonden.update(deel)
+        return gevonden
+
     try:
         async with _get_semaphore(asyncio.get_running_loop()):
             filters = [
@@ -379,50 +437,3 @@ async def _query_adrespunten(
             _depth,
         )
     return adrespunten
-
-
-async def _query_verblijfsobjecten(
-    session: aiohttp.ClientSession,
-    identificaties: List[str],
-) -> List[Dict[str, Any]]:
-    """Query BAG + BRK-PB to obtain geometrie en beperkingen per verblijfsobject.
-
-    Beide stages versturen maximaal _MAX_PER_REQUEST verblijfsobjecten per request.
-    Stage 1 (BAG) failure splits on identificaties.
-    Stage 2 (BRK-PB) failure splits on adrespunten, leaving BAG untouched.
-    """
-    if not identificaties:
-        return []
-
-    # -------------------------
-    # Stage 1 – BAG
-    # -------------------------
-    adrespunten: _Adrespunten = {}
-    for deel in await asyncio.gather(
-        *(
-            _query_adrespunten(session, identificaties[i : i + _MAX_PER_REQUEST])
-            for i in range(0, len(identificaties), _MAX_PER_REQUEST)
-        )
-    ):
-        adrespunten.update(deel)
-
-    if not adrespunten:
-        # Geen geldige BAG verblijfsobjecten gevonden
-        return []
-
-    # -------------------------
-    # Stage 2 – BRK-PB (own split-on-failure on adrespunten)
-    # -------------------------
-    # De BRK-PB WFS doorzoekt de omhullende rechthoek van alle adrespunten in een request
-    # en wordt traag als die groot is. Sorteren langs de langste as houdt de rechthoek
-    # per request zo klein mogelijk.
-    xs, ys = zip(*adrespunten.values())
-    langste_as = 0 if max(xs) - min(xs) >= max(ys) - min(ys) else 1
-    gesorteerd = sorted(adrespunten.items(), key=lambda punt: punt[1][langste_as])
-    resultaten = await asyncio.gather(
-        *(
-            _query_beperkingen(session, dict(gesorteerd[i : i + _MAX_PER_REQUEST]))
-            for i in range(0, len(gesorteerd), _MAX_PER_REQUEST)
-        )
-    )
-    return [rij for deel in resultaten for rij in deel]

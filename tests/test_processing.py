@@ -9,7 +9,12 @@ import pytest
 
 from monumenten._api._backoff import MAX_SPLIT_DEPTH, MIN_BATCH_SIZE
 from monumenten._api._cultureel_erfgoed import _query_rijksmonumenten
-from monumenten._api._kadaster import _koppel_beperkingen, _query_verblijfsobjecten
+from monumenten._api._kadaster import (
+    _MAX_PER_BAG_REQUEST,
+    _koppel_beperkingen,
+    _query_adrespunten,
+    _query_beperkingen,
+)
 from monumenten._processing import _QUERY_BATCH_GROOTTE, _query
 
 
@@ -33,7 +38,7 @@ async def test_query_success(empty_geodataframe):
     """_query returns merged result when _process_batch succeeds."""
     ids = ["id1", "id2", "id3"]
 
-    async def mock_process_batch(session, batch, bg_df):
+    async def mock_process_batch(session, batch, bg_df, adrespunten):
         return _make_batch_result(batch)
 
     with (
@@ -41,6 +46,7 @@ async def test_query_success(empty_geodataframe):
             "monumenten._processing._get_beschermde_gezichten",
             return_value=empty_geodataframe,
         ),
+        patch("monumenten._processing._query_adrespunten", return_value={}),
         patch("monumenten._processing._process_batch", side_effect=mock_process_batch),
     ):
         async with aiohttp.ClientSession() as session:
@@ -62,7 +68,7 @@ async def test_query_batch_failure_logged(empty_geodataframe):
     """When _process_batch raises, batch is skipped and result has no rows for that batch."""
     ids = ["only_one"]
 
-    async def mock_process_batch(session, batch, bg_df):
+    async def mock_process_batch(session, batch, bg_df, adrespunten):
         raise RuntimeError("always fail")
 
     with (
@@ -70,6 +76,7 @@ async def test_query_batch_failure_logged(empty_geodataframe):
             "monumenten._processing._get_beschermde_gezichten",
             return_value=empty_geodataframe,
         ),
+        patch("monumenten._processing._query_adrespunten", return_value={}),
         patch("monumenten._processing._process_batch", side_effect=mock_process_batch),
     ):
         async with aiohttp.ClientSession() as session:
@@ -83,6 +90,39 @@ async def test_query_batch_failure_logged(empty_geodataframe):
         "rijksbeschermd_gezicht_naam",
         "grondslag_gemeentelijk_monument",
     ]
+
+
+@pytest.mark.asyncio
+async def test_query_sorteert_batches_ruimtelijk(empty_geodataframe):
+    """Een batch bevat verblijfsobjecten die bij elkaar liggen, ongeacht de invoervolgorde."""
+    adrespunten = {
+        "rotterdam1": (92000.0, 437000.0),
+        "groningen1": (233000.0, 582000.0),
+        "rotterdam2": (92100.0, 437100.0),
+        "groningen2": (233100.0, 582100.0),
+    }
+    batches = []
+
+    async def mock_process_batch(session, batch, bg_df, adrespunten):
+        batches.append(set(batch))
+        return _make_batch_result(batch)
+
+    with (
+        patch(
+            "monumenten._processing._get_beschermde_gezichten",
+            return_value=empty_geodataframe,
+        ),
+        patch("monumenten._processing._query_adrespunten", return_value=adrespunten),
+        patch("monumenten._processing._process_batch", side_effect=mock_process_batch),
+        patch("monumenten._processing._QUERY_BATCH_GROOTTE", 2),
+    ):
+        async with aiohttp.ClientSession() as session:
+            result = await _query(session, [*adrespunten, "onbekend"])
+
+    assert {"rotterdam1", "rotterdam2"} in batches
+    assert {"groningen1", "groningen2"} in batches
+    # Een verblijfsobject zonder adrespunt wordt nog steeds verwerkt
+    assert set(result["identificatie"]) == {*adrespunten, "onbekend"}
 
 
 def _make_cm_response(identificaties=None, fail=False):
@@ -149,64 +189,93 @@ def _bag_response(identificaties):
 
 
 @pytest.mark.asyncio
-async def test_verblijfsobjecten_bag_failure_splits_on_identificaties():
-    """BAG failure → split on identificaties → BRK-PB runs once for all adrespunten.
+async def test_adrespunten_bag_failure_splits_on_identificaties():
+    """BAG failure → split on identificaties → both halves are retried.
 
     BAG call 1 (["id1","id2"]) fails → split into ["id1"] and ["id2"].
-    BAG is called twice more (once per half). BRK-PB is called once with both adrespunten.
+    BAG is called twice more (once per half).
     """
-    call_order = []
+    queries = []
 
     async def mock_post_wfs(session, endpoint, query, context):
-        call_order.append(context)
-        if len(call_order) == 1:
+        queries.append(query)
+        if len(queries) == 1:
             raise RuntimeError("BAG transient fail")
-        if "BAG" in context:
-            return _bag_response([i for i in ("id1", "id2") if i in query])
-        return {"features": []}
+        return _bag_response([i for i in ("id1", "id2") if i in query])
 
     with patch("monumenten._api._kadaster._post_wfs_json", side_effect=mock_post_wfs):
-        session = AsyncMock()
-        result = await _query_verblijfsobjecten(session, ["id1", "id2"])
+        result = await _query_adrespunten(AsyncMock(), ["id1", "id2"])
 
-    assert len(result) == 2
-    assert {r["identificatie"] for r in result} == {"id1", "id2"}
-    bag_calls = [c for c in call_order if "BAG" in c]
-    brk_pb_calls = [c for c in call_order if "BRK-PB" in c]
-    assert len(bag_calls) == 3  # 1 failed + 2 per-half successes
-    assert len(brk_pb_calls) == 1  # both adrespunten in one request
+    assert set(result) == {"id1", "id2"}
+    assert len(queries) == 3  # 1 failed + 2 per-half successes
 
 
 @pytest.mark.asyncio
-async def test_verblijfsobjecten_brk_pb_failure_splits_on_adrespunten():
-    """BRK-PB failure → split on adrespunten → BAG is NOT re-run.
-
-    BAG call 1 (["id1","id2"]) succeeds → two adrespunten.
-    BRK-PB call 1 (both adrespunten) fails → split into one adrespunt each.
-    BRK-PB is called twice more (once per half). BAG is called exactly once total.
-    """
-    call_order = []
-    brk_pb_call_count = 0
+async def test_adrespunten_maximaal_per_request():
+    """Meer dan _MAX_PER_BAG_REQUEST identificaties gaan in meerdere requests."""
+    identificaties = [
+        f"id{nummer:04d}" for nummer in range(2 * _MAX_PER_BAG_REQUEST + 1)
+    ]
+    aantallen = []
 
     async def mock_post_wfs(session, endpoint, query, context):
-        nonlocal brk_pb_call_count
-        call_order.append(context)
-        if "BAG" in context:
-            return _bag_response(["id1", "id2"])
-        brk_pb_call_count += 1
-        if brk_pb_call_count == 1:
+        gevraagd = [i for i in identificaties if i in query]
+        aantallen.append(len(gevraagd))
+        return _bag_response(gevraagd)
+
+    with patch("monumenten._api._kadaster._post_wfs_json", side_effect=mock_post_wfs):
+        result = await _query_adrespunten(AsyncMock(), identificaties)
+
+    assert set(result) == set(identificaties)
+    assert sorted(aantallen) == [1, _MAX_PER_BAG_REQUEST, _MAX_PER_BAG_REQUEST]
+
+
+@pytest.mark.asyncio
+async def test_beperkingen_brk_pb_failure_splits_on_adrespunten():
+    """BRK-PB failure → split on adrespunten → both halves are retried.
+
+    BRK-PB call 1 (both adrespunten) fails → split into one adrespunt each.
+    BRK-PB is called twice more (once per half).
+    """
+    call_count = 0
+
+    async def mock_post_wfs(session, endpoint, query, context):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
             raise RuntimeError("BRK-PB transient fail")
         return {"features": []}
 
     with patch("monumenten._api._kadaster._post_wfs_json", side_effect=mock_post_wfs):
-        session = AsyncMock()
-        result = await _query_verblijfsobjecten(session, ["id1", "id2"])
+        result = await _query_beperkingen(
+            AsyncMock(), {"id1": (0.0, 0.0), "id2": (1.0, 0.0)}
+        )
 
-    assert len(result) == 2
     assert {r["identificatie"] for r in result} == {"id1", "id2"}
-    bag_calls = [c for c in call_order if "BAG" in c]
-    assert len(bag_calls) == 1  # BAG called exactly once, never re-run
-    assert brk_pb_call_count == 3  # 1 failed + 2 per-half successes
+    assert call_count == 3  # 1 failed + 2 per-half successes
+
+
+@pytest.mark.asyncio
+async def test_beperkingen_splitst_op_grootste_sprong():
+    """Adrespunten die ver uit elkaar liggen gaan niet samen in één request."""
+    adrespunten = {
+        **{f"rotterdam{n}": (92000.0 + n, 437000.0 + n) for n in range(6)},
+        **{f"groningen{n}": (233000.0 + n, 582000.0 + n) for n in range(6)},
+    }
+    queries = []
+
+    async def mock_post_wfs(session, endpoint, query, context):
+        queries.append(query)
+        return {"features": []}
+
+    with patch("monumenten._api._kadaster._post_wfs_json", side_effect=mock_post_wfs):
+        result = await _query_beperkingen(AsyncMock(), adrespunten)
+
+    assert {r["identificatie"] for r in result} == set(adrespunten)
+    assert len(queries) == 2
+    rotterdam, groningen = sorted(queries, key=lambda q: "233000.0" in q)
+    assert rotterdam.count("<gml:Point ") == groningen.count("<gml:Point ") == 6
+    assert "233000.0" not in rotterdam and "92000.0" not in groningen
 
 
 def test_koppel_beperkingen_alleen_binnen_beperkingsgebied():

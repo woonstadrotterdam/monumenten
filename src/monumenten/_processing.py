@@ -18,18 +18,26 @@ from monumenten._api._cultureel_erfgoed import (
     _query_beschermde_gezichten,
     _query_rijksmonumenten,
 )
-from monumenten._api._kadaster import _RD, _query_verblijfsobjecten
+from monumenten._api._kadaster import (
+    _RD,
+    _Adrespunten,
+    _query_adrespunten,
+    _query_beperkingen,
+)
 
 logger = logging.getLogger("monumenten.processing")
 
 _QUERY_BATCH_GROOTTE = 500  # lijkt meest optimaal qua performance
 _BATCH_CONCURRENCY = 4
+# Bereik van RD-coördinaten in Nederland: minx, miny, maxx, maxy
+_RD_BEREIK = (0, 300_000, 300_000, 650_000)
 
 
 async def _process_batch(
     session: aiohttp.ClientSession,
     batch: List[str],
     beschermde_gezichten_df: gpd.GeoDataFrame,
+    adrespunten: _Adrespunten,
 ) -> Tuple[DataFrame, DataFrame, DataFrame, int]:
     """Verwerk een batch verblijfsobjecten.
 
@@ -37,6 +45,7 @@ async def _process_batch(
         session (aiohttp.ClientSession): De sessie voor HTTP requests
         batch (List[str]): Lijst met verblijfsobject ID's
         beschermde_gezichten_df (gpd.GeoDataFrame): GeoDataFrame met beschermde gezichten
+        adrespunten (_Adrespunten): Adrespunt per verblijfsobject ID uit de BAG
 
     Returns:
         Tuple[DataFrame, DataFrame, DataFrame, int]: Tuple met rijksmonumenten,
@@ -47,7 +56,11 @@ async def _process_batch(
 
     # Create tasks using the current loop
     rijksmonumenten_taak = loop.create_task(_query_rijksmonumenten(session, batch))
-    verblijfsobjecten_taak = loop.create_task(_query_verblijfsobjecten(session, batch))
+    verblijfsobjecten_taak = loop.create_task(
+        _query_beperkingen(
+            session, {i: adrespunten[i] for i in batch if i in adrespunten}
+        )
+    )
 
     # Wait for both tasks to complete
     rijksmonumenten, verblijfsobjecten = await asyncio.gather(
@@ -174,6 +187,24 @@ async def _query(
     """
     beschermde_gezichten_df = await _get_beschermde_gezichten(session)
 
+    # De BRK-PB requests zijn alleen snel als de adrespunten in een request bij elkaar
+    # liggen. Daarom eerst alle adrespunten ophalen en de verblijfsobjecten langs een
+    # Hilbert-curve sorteren: opeenvolgende ID's liggen dan bij elkaar in de buurt.
+    adrespunten = await _query_adrespunten(session, verblijfsobject_ids)
+    if adrespunten:
+        xs, ys = zip(*adrespunten.values())
+        hilbert_afstand = dict(
+            zip(
+                adrespunten,
+                gpd.GeoSeries(gpd.points_from_xy(xs, ys)).hilbert_distance(
+                    total_bounds=_RD_BEREIK
+                ),
+            )
+        )
+        verblijfsobject_ids = sorted(
+            verblijfsobject_ids, key=lambda i: hilbert_afstand.get(i, float("inf"))
+        )
+
     batches = [
         verblijfsobject_ids[i : i + _QUERY_BATCH_GROOTTE]
         for i in range(0, len(verblijfsobject_ids), _QUERY_BATCH_GROOTTE)
@@ -199,7 +230,9 @@ async def _query(
     async def _run_batch(batch: List[str]) -> None:
         async with batch_semaphore:
             try:
-                result = await _process_batch(session, batch, beschermde_gezichten_df)
+                result = await _process_batch(
+                    session, batch, beschermde_gezichten_df, adrespunten
+                )
                 results_list.append(result)
                 progress_bar.update(result[3])
             except Exception:
