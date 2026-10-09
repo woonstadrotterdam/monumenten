@@ -15,6 +15,7 @@ from monumenten._api._backoff import (
     RETRYABLE_STATUS_CODES,
     RETRY_SLEEP_SECONDS,
 )
+from monumenten._bronfouten import BAG, BRK_PB, Bronuitval
 
 # PDOK WFS endpoints following the BAG + BRK-PB two-stage approach
 _BAG_ENDPOINT = "https://service.pdok.nl/kadaster/bag/wfs/v2_0"
@@ -265,6 +266,7 @@ def _koppel_beperkingen(
 async def _query_beperkingen(
     session: aiohttp.ClientSession,
     adrespunten: _Adrespunten,
+    uitval: Bronuitval,
     *,
     _depth: int = 0,
 ) -> List[Dict[str, Any]]:
@@ -277,6 +279,10 @@ async def _query_beperkingen(
     sprong tussen twee opeenvolgende adrespunten.
     Bij falen na retries wordt de set adrespunten in tweeën gesplitst en opnieuw geprobeerd,
     behalve bij een rate limit (429): splitsen levert dan alleen meer requests op.
+    Is de BRK-PB gestoord, dan wordt de request overgeslagen (zie Bronuitval).
+    In uitval wordt vastgelegd voor welke verblijfsobjecten de BRK-PB wel en geen
+    antwoord gaf. Zonder antwoord komt het adrespunt terug zonder beperkingen: daarmee
+    is het rijksbeschermd gezicht nog wel te bepalen.
     """
     if not adrespunten:
         return []
@@ -286,7 +292,7 @@ async def _query_beperkingen(
         delen = await asyncio.gather(
             *(
                 _query_beperkingen(
-                    session, dict(punten[i : i + _MAX_PER_BRK_PB_REQUEST])
+                    session, dict(punten[i : i + _MAX_PER_BRK_PB_REQUEST]), uitval
                 )
                 for i in range(0, len(punten), _MAX_PER_BRK_PB_REQUEST)
             )
@@ -303,13 +309,15 @@ async def _query_beperkingen(
             key=lambda i: math.dist(punten[i - 1][1], punten[i][1]),
         )
         left, right = await asyncio.gather(
-            _query_beperkingen(session, dict(punten[:sprong])),
-            _query_beperkingen(session, dict(punten[sprong:])),
+            _query_beperkingen(session, dict(punten[:sprong]), uitval),
+            _query_beperkingen(session, dict(punten[sprong:]), uitval),
         )
         return left + right
 
     try:
         async with _get_semaphore(asyncio.get_running_loop()):
+            if uitval.sla_over_bij_storing(BRK_PB, adrespunten):
+                return _koppel_beperkingen(adrespunten, [])
             brk_pb_query = _BRK_PB_BEPERKINGEN_QUERY_TEMPLATE.format(
                 adrespunten="".join(
                     _ADRESPUNT_TEMPLATE.format(nummer=nummer, x=x, y=y)
@@ -329,10 +337,14 @@ async def _query_beperkingen(
                 "BRK-PB query geslaagd na splitsing (depth %d)",
                 _depth,
             )
-        return _koppel_beperkingen(adrespunten, beperkingen)
+        rijen = _koppel_beperkingen(adrespunten, beperkingen)
+        uitval.registreer_antwoord(BRK_PB, len(adrespunten))
+        return rijen
     except Exception as e:
+        uitval.registreer_mislukte_request(BRK_PB, e)
         if (
-            not _is_rate_limited(e)
+            not uitval.is_gestoord(BRK_PB)
+            and not _is_rate_limited(e)
             and len(adrespunten) > MIN_BATCH_SIZE
             and _depth < MAX_SPLIT_DEPTH
         ):
@@ -344,22 +356,24 @@ async def _query_beperkingen(
                 _depth + 1,
             )
             left = await _query_beperkingen(
-                session, dict(punten[:mid]), _depth=_depth + 1
+                session, dict(punten[:mid]), uitval, _depth=_depth + 1
             )
             right = await _query_beperkingen(
-                session, dict(punten[mid:]), _depth=_depth + 1
+                session, dict(punten[mid:]), uitval, _depth=_depth + 1
             )
             return left + right
         logger.warning(
             "BRK-PB query definitief overgeslagen voor %d adrespunten",
             len(adrespunten),
         )
-        return []
+        uitval.registreer_fout(BRK_PB, adrespunten, e)
+        return _koppel_beperkingen(adrespunten, [])
 
 
 async def _query_adrespunten(
     session: aiohttp.ClientSession,
     identificaties: List[str],
+    uitval: Bronuitval,
     *,
     _depth: int = 0,
 ) -> _Adrespunten:
@@ -368,6 +382,9 @@ async def _query_adrespunten(
     Per request gaan er maximaal _MAX_PER_BAG_REQUEST verblijfsobjecten mee.
     Bij falen na retries wordt de batch in tweeën gesplitst en opnieuw geprobeerd,
     behalve bij een rate limit (429): splitsen levert dan alleen meer requests op.
+    Is de BAG gestoord, dan wordt de request overgeslagen (zie Bronuitval).
+    In uitval wordt vastgelegd voor welke verblijfsobjecten de BAG wel en, ook na
+    retries en splitsen, geen antwoord gaf.
     """
     if not identificaties:
         return {}
@@ -377,7 +394,7 @@ async def _query_adrespunten(
         for deel in await asyncio.gather(
             *(
                 _query_adrespunten(
-                    session, identificaties[i : i + _MAX_PER_BAG_REQUEST]
+                    session, identificaties[i : i + _MAX_PER_BAG_REQUEST], uitval
                 )
                 for i in range(0, len(identificaties), _MAX_PER_BAG_REQUEST)
             )
@@ -387,6 +404,8 @@ async def _query_adrespunten(
 
     try:
         async with _get_semaphore(asyncio.get_running_loop()):
+            if uitval.sla_over_bij_storing(BAG, identificaties):
+                return {}
             filters = [
                 _IDENTIFICATIE_FILTER_TEMPLATE.format(identificatie=identificatie)
                 for identificatie in identificaties
@@ -406,8 +425,10 @@ async def _query_adrespunten(
             x, y = verblijfsobject["geometry"]["coordinates"][:2]
             adrespunten[verblijfsobject["properties"]["identificatie"]] = (x, y)
     except Exception as e:
+        uitval.registreer_mislukte_request(BAG, e)
         if (
-            not _is_rate_limited(e)
+            not uitval.is_gestoord(BAG)
+            and not _is_rate_limited(e)
             and len(identificaties) > MIN_BATCH_SIZE
             and _depth < MAX_SPLIT_DEPTH
         ):
@@ -419,17 +440,21 @@ async def _query_adrespunten(
                 _depth + 1,
             )
             left = await _query_adrespunten(
-                session, identificaties[:mid], _depth=_depth + 1
+                session, identificaties[:mid], uitval, _depth=_depth + 1
             )
             right = await _query_adrespunten(
-                session, identificaties[mid:], _depth=_depth + 1
+                session, identificaties[mid:], uitval, _depth=_depth + 1
             )
             return {**left, **right}
         logger.warning(
             "BAG verblijfsobjecten query definitief overgeslagen voor %d IDs",
             len(identificaties),
         )
+        uitval.registreer_fout(BAG, identificaties, e)
         return {}
+
+    # Ook een leeg antwoord is een antwoord: het verblijfsobject staat dan niet in de BAG
+    uitval.registreer_antwoord(BAG, len(identificaties))
 
     if _depth > 0:
         logger.info(

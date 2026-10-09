@@ -10,6 +10,7 @@ from monumenten._api._kadaster import (
     _query_adrespunten,
     _query_beperkingen,
 )
+from monumenten._bronfouten import BAG, BRK_PB, Bronuitval
 
 
 def _error(status, headers=None):
@@ -52,12 +53,17 @@ async def test_no_split_on_429():
         raise _error(429)
 
     with patch("monumenten._api._kadaster._post_wfs_json", side_effect=mock_post_wfs):
-        assert await _query_adrespunten(AsyncMock(), ["id1", "id2"]) == {}
-        assert (
-            await _query_beperkingen(
-                AsyncMock(), {"id1": (0.0, 0.0), "id2": (1.0, 1.0)}
-            )
-            == []
+        bag_uitval, brk_pb_uitval = Bronuitval(), Bronuitval()
+        assert await _query_adrespunten(AsyncMock(), ["id1", "id2"], bag_uitval) == {}
+        rijen = await _query_beperkingen(
+            AsyncMock(), {"id1": (0.0, 0.0), "id2": (1.0, 1.0)}, brk_pb_uitval
         )
 
     assert calls == ["BAG verblijfsobjecten query", "BRK-PB beperkingen query"]
+    assert list(bag_uitval.mislukt[BAG]) == ["id1", "id2"]
+    assert list(brk_pb_uitval.mislukt[BRK_PB]) == ["id1", "id2"]
+    # Without an answer the adrespunt comes back without beperkingen
+    assert [(r["identificatie"], r["grondslagcode"]) for r in rijen] == [
+        ("id1", None),
+        ("id2", None),
+    ]
