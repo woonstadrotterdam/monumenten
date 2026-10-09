@@ -222,7 +222,42 @@ Een bezit dat in één regio ligt gaat daardoor het snelst. Adressen verspreid o
 
 ### Retry-gedrag
 
-Aanroepen naar Kadaster (BAG, BRK-PB) en RCE gebruiken een gedeelde retry-logica: maximaal 2 pogingen per request, bij mislukking 3 seconden wachten. Alleen tijdelijke fouten worden herhaald (HTTP 429, 500, 502, 503, 504 en netwerk-/verbindingsfouten); permanente 4xx worden direct doorgegeven. Faalt een aanroep na retries, dan wordt de set IDs/adrespunten in tweeën gedeeld en elk deel opnieuw geprobeerd (recursief, per API, tot min. 1 ID of max. splitdiepte 10); definitief falende aanroepen worden overgeslagen met een waarschuwing.
+Aanroepen naar Kadaster (BAG, BRK-PB) en RCE gebruiken een gedeelde retry-logica: maximaal 2 pogingen per request, bij mislukking 3 seconden wachten. Alleen tijdelijke fouten worden herhaald (HTTP 429, 500, 502, 503, 504 en netwerk-/verbindingsfouten); permanente 4xx worden direct doorgegeven. Faalt een aanroep na retries, dan wordt de set IDs/adrespunten in tweeën gedeeld en elk deel opnieuw geprobeerd (recursief, per API, tot min. 1 ID of max. splitdiepte 10). Blijft een aanroep ook dan falen, dan heeft de bron voor die verblijfsobjecten geen antwoord gegeven; wat er dan gebeurt staat hieronder.
+
+Splitsen helpt alleen als een kleinere query wel lukt, zoals bij een te grote of te trage query. Ligt een bron plat, dan kost splitsen tot op één ID ongeveer twee mislukte requests per verblijfsobject. Daarom telt de package per bron (RCE, BAG, BRK-PB) hoeveel requests achter elkaar mislukken, elk na zijn retries; een geslaagd antwoord zet die teller terug op nul. Na 10 mislukte requests op rij geldt de bron als gestoord: er wordt niet meer gesplitst en de bron wordt overgeslagen, zodat de verblijfsobjecten die dan aan de beurt zijn direct als onbeantwoord tellen. Elke 10 seconden gaat er één proefrequest naar de bron; zodra een request weer antwoord krijgt, wordt de bron weer gewoon bevraagd. Raakt een bron gestoord voordat zij één antwoord gaf, dan volgt er geen proefrequest: ook de andere bronnen worden niet verder bevraagd en de aanroep stopt met een `BronFoutError`.
+
+Aan het einde van de aanroep krijgen de verblijfsobjecten waarvoor een bron geen antwoord gaf één herkansing: ze worden opnieuw verwerkt en hun eerdere, onvolledige resultaat vervalt. Is de hapering dan voorbij, dan kost zij geen verblijfsobjecten. Is een bron aan het einde nog gestoord, dan wacht de package eerst op de volgende proefrequest (hooguit 10 seconden) en stuurt die voor één verblijfsobject. Geeft de bron daarop antwoord, dan volgt de herkansing; blijft zij gestoord, dan worden de verblijfsobjecten die alleen op die bron wachten niet opnieuw verwerkt.
+
+De grens van 10 laat ruimte voor het splitsen waarvoor het bedoeld is. Per bron lopen er vier requests tegelijk, dus twee mislukte splitsniveaus (500 en 250 ID's te zwaar, 125 lukt) geven 8 mislukte requests op rij; een enkele batch kan zelfs tot op één ID worden gesplitst zonder de grens te raken.
+
+### Als een bron geen antwoord geeft
+
+Een verblijfsobject waarvan de status niet bepaald kon worden is iets anders dan een verblijfsobject zonder monumentstatus. De package geeft daarom nooit `False` terug voor een status die een bron niet heeft kunnen bevestigen of ontkennen:
+
+- **Een bron geeft voor geen enkel verblijfsobject antwoord** (bijvoorbeeld bij een storing): de aanroep stopt met een `BronFoutError`. De melding noemt de bron (`RCE`, `BAG` of `BRK-PB`) en de laatste fout; het attribuut `verblijfsobject_ids` bevat per bron de ID's zonder antwoord. Wie één verblijfsobject opvraagt krijgt bij een falende bron dus altijd deze fout. Bij een storing komt de fout na 10 mislukte requests, niet pas nadat elke batch tot op één ID is gesplitst (zie [Retry-gedrag](#retry-gedrag)).
+- **Een bron geeft voor een deel van de verblijfsobjecten geen antwoord**: het resultaat komt terug met `pd.NA` voor de statussen die niet bepaald konden worden, en er volgt een `MonumentStatusOnbepaaldWarning`. De waarschuwing noemt per bron de betrokken ID's, die ook in het attribuut `verblijfsobject_ids` staan. Dat is pas zo als ook de herkansing aan het einde van de aanroep geen antwoord opleverde (zie [Retry-gedrag](#retry-gedrag)).
+
+Welke status `pd.NA` wordt hangt af van de bron die geen antwoord gaf. De BAG levert het adrespunt; daar hangen het rijksbeschermd gezicht en de beperkingen uit de BRK-PB van af.
+
+| Geen antwoord van | `rijksmonument`                                                | `rijksbeschermd_gezicht` | `gemeentelijk_monument` |
+| ----------------- | -------------------------------------------------------------- | ------------------------ | ----------------------- |
+| RCE               | `pd.NA`, tenzij het Kadaster het rijksmonument wel registreert | bepaald                  | bepaald                 |
+| BAG               | `pd.NA`, tenzij de RCE het rijksmonument wel registreert       | `pd.NA`                  | `pd.NA`                 |
+| BRK-PB            | `pd.NA`, tenzij de RCE het rijksmonument wel registreert       | bepaald                  | `pd.NA`                 |
+
+- De kolommen `rijksmonument`, `rijksbeschermd_gezicht` en `gemeentelijk_monument` hebben altijd het nullable pandas-dtype `boolean`. In `process_from_list` is een niet-bepaalde status `None`; in VERA-referentiedataformaat is dan de hele value van het verblijfsobject `None` in plaats van een lijst, omdat die lijst onvolledig zou zijn.
+- Blijft `rijksmonument` `True` doordat één bron de status geeft terwijl de andere geen antwoord gaf, dan noemt `rijksmonument_bron` alleen de bron die antwoord gaf.
+- Een ID dat niet in de BAG voorkomt is geen fout maar een geldig leeg antwoord: de statussen uit het Kadaster zijn dan `False`.
+
+Wie bij gedeeltelijk falen liever een fout krijgt dan een resultaat met `pd.NA`, maakt van de waarschuwing een fout:
+
+```python
+import warnings
+
+from monumenten import MonumentStatusOnbepaaldWarning
+
+warnings.simplefilter("error", MonumentStatusOnbepaaldWarning)
+```
 
 ## Tutorial
 

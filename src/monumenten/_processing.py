@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import List, Tuple
+from typing import List, Set, Tuple
 
 import aiohttp
 import geopandas as gpd
@@ -24,6 +24,7 @@ from monumenten._api._kadaster import (
     _query_adrespunten,
     _query_beperkingen,
 )
+from monumenten._bronfouten import BAG, RCE, Bronuitval
 
 logger = logging.getLogger("monumenten.processing")
 
@@ -32,13 +33,16 @@ _BATCH_CONCURRENCY = 4
 # Bereik van RD-coördinaten in Nederland: minx, miny, maxx, maxy
 _RD_BEREIK = (0, 300_000, 300_000, 650_000)
 
+_BatchResult = Tuple[DataFrame, DataFrame, DataFrame, int]
+
 
 async def _process_batch(
     session: aiohttp.ClientSession,
     batch: List[str],
     beschermde_gezichten_df: gpd.GeoDataFrame,
     adrespunten: _Adrespunten,
-) -> Tuple[DataFrame, DataFrame, DataFrame, int]:
+    uitval: Bronuitval,
+) -> _BatchResult:
     """Verwerk een batch verblijfsobjecten.
 
     Args:
@@ -46,19 +50,23 @@ async def _process_batch(
         batch (List[str]): Lijst met verblijfsobject ID's
         beschermde_gezichten_df (gpd.GeoDataFrame): GeoDataFrame met beschermde gezichten
         adrespunten (_Adrespunten): Adrespunt per verblijfsobject ID uit de BAG
+        uitval (Bronuitval): Hierin leggen de bronnen vast voor welke
+            verblijfsobjecten zij wel en geen antwoord gaven
 
     Returns:
-        Tuple[DataFrame, DataFrame, DataFrame, int]: Tuple met rijksmonumenten,
-            beschermde gezichten, gemeentelijke monumenten en aantal verwerkte objecten
+        _BatchResult: Tuple met rijksmonumenten, beschermde gezichten,
+            gemeentelijke monumenten en aantal verwerkte objecten
     """
     # Get the current event loop
     loop = asyncio.get_running_loop()
 
     # Create tasks using the current loop
-    rijksmonumenten_taak = loop.create_task(_query_rijksmonumenten(session, batch))
+    rijksmonumenten_taak = loop.create_task(
+        _query_rijksmonumenten(session, batch, uitval)
+    )
     verblijfsobjecten_taak = loop.create_task(
         _query_beperkingen(
-            session, {i: adrespunten[i] for i in batch if i in adrespunten}
+            session, {i: adrespunten[i] for i in batch if i in adrespunten}, uitval
         )
     )
 
@@ -73,9 +81,12 @@ async def _process_batch(
             len(batch),
         )
         return (
+            # Wat de RCE wel weet blijft staan, ook zonder adrespunt uit de BAG
             pd.DataFrame(
-                columns=["identificatie", "rijksmonument_nummer", "rijksmonument_bron"]
-            ),
+                rijksmonumenten,
+                columns=["identificatie", "rijksmonument_nummer"],
+                dtype="string",
+            ).assign(rijksmonument_bron="RCE"),
             pd.DataFrame(columns=["identificatie", "rijksbeschermd_gezicht_naam"]),
             pd.DataFrame(columns=["identificatie", "grondslag_gemeentelijk_monument"]),
             len(batch),
@@ -177,79 +188,181 @@ async def _get_beschermde_gezichten(
     return beschermde_gezichten_df
 
 
-async def _query(
-    session: aiohttp.ClientSession, verblijfsobject_ids: List[str]
-) -> pd.DataFrame:
-    """Voer queries uit voor een lijst verblijfsobjecten.
-
-    Batches worden parallel verwerkt. Retry en split-on-failure gebeuren per API
-    (cultureel erfgoed en kadaster) in hun eigen modules.
-    """
-    beschermde_gezichten_df = await _get_beschermde_gezichten(session)
-
-    # De BRK-PB requests zijn alleen snel als de adrespunten in een request bij elkaar
-    # liggen. Daarom eerst alle adrespunten ophalen en de verblijfsobjecten langs een
-    # Hilbert-curve sorteren: opeenvolgende ID's liggen dan bij elkaar in de buurt.
-    adrespunten = await _query_adrespunten(session, verblijfsobject_ids)
-    if adrespunten:
-        xs, ys = zip(*adrespunten.values())
-        hilbert_afstand = dict(
-            zip(
-                adrespunten,
-                gpd.GeoSeries(gpd.points_from_xy(xs, ys)).hilbert_distance(
-                    total_bounds=_RD_BEREIK
-                ),
-            )
-        )
-        verblijfsobject_ids = sorted(
-            verblijfsobject_ids, key=lambda i: hilbert_afstand.get(i, float("inf"))
-        )
-
-    batches = [
+def _in_batches(verblijfsobject_ids: List[str]) -> List[List[str]]:
+    return [
         verblijfsobject_ids[i : i + _QUERY_BATCH_GROOTTE]
         for i in range(0, len(verblijfsobject_ids), _QUERY_BATCH_GROOTTE)
     ]
+
+
+def _sorteer_ruimtelijk(
+    verblijfsobject_ids: List[str], adrespunten: _Adrespunten
+) -> List[str]:
+    """Sorteer verblijfsobjecten langs een Hilbert-curve.
+
+    De BRK-PB requests zijn alleen snel als de adrespunten in een request bij elkaar
+    liggen. Na het sorteren liggen opeenvolgende ID's bij elkaar in de buurt.
+    Verblijfsobjecten zonder adrespunt komen achteraan.
+    """
+    punten = {i: adrespunten[i] for i in verblijfsobject_ids if i in adrespunten}
+    if not punten:
+        return verblijfsobject_ids
+    xs, ys = zip(*punten.values())
+    hilbert_afstand = dict(
+        zip(
+            punten,
+            gpd.GeoSeries(gpd.points_from_xy(xs, ys)).hilbert_distance(
+                total_bounds=_RD_BEREIK
+            ),
+        )
+    )
+    return sorted(
+        verblijfsobject_ids, key=lambda i: hilbert_afstand.get(i, float("inf"))
+    )
+
+
+def _zonder(result: _BatchResult, verblijfsobject_ids: Set[str]) -> _BatchResult:
+    """Laat uit een batchresultaat de rijen van de gegeven verblijfsobjecten weg."""
+    rijksmonumenten, beschermde_gezichten, gemeentelijke_monumenten, aantal = result
+    return (
+        rijksmonumenten[~rijksmonumenten["identificatie"].isin(verblijfsobject_ids)],
+        beschermde_gezichten[
+            ~beschermde_gezichten["identificatie"].isin(verblijfsobject_ids)
+        ],
+        gemeentelijke_monumenten[
+            ~gemeentelijke_monumenten["identificatie"].isin(verblijfsobject_ids)
+        ],
+        aantal,
+    )
+
+
+def _eerste_exceptie(groep: BaseExceptionGroup[BaseException]) -> BaseException:
+    """Geef de eerste niet-gegroepeerde exceptie uit een (geneste) ExceptionGroup."""
+    for exceptie in groep.exceptions:
+        if isinstance(exceptie, BaseExceptionGroup):
+            return _eerste_exceptie(exceptie)
+        return exceptie
+    return groep
+
+
+async def _query(
+    session: aiohttp.ClientSession, verblijfsobject_ids: List[str]
+) -> Tuple[pd.DataFrame, Bronuitval]:
+    """Voer queries uit voor een lijst verblijfsobjecten.
+
+    Batches worden parallel verwerkt. Retry en split-on-failure gebeuren per API
+    (cultureel erfgoed en kadaster) in hun eigen modules. Raakt een bron gestoord
+    voor zij één antwoord gaf, dan worden de resterende batches overgeslagen.
+    Verblijfsobjecten waarvoor een bron geen antwoord gaf krijgen aan het einde één
+    herkansing.
+
+    Gaf een bron voor geen enkel bevraagd verblijfsobject antwoord, dan volgt een
+    BronFoutError. Mislukt de verwerking van een batch, dan bereikt de oorspronkelijke
+    fout de aanroeper.
+
+    Args:
+        session (aiohttp.ClientSession): De sessie voor HTTP requests
+        verblijfsobject_ids (List[str]): Lijst met verblijfsobject ID's
+
+    Returns:
+        Tuple[pd.DataFrame, Bronuitval]: Eén rij per verblijfsobject met een
+            monumentstatus, en per bron de verblijfsobjecten waarvoor zij, ook na
+            retries, splitsen en de herkansing, geen antwoord gaf
+    """
+    beschermde_gezichten_df = await _get_beschermde_gezichten(session)
+    uitval = Bronuitval()
+
+    # Eerst alle adrespunten ophalen: de BRK-PB heeft ze nodig, en de batches worden
+    # erop gesorteerd. Zonder de BAG valt er verder niets te bepalen.
+    adrespunten = await _query_adrespunten(session, verblijfsobject_ids, uitval)
+    uitval.controleer()
+
+    batches = _in_batches(_sorteer_ruimtelijk(verblijfsobject_ids, adrespunten))
 
     progress_bar = tqdm_asyncio(
         total=len(verblijfsobject_ids), disable=len(batches) <= 1
     )
 
-    _BatchResult = Tuple[DataFrame, DataFrame, DataFrame, int]
-    results_list: List[_BatchResult] = []
-
-    _empty_batch_result = (
-        pd.DataFrame(
-            columns=["identificatie", "rijksmonument_nummer", "rijksmonument_bron"]
-        ),
-        pd.DataFrame(columns=["identificatie", "rijksbeschermd_gezicht_naam"]),
-        pd.DataFrame(columns=["identificatie", "grondslag_gemeentelijk_monument"]),
-    )
-
     batch_semaphore = asyncio.Semaphore(_BATCH_CONCURRENCY)
 
-    async def _run_batch(batch: List[str]) -> None:
-        async with batch_semaphore:
-            try:
+    async def _verwerk(
+        batches: List[List[str]], herkansing: bool = False
+    ) -> List[_BatchResult]:
+        resultaten: List[_BatchResult] = []
+
+        async def _run_batch(batch: List[str]) -> None:
+            # Een fout wordt hier niet opgevangen: een overgeslagen batch zou voor al
+            # zijn verblijfsobjecten stil False opleveren. Uitval van een bron loopt
+            # via uitval.
+            async with batch_semaphore:
+                # Ligt een bron plat, dan kan de aanroep niet meer slagen: bevraag ook
+                # de andere bronnen niet meer. uitval.controleer() geeft dan de
+                # BronFoutError.
+                if uitval.sla_over_als_bron_plat_ligt(batch):
+                    return
                 result = await _process_batch(
-                    session, batch, beschermde_gezichten_df, adrespunten
+                    session, batch, beschermde_gezichten_df, adrespunten, uitval
                 )
-                results_list.append(result)
-                progress_bar.update(result[3])
-            except Exception:
-                logger.error(
-                    "Batch (size %d) mislukt na retry/split in API-laag, overgeslagen",
-                    len(batch),
-                )
-                results_list.append((*_empty_batch_result, len(batch)))
-                progress_bar.update(len(batch))
+                resultaten.append(result)
+                if not herkansing:
+                    progress_bar.update(result[3])
 
-    async with asyncio.TaskGroup() as tg:
-        for batch in batches:
-            tg.create_task(_run_batch(batch))
+        try:
+            async with asyncio.TaskGroup() as tg:
+                for batch in batches:
+                    tg.create_task(_run_batch(batch))
+        except BaseExceptionGroup as groep:
+            # De TaskGroup verpakt de fout; geef de oorspronkelijke fout door
+            raise _eerste_exceptie(groep) from None
+        return resultaten
 
-    rijksmonumenten_parts = [r[0] for r in results_list]
-    beschermd_gezicht_parts = [r[1] for r in results_list]
-    gemeentelijke_parts = [r[2] for r in results_list]
+    async def _proefrequest(bron: str, verblijfsobject_id: str) -> None:
+        if bron == RCE:
+            await _query_rijksmonumenten(session, [verblijfsobject_id], uitval)
+        elif bron == BAG:
+            await _query_adrespunten(session, [verblijfsobject_id], uitval)
+        else:
+            await _query_beperkingen(
+                session, {verblijfsobject_id: adrespunten[verblijfsobject_id]}, uitval
+            )
+
+    try:
+        results_list = await _verwerk(batches)
+    finally:
+        progress_bar.close()
+
+    uitval.controleer()
+
+    # Herkansing: een bron die halverwege haperde geeft aan het einde vaak weer
+    # antwoord. De verblijfsobjecten zonder antwoord worden daarom één keer opnieuw
+    # verwerkt; hun eerdere, onvolledige rijen vervallen.
+    if uitval.mislukt:
+        # Een bron die nog gestoord is krijgt eerst één proefrequest voor één
+        # verblijfsobject. Blijft zij gestoord, dan heeft opnieuw verwerken geen zin.
+        await uitval.wacht_op_proefrequest()
+        for bron in uitval.gestoorde_bronnen():
+            await _proefrequest(bron, next(iter(uitval.mislukt[bron])))
+        opnieuw = uitval.herkansbaar()
+        if opnieuw:
+            logger.info(
+                "Herkansing voor %d verblijfsobjecten waarvoor een bron geen antwoord gaf",
+                len(opnieuw),
+            )
+            zonder_adrespunt = [i for i in opnieuw if i in uitval.mislukt.get(BAG, {})]
+            uitval.vergeet(opnieuw)
+            adrespunten.update(
+                await _query_adrespunten(session, zonder_adrespunt, uitval)
+            )
+            herkansing = await _verwerk(
+                _in_batches(_sorteer_ruimtelijk(opnieuw, adrespunten)), herkansing=True
+            )
+            results_list = [_zonder(r, set(opnieuw)) for r in results_list] + herkansing
+            uitval.controleer()
+
+    # Lege frames doen niet mee: pandas waarschuwt bij het samenvoegen daarvan
+    rijksmonumenten_parts = [r[0] for r in results_list if not r[0].empty]
+    beschermd_gezicht_parts = [r[1] for r in results_list if not r[1].empty]
+    gemeentelijke_parts = [r[2] for r in results_list if not r[2].empty]
 
     rijksmonumenten_result = (
         pd.concat(rijksmonumenten_parts, ignore_index=True)
@@ -269,21 +382,22 @@ async def _query(
         else pd.DataFrame(columns=["identificatie", "grondslag_gemeentelijk_monument"])
     )
 
-    progress_bar.close()
-
     if (
         rijksmonumenten_result.empty
         and verblijfsobjecten_in_beschermd_gezicht_result.empty
         and gemeentelijke_monumenten_result.empty
     ):
-        return pd.DataFrame(
-            columns=[
-                "identificatie",
-                "rijksmonument_nummer",
-                "rijksmonument_bron",
-                "rijksbeschermd_gezicht_naam",
-                "grondslag_gemeentelijk_monument",
-            ]
+        return (
+            pd.DataFrame(
+                columns=[
+                    "identificatie",
+                    "rijksmonument_nummer",
+                    "rijksmonument_bron",
+                    "rijksbeschermd_gezicht_naam",
+                    "grondslag_gemeentelijk_monument",
+                ]
+            ),
+            uitval,
         )
 
     # The filtering in _process_batch already separates the data correctly:
@@ -327,4 +441,4 @@ async def _query(
         verblijfsobjecten_in_beschermd_gezicht_result, on="identificatie", how="outer"
     ).merge(gemeentelijke_monumenten_result, on="identificatie", how="outer")
 
-    return result
+    return result, uitval

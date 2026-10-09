@@ -12,6 +12,7 @@ from monumenten._api._backoff import (
     RETRYABLE_STATUS_CODES,
     RETRY_SLEEP_SECONDS,
 )
+from monumenten._bronfouten import RCE, Bronuitval
 
 # Create a module-level logger
 logger = logging.getLogger("monumenten.api.cultureel_erfgoed")
@@ -72,16 +73,20 @@ def _get_semaphore(loop: asyncio.AbstractEventLoop) -> asyncio.Semaphore:
 async def _query_rijksmonumenten(
     session: aiohttp.ClientSession,
     identificaties: List[str],
+    uitval: Bronuitval,
     *,
     _depth: int = 0,
 ) -> List[Dict[str, Any]]:
     """
     Voert een SPARQL-query uit om rijksmonumenten op te halen voor gegeven BAG-identificaties.
-    Bij falen na retries wordt de batch in tweeën gesplitst en opnieuw geprobeerd.
+    Bij falen na retries wordt de batch in tweeën gesplitst en opnieuw geprobeerd,
+    behalve als de RCE gestoord is: dan wordt de request overgeslagen (zie Bronuitval).
 
     Args:
         session (aiohttp.ClientSession): De aiohttp ClientSession voor het uitvoeren van de HTTP-aanvraag
         identificaties (List[str]): Lijst van BAG-identificaties waarvoor rijksmonumenten worden opgezocht
+        uitval (Bronuitval): Hierin wordt vastgelegd voor welke identificaties de RCE
+            wel en, ook na retries en splitsen, geen antwoord gaf
         _depth (int): Interne recursiediepte bij batch-splitsing; standaard 0.
 
     Returns:
@@ -95,6 +100,8 @@ async def _query_rijksmonumenten(
     """
     try:
         async with _get_semaphore(asyncio.get_running_loop()):
+            if uitval.sla_over_bij_storing(RCE, identificaties):
+                return []
             identificaties_str = " ".join(
                 f'"{identificatie}"' for identificatie in identificaties
             )
@@ -122,6 +129,7 @@ async def _query_rijksmonumenten(
                                     "Rijksmonumenten query geslaagd na splitsing (depth %d)",
                                     _depth,
                                 )
+                            uitval.registreer_antwoord(RCE, len(identificaties))
                             return resultaat
                         else:
                             logger.warning(
@@ -157,9 +165,15 @@ async def _query_rijksmonumenten(
                     await asyncio.sleep(RETRY_SLEEP_SECONDS)
             if last_error is not None:
                 raise last_error
-            return []
-    except Exception:
-        if len(identificaties) > MIN_BATCH_SIZE and _depth < MAX_SPLIT_DEPTH:
+            # Geen fout maar ook geen lijst: dat is geen antwoord, dus geen leeg resultaat
+            raise RuntimeError("Onverwacht response formaat van de RCE")
+    except Exception as e:
+        uitval.registreer_mislukte_request(RCE, e)
+        if (
+            not uitval.is_gestoord(RCE)
+            and len(identificaties) > MIN_BATCH_SIZE
+            and _depth < MAX_SPLIT_DEPTH
+        ):
             mid = len(identificaties) // 2
             logger.info(
                 "Rijksmonumenten query mislukt, splitsen in 2 batches van %d en %d IDs (depth %d)",
@@ -168,16 +182,17 @@ async def _query_rijksmonumenten(
                 _depth + 1,
             )
             left = await _query_rijksmonumenten(
-                session, identificaties[:mid], _depth=_depth + 1
+                session, identificaties[:mid], uitval, _depth=_depth + 1
             )
             right = await _query_rijksmonumenten(
-                session, identificaties[mid:], _depth=_depth + 1
+                session, identificaties[mid:], uitval, _depth=_depth + 1
             )
             return left + right
         logger.warning(
             "Rijksmonumenten query definitief overgeslagen voor %d IDs",
             len(identificaties),
         )
+        uitval.registreer_fout(RCE, identificaties, e)
         return []
 
 
