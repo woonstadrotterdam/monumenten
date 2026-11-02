@@ -107,7 +107,7 @@ async def _process_batch(
         default="",
     )
 
-    rijksmonumenten_df.drop(columns=["grondslagcode"], inplace=True)
+    rijksmonumenten_df = rijksmonumenten_df.drop(columns=["grondslagcode"])
 
     # Process gemeentelijke monumenten
     gemeentelijke_monumenten_df = verblijfsobjecten_df[
