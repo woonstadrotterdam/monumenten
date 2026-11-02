@@ -141,7 +141,9 @@ async def _process_batch(
     rijksmonumenten_df["rijksmonument_bron"] = np.select(
         list(condition_choice_map.values()),
         list(condition_choice_map.keys()),
-        default="",
+        # None en geen "": de client leidt rijksmonument af uit een gevulde bron.
+        # Als object-array, omdat de numpy-stubs geen kale None accepteren.
+        default=np.array(None, dtype=object),
     )
 
     rijksmonumenten_df.drop(columns=["grondslagcode"], inplace=True)

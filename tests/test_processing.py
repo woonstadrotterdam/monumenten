@@ -29,7 +29,7 @@ def _make_batch_result(identificaties, count=None):
     ids_df = pd.DataFrame({"identificatie": list(identificaties)[:n]})
     rm = ids_df.assign(
         rijksmonument_nummer="",
-        rijksmonument_bron="",
+        rijksmonument_bron=None,
         rijksmonument_voorbescherming=False,
     )
     bg = ids_df.assign(rijksbeschermd_gezicht_naam=pd.NA)
@@ -434,7 +434,7 @@ async def test_process_batch_ewd_is_geen_rijksmonument(empty_geodataframe):
     ]
     row = _rij(rm_df, "vo_ewd")
     assert pd.isna(row["rijksmonument_nummer"])
-    assert pd.isna(row["rijksmonument_bron"]) or row["rijksmonument_bron"] == ""
+    assert pd.isna(row["rijksmonument_bron"])
     assert bool(row["rijksmonument_voorbescherming"]) is True
     # EWD is ook geen gemeentelijk monument
     assert gm_df.empty
@@ -512,3 +512,20 @@ async def test_process_batch_zonder_beperking(empty_geodataframe):
     assert rm_df.empty
     assert gm_df.empty
     assert pm_df.empty
+
+
+@pytest.mark.asyncio
+async def test_process_batch_geen_bron_is_none(empty_geodataframe):
+    """Een rij zonder RCE-nummer en zonder EWE krijgt None als bron, geen "".
+
+    De client leidt rijksmonument af uit een gevulde bron (notna), dus een lege
+    string zou zo'n rij ten onrechte als rijksmonument laten tellen.
+    """
+    rm_df, _, _, _, _ = await _run_process_batch(
+        rijksmonumenten=[{"identificatie": "vo_rce", "rijksmonument_nummer": None}],
+        verblijfsobjecten=[_beperking("vo_rce")],
+        beschermde_gezichten_df=empty_geodataframe,
+    )
+
+    row = _rij(rm_df, "vo_rce")
+    assert pd.isna(row["rijksmonument_bron"])

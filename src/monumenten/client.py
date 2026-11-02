@@ -130,7 +130,7 @@ class MonumentenClient:
         merged.insert(
             rijksmonument_nummer_position,
             "rijksmonument",
-            merged["rijksmonument_bron"].fillna("").ne(""),
+            merged["rijksmonument_bron"].notna(),
         )
 
         # verplaats rijksmonument_bron naar rijksmonument_nummer_position + 1
