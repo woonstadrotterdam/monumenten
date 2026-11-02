@@ -1,6 +1,8 @@
+from contextlib import contextmanager
+from typing import Iterator
 from unittest.mock import AsyncMock, patch
 
-import numpy as np
+import geopandas as gpd
 import pandas as pd
 import pytest
 import pytest_asyncio
@@ -511,31 +513,72 @@ async def test_process_from_df_multiple_beschermd_gezichten(client: MonumentenCl
 # ---------------------------------------------------------------------------
 
 
-def _query_result_met_voorbescherming(identificatie: str) -> pd.DataFrame:
-    """Nabootsing van _query-output voor een verblijfsobject met alleen EWD."""
-    return pd.DataFrame(
-        {
-            "identificatie": [identificatie],
-            "rijksmonument_nummer": pd.array([pd.NA], dtype="string"),
-            "rijksmonument_bron": [np.nan],
-            "rijksmonument_voorbescherming": [True],
-            "rijksbeschermd_gezicht_naam": [np.nan],
-            "grondslag_gemeentelijk_monument": [np.nan],
-            "provinciaal_monument_omschrijving": [np.nan],
-        }
+_VO_ALLEEN_EWD = "0599010000000001"
+_VO_ALLEEN_EWE = "0599010000000002"
+_VO_RCE_EN_EWD = "0599010000000003"
+
+
+def _beperking(identificatie: str, grondslagcode: str | None) -> dict:
+    """Een rij zoals _query_verblijfsobjecten die teruggeeft."""
+    # POINT (0 0) ligt buiten Nederland, dus er wordt geen provincie bevraagd
+    return {
+        "identificatie": identificatie,
+        "verblijfsobjectWKT": "POINT (0 0)",
+        "grondslagcode": grondslagcode,
+        "grondslag_gemeentelijk_monument": None,
+    }
+
+
+@contextmanager
+def _mock_api_met_voorbescherming() -> Iterator[None]:
+    """Mockt alleen de API-laag, zodat _process_batch en _query echt draaien.
+
+    Daardoor heeft de data dezelfde vorm als in productie: een adres met alleen
+    EWD komt pas via de merge met de voorbescherming in het rijksmonumentenframe.
+    """
+    rijksmonumenten = [
+        {"identificatie": _VO_RCE_EN_EWD, "rijksmonument_nummer": "12345"}
+    ]
+    verblijfsobjecten = [
+        _beperking(_VO_ALLEEN_EWD, "EWD"),
+        _beperking(_VO_ALLEEN_EWE, "EWE"),
+        _beperking(_VO_RCE_EN_EWD, "EWD"),
+    ]
+    geen_gezichten = gpd.GeoDataFrame(
+        columns=["rijksbeschermd_gezicht_naam", "geometry"], geometry="geometry"
     )
+    with (
+        patch(
+            "monumenten._processing._query_rijksmonumenten",
+            AsyncMock(return_value=rijksmonumenten),
+        ),
+        patch(
+            "monumenten._processing._query_verblijfsobjecten",
+            AsyncMock(return_value=verblijfsobjecten),
+        ),
+        patch(
+            "monumenten._processing._get_beschermde_gezichten",
+            AsyncMock(return_value=geen_gezichten),
+        ),
+    ):
+        yield
 
 
 @pytest.mark.asyncio
 async def test_voorbescherming_gemockt_df(client: MonumentenClient):
     """Voorbescherming: rijksmonument False, aparte vlag True, juiste kolomvolgorde."""
-    vo = "0599010000000001"
-    with patch(
-        "monumenten.client._query",
-        AsyncMock(return_value=_query_result_met_voorbescherming(vo)),
-    ):
+    with _mock_api_met_voorbescherming():
         result = await client.process_from_df(
-            pd.DataFrame({"bag_verblijfsobject_id": [vo]}), "bag_verblijfsobject_id"
+            pd.DataFrame(
+                {
+                    "bag_verblijfsobject_id": [
+                        _VO_ALLEEN_EWD,
+                        _VO_ALLEEN_EWE,
+                        _VO_RCE_EN_EWD,
+                    ]
+                }
+            ),
+            "bag_verblijfsobject_id",
         )
 
     assert list(result.columns) == [
@@ -552,7 +595,10 @@ async def test_voorbescherming_gemockt_df(client: MonumentenClient):
         "provinciaal_monument",
         "provinciaal_monument_omschrijving",
     ]
-    row = result.iloc[0]
+    rijen = result.set_index("bag_verblijfsobject_id")
+
+    # Alleen EWD: geen rijksmonument, wel voorbescherming
+    row = rijen.loc[_VO_ALLEEN_EWD]
     assert bool(row["rijksmonument"]) is False
     assert pd.isna(row["rijksmonument_bron"])
     assert pd.isna(row["rijksmonument_nummer"])
@@ -561,15 +607,24 @@ async def test_voorbescherming_gemockt_df(client: MonumentenClient):
     assert bool(row["gemeentelijk_monument"]) is False
     assert bool(row["provinciaal_monument"]) is False
 
+    # Alleen EWE: rijksmonument via Kadaster, geen voorbescherming
+    row = rijen.loc[_VO_ALLEEN_EWE]
+    assert bool(row["rijksmonument"]) is True
+    assert row["rijksmonument_bron"] == "Kadaster"
+    assert bool(row["rijksmonument_voorbescherming"]) is False
+
+    # RCE en EWD: rijksmonument via RCE, EWD telt niet als Kadaster-bron
+    row = rijen.loc[_VO_RCE_EN_EWD]
+    assert bool(row["rijksmonument"]) is True
+    assert row["rijksmonument_bron"] == "RCE"
+    assert row["rijksmonument_nummer"] == "12345"
+    assert bool(row["rijksmonument_voorbescherming"]) is True
+
 
 @pytest.mark.asyncio
 async def test_voorbescherming_gemockt_vera(client: MonumentenClient):
     """Voorbescherming heeft geen VERA-code (EENHEIDMONUMENT kent geen voorbescherming)."""
-    vo = "0599010000000001"
-    with patch(
-        "monumenten.client._query",
-        AsyncMock(return_value=_query_result_met_voorbescherming(vo)),
-    ):
-        result = await client.process_from_list([vo], to_vera=True)
+    with _mock_api_met_voorbescherming():
+        result = await client.process_from_list([_VO_ALLEEN_EWD], to_vera=True)
 
-    assert result[vo] == []
+    assert result[_VO_ALLEEN_EWD] == []
