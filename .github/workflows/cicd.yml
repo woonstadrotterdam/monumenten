@@ -2,6 +2,11 @@ name: CICD
 
 on:
   workflow_dispatch:
+  schedule:
+    # Dagelijks om 08:30 Nederlandse tijd: tests/test_client.py bevraagt de echte
+    # API's van Kadaster en Cultureel Erfgoed, dus dit vangt wijzigingen aan hun kant.
+    - cron: "30 8 * * *"
+      timezone: "Europe/Amsterdam"
   push:
     branches: [main]
   pull_request:
@@ -13,7 +18,8 @@ jobs:
 
     strategy:
       matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        # De dagelijkse run test de externe API's, niet onze code: één versie volstaat.
+        python-version: ${{ github.event_name == 'schedule' && fromJSON('["3.13"]') || fromJSON('["3.11", "3.12", "3.13", "3.14"]') }}
 
     steps:
       - uses: actions/checkout@v4
@@ -24,6 +30,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Cache pre-commit environment
+        if: github.event_name != 'schedule'
         uses: actions/cache@v4
         with:
           path: |
@@ -42,6 +49,7 @@ jobs:
           PYTHONPATH: src # Ensure src is in the PYTHONPATH
 
       - name: Run pre-commit hooks
+        if: github.event_name != 'schedule'
         run: pre-commit run --all-files
 
       - name: Run pytest

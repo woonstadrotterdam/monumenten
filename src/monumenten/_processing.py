@@ -146,7 +146,7 @@ async def _process_batch(
         default=np.array(None, dtype=object),
     )
 
-    rijksmonumenten_df.drop(columns=["grondslagcode"], inplace=True)
+    rijksmonumenten_df = rijksmonumenten_df.drop(columns=["grondslagcode"])
 
     # Voorbescherming (EWD) is geen rijksmonument in de zin van art. 1.1 Erfgoedwet
     # en telt dus niet mee voor rijksmonument/rijksmonument_bron. Wel apart teruggeven.

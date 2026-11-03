@@ -628,3 +628,44 @@ async def test_voorbescherming_gemockt_vera(client: MonumentenClient):
         result = await client.process_from_list([_VO_ALLEEN_EWD], to_vera=True)
 
     assert result[_VO_ALLEEN_EWD] == []
+
+
+@pytest.mark.asyncio
+async def test_process_from_list_beperkingsgebied_bevat_adrespunt(
+    client: MonumentenClient,
+):
+    """Een beperking telt alleen als het adrespunt binnen het beperkingsgebied ligt.
+
+    Een beperking hangt aan een perceel; zonder deze controle krijgt elk adres in
+    een gebouw dat het perceel raakt de status, ook als het monument elders staat.
+    """
+    bag_verblijfsobject_ids = [
+        "0106010000003924",  # Brinkstraat 5 Assen (Brinkflat): strookje op perceel met EWE van buren en een klein handmatig GWA-vlak
+        "0119010000024961",  # Prinses Marijkestraat 50 Meppel: GWA type BRK, adrespunt buiten perceel
+        "0301010000015563",  # Dennendijk 13 Warnsveld: GWA type BAG, gebied ligt elders op het perceel
+        "0193010000008403",  # Diezerstraat 12 Zwolle: GWA handmatig, buurpand grenst aan het gebied
+        "0119010000024715",  # Zuideinde 76G Meppel: GWA type BRK, adrespunt op perceel
+        "0363010001026929",  # Laurierstraat 107A Amsterdam: GWA type BAG, gebied is het pand zelf
+    ]
+
+    result = await client.process_from_list(bag_verblijfsobject_ids)
+
+    assert len(result) == len(bag_verblijfsobject_ids), (
+        "Niet voor elk verblijfsobject een resultaat"
+    )
+
+    # Adrespunt buiten het beperkingsgebied: geen status
+    assert result["0106010000003924"]["rijksmonument"] is False
+    assert result["0106010000003924"]["rijksmonument_bron"] is None
+    for vbo_id in [
+        "0106010000003924",
+        "0119010000024961",
+        "0301010000015563",
+        "0193010000008403",
+    ]:
+        assert result[vbo_id]["gemeentelijk_monument"] is False, vbo_id
+        assert result[vbo_id]["grondslag_gemeentelijk_monument"] is None, vbo_id
+
+    # Adrespunt binnen het beperkingsgebied: status blijft
+    for vbo_id in ["0119010000024715", "0363010001026929"]:
+        assert result[vbo_id]["gemeentelijk_monument"] is True, vbo_id
