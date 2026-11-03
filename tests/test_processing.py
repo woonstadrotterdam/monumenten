@@ -6,6 +6,7 @@ import aiohttp
 import geopandas as gpd
 import pandas as pd
 import pytest
+from shapely.geometry import Point, box
 
 from monumenten._api._backoff import MAX_SPLIT_DEPTH, MIN_BATCH_SIZE
 from monumenten._api._cultureel_erfgoed import _query_rijksmonumenten
@@ -313,8 +314,6 @@ async def test_query_provinciale_fout_wordt_niet_overgeslagen(empty_geodataframe
 @pytest.mark.asyncio
 async def test_koppel_provinciale_monumenten_alleen_benodigde_provincie():
     """Alleen provincies met een adrespunt in hun bounding box worden opgehaald."""
-    from shapely.geometry import Point, box
-
     geo_df = gpd.GeoDataFrame(
         {"identificatie": ["rolde_in", "rolde_uit", "rotterdam"]},
         geometry=[Point(6.646, 52.9885), Point(6.70, 52.95), Point(4.48, 51.92)],
@@ -347,8 +346,6 @@ async def test_koppel_provinciale_monumenten_alleen_benodigde_provincie():
 
 @pytest.mark.asyncio
 async def test_koppel_provinciale_monumenten_buiten_nh_en_dr_geen_download():
-    from shapely.geometry import Point
-
     geo_df = gpd.GeoDataFrame(
         {"identificatie": ["rotterdam"]}, geometry=[Point(4.48, 51.92)]
     )
@@ -365,16 +362,100 @@ async def test_koppel_provinciale_monumenten_buiten_nh_en_dr_geen_download():
     ]
 
 
+@pytest.mark.asyncio
+async def test_koppel_provinciale_monumenten_verwisselde_assen_geeft_fout(caplog):
+    """POINT(lat lon) valt buiten Nederland en zou stil nooit in een bbox liggen."""
+    geo_df = gpd.GeoDataFrame(
+        {"identificatie": ["rolde"]}, geometry=[Point(52.9885, 6.646)]
+    )
+    with patch(
+        "monumenten._processing._get_provinciale_monumenten",
+        side_effect=AssertionError("mag niet worden aangeroepen"),
+    ):
+        await _koppel_provinciale_monumenten(MagicMock(), geo_df)
+
+    assert "buiten het bereik van Nederland" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_query_provinciaal_samen_met_rijks_en_gemeentelijk():
+    """Een provinciaal monument op een ID met ook een rijks- en gemeentelijke
+    status geeft één rij met alle drie; een ID met alleen een provinciaal monument
+    krijgt een eigen rij."""
+    verblijfsobjecten = [
+        {
+            "identificatie": "rolde_alles",
+            "verblijfsobjectWKT": "POINT (6.646 52.9885)",
+            "grondslagcode": "GG",
+            "grondslag_gemeentelijk_monument": "Gemeentewet",
+        },
+        {
+            "identificatie": "rolde_provinciaal",
+            "verblijfsobjectWKT": "POINT (6.6461 52.9886)",
+            "grondslagcode": None,
+            "grondslag_gemeentelijk_monument": None,
+        },
+    ]
+    drenthe_df = gpd.GeoDataFrame(
+        {"provinciaal_monument_omschrijving": ["PM1-0001 Dwarshuisboerderij Rolde"]},
+        geometry=[box(6.645, 52.988, 6.647, 52.989)],
+    )
+    with (
+        patch(
+            "monumenten._processing._get_beschermde_gezichten",
+            return_value=gpd.GeoDataFrame(
+                columns=["rijksbeschermd_gezicht_naam", "geometry"]
+            ),
+        ),
+        patch(
+            "monumenten._processing._query_rijksmonumenten",
+            AsyncMock(
+                return_value=[
+                    {"identificatie": "rolde_alles", "rijksmonument_nummer": "12345"}
+                ]
+            ),
+        ),
+        patch(
+            "monumenten._processing._query_verblijfsobjecten",
+            AsyncMock(return_value=verblijfsobjecten),
+        ),
+        patch(
+            "monumenten._processing._get_provinciale_monumenten",
+            AsyncMock(return_value=drenthe_df),
+        ),
+    ):
+        async with aiohttp.ClientSession() as session:
+            result = await _query(session, ["rolde_alles", "rolde_provinciaal"])
+
+    assert sorted(result["identificatie"]) == ["rolde_alles", "rolde_provinciaal"]
+    alles = _rij(result, "rolde_alles")
+    assert alles["rijksmonument_nummer"] == "12345"
+    assert alles["rijksmonument_bron"] == "RCE"
+    assert alles["grondslag_gemeentelijk_monument"] == "Gemeentewet"
+    assert (
+        alles["provinciaal_monument_omschrijving"]
+        == "PM1-0001 Dwarshuisboerderij Rolde"
+    )
+    alleen = _rij(result, "rolde_provinciaal")
+    assert pd.isna(alleen["rijksmonument_nummer"])
+    assert pd.isna(alleen["grondslag_gemeentelijk_monument"])
+    assert (
+        alleen["provinciaal_monument_omschrijving"]
+        == "PM1-0001 Dwarshuisboerderij Rolde"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Grondslagcodes: EWE = rijksmonument, EWD = voorbescherming (geen rijksmonument)
 # ---------------------------------------------------------------------------
 
 
 def _beperking(identificatie, grondslagcode=None, grondslag=None):
-    # POINT (0 0) ligt buiten Nederland, dus er wordt geen provincie bevraagd
+    # Rotterdam ligt buiten de bbox van Noord-Holland en Drenthe, dus er wordt
+    # geen provincie bevraagd
     return {
         "identificatie": identificatie,
-        "verblijfsobjectWKT": "POINT (0 0)",
+        "verblijfsobjectWKT": "POINT (4.48 51.92)",
         "grondslagcode": grondslagcode,
         "grondslag_gemeentelijk_monument": grondslag,
     }

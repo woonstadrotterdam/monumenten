@@ -3,6 +3,7 @@
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 
 from monumenten._api._provincies import (
@@ -42,6 +43,14 @@ def test_omschrijving_noord_holland_categorieen(caplog):
     assert "Nieuw type" in caplog.records[0].message
 
 
+def test_omschrijving_noord_holland_onhashbare_waarde(caplog):
+    """Een list uit de service geeft een waarschuwing, geen TypeError."""
+    with caplog.at_level(logging.WARNING):
+        assert _omschrijving_noord_holland({"siteName_Spelling": ["a", "b"]}) is None
+    assert len(caplog.records) == 1
+    assert "['a', 'b']" in caplog.records[0].message
+
+
 def test_omschrijving_drenthe(caplog):
     assert (
         _omschrijving_drenthe(
@@ -54,7 +63,8 @@ def test_omschrijving_drenthe(caplog):
         == "PM2-0310 Woningen voor ouden van dagen"
     )
     with caplog.at_level(logging.WARNING):
-        # Alleen een aangewezen monument telt; voorbescherming niet
+        # Alleen een aangewezen monument telt; voorbescherming niet, en die
+        # bekende status geeft geen waarschuwing
         assert (
             _omschrijving_drenthe(
                 {
@@ -65,14 +75,31 @@ def test_omschrijving_drenthe(caplog):
             )
             is None
         )
+        assert caplog.records == []
+        # Onbekende status: genegeerd met één waarschuwing
+        assert _omschrijving_drenthe({"PM_status": "vervallen"}) is None
     assert len(caplog.records) == 1
-    assert "voorbeschermd" in caplog.records[0].message
+    assert "vervallen" in caplog.records[0].message
+
+
+def test_omschrijving_drenthe_beschermd_zonder_nummer_en_naam():
+    """Een beschermd monument zonder omschrijving valt niet stil weg."""
+    assert (
+        _omschrijving_drenthe(
+            {"PM_nummer": " ", "PM_object": None, "PM_status": "beschermd"}
+        )
+        == "Provinciaal monument Drenthe"
+    )
 
 
 _PUNT = {"type": "Point", "coordinates": [6.5, 52.9]}
+_VLAK = {
+    "type": "Polygon",
+    "coordinates": [[[6.5, 52.9], [6.6, 52.9], [6.6, 53.0], [6.5, 52.9]]],
+}
 
 
-def _feature(properties, geometry=_PUNT):
+def _feature(properties, geometry=_VLAK):
     return {"type": "Feature", "properties": properties, "geometry": geometry}
 
 
@@ -145,6 +172,7 @@ async def test_query_provinciale_monumenten_pagineert_en_filtert():
     features = await _query_provinciale_monumenten(session, DRENTHE)
 
     assert [p["resultOffset"] for p in aanroepen] == ["0", str(_PAGINA_GROOTTE)]
+    assert aanroepen[0]["orderByFields"] == "OBJECTID"
     assert aanroepen[0]["outSR"] == "4326"
     assert aanroepen[0]["f"] == "geojson"
     # voorbeschermd en zonder geometrie vallen af
@@ -173,8 +201,6 @@ async def test_query_provinciale_monumenten_geen_vlakken_is_fout():
 @pytest.mark.asyncio
 async def test_query_provinciale_monumenten_retry_dan_fout():
     """Een tijdelijke HTTP-fout wordt herhaald; daarna een duidelijke fout."""
-    import aiohttp
-
     fout = aiohttp.ClientResponseError(
         request_info=MagicMock(), history=(), status=503, message="Service Unavailable"
     )
@@ -187,8 +213,6 @@ async def test_query_provinciale_monumenten_retry_dan_fout():
 
 @pytest.mark.asyncio
 async def test_query_provinciale_monumenten_niet_herhaalbare_fout():
-    import aiohttp
-
     fout = aiohttp.ClientResponseError(
         request_info=MagicMock(), history=(), status=404, message="Not Found"
     )
@@ -196,3 +220,74 @@ async def test_query_provinciale_monumenten_niet_herhaalbare_fout():
     with pytest.raises(ProvincialeMonumentenError, match="HTTP 404"):
         await _query_provinciale_monumenten(session, NOORD_HOLLAND)
     assert len(aanroepen) == 1
+
+
+def _drents_vlak(nummer, geometry=_VLAK):
+    return _feature(
+        {"PM_nummer": nummer, "PM_object": "Boerderij", "PM_status": "beschermd"},
+        geometry=geometry,
+    )
+
+
+@pytest.mark.asyncio
+async def test_query_provinciale_monumenten_vlag_onder_properties():
+    """Een korte pagina met exceededTransferLimit onder properties: doorgaan."""
+    pagina_1 = {
+        "type": "FeatureCollection",
+        "properties": {"exceededTransferLimit": True},
+        "features": [_drents_vlak("PM1-0001")],
+    }
+    pagina_2 = {"type": "FeatureCollection", "features": [_drents_vlak("PM1-0002")]}
+    session, aanroepen = _sessie([pagina_1, pagina_2])
+
+    features = await _query_provinciale_monumenten(session, DRENTHE)
+
+    assert [p["resultOffset"] for p in aanroepen] == ["0", "1"]
+    assert len(features) == 2
+
+
+@pytest.mark.asyncio
+async def test_query_provinciale_monumenten_lege_pagina_met_vlag_stopt(caplog):
+    """Een lege pagina met de vlag aan geeft geen oneindige lus."""
+    pagina_1 = {
+        "type": "FeatureCollection",
+        "exceededTransferLimit": True,
+        "features": [_drents_vlak(f"PM1-{i:04d}") for i in range(_PAGINA_GROOTTE)],
+    }
+    pagina_2 = {
+        "type": "FeatureCollection",
+        "exceededTransferLimit": True,
+        "features": [],
+    }
+    session, aanroepen = _sessie([pagina_1, pagina_2])
+
+    with caplog.at_level(logging.WARNING):
+        features = await _query_provinciale_monumenten(session, DRENTHE)
+
+    assert len(aanroepen) == 2
+    assert len(features) == _PAGINA_GROOTTE
+    assert "lege pagina" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_query_provinciale_monumenten_alleen_vlakken(caplog):
+    """Een punt of lijn kan geen adrespunt bevatten: weglaten met waarschuwing."""
+    lijn = {"type": "LineString", "coordinates": [[6.5, 52.9], [6.6, 53.0]]}
+    pagina = {
+        "type": "FeatureCollection",
+        "features": [
+            _drents_vlak("PM1-0001"),
+            _drents_vlak("PM1-0002", geometry=_PUNT),
+            _drents_vlak("PM1-0003", geometry=lijn),
+        ],
+    }
+    session, _ = _sessie([pagina])
+
+    with caplog.at_level(logging.WARNING):
+        features = await _query_provinciale_monumenten(session, DRENTHE)
+
+    assert [f["properties"]["provinciaal_monument_omschrijving"] for f in features] == [
+        "PM1-0001 Boerderij"
+    ]
+    assert "'Point'" in caplog.text
+    assert "'LineString'" in caplog.text

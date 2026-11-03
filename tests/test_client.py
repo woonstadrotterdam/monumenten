@@ -520,10 +520,11 @@ _VO_RCE_EN_EWD = "0599010000000003"
 
 def _beperking(identificatie: str, grondslagcode: str | None) -> dict:
     """Een rij zoals _query_verblijfsobjecten die teruggeeft."""
-    # POINT (0 0) ligt buiten Nederland, dus er wordt geen provincie bevraagd
+    # Rotterdam ligt buiten de bbox van Noord-Holland en Drenthe, dus er wordt
+    # geen provincie bevraagd
     return {
         "identificatie": identificatie,
-        "verblijfsobjectWKT": "POINT (0 0)",
+        "verblijfsobjectWKT": "POINT (4.48 51.92)",
         "grondslagcode": grondslagcode,
         "grondslag_gemeentelijk_monument": None,
     }

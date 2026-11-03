@@ -39,6 +39,10 @@ _VOORBESCHERMING_GRONDSLAGCODES = ["EWD"]
 # GG/GWA: gemeentelijk monument (GWA bundelt voorbescherming, aanwijzing en afschrift)
 _GEMEENTELIJK_GRONDSLAGCODES = ["GG", "GWA"]
 
+# Ruim bereik van Nederland in WGS84, om verwisselde assen te herkennen
+_NL_LON = (3.0, 7.5)
+_NL_LAT = (50.5, 53.8)
+
 _BatchFrames = Tuple[DataFrame, DataFrame, DataFrame, DataFrame]
 _BatchResult = Tuple[DataFrame, DataFrame, DataFrame, DataFrame, int]
 
@@ -219,7 +223,9 @@ async def _get_beschermde_gezichten(
     return beschermde_gezichten_df
 
 
-@cached_stampede(ttl=60 * 60 * 24 * 7, noself=True)  # Cache resultaat voor 7 dagen
+# Cache 7 dagen. De lease (standaard 2 s) dekt het pagineren van Noord-Holland,
+# zodat parallelle batches niet allemaal zelf downloaden.
+@cached_stampede(lease=60, ttl=60 * 60 * 24 * 7, noself=True)
 async def _get_provinciale_monumenten(
     session: aiohttp.ClientSession, provincie: Provincie
 ) -> gpd.GeoDataFrame:
@@ -247,7 +253,18 @@ async def _koppel_provinciale_monumenten(
             één rij per gevonden combinatie
     """
     delen: List[DataFrame] = []
+    # De KKG levert POINT(lon lat) in WGS84, dus x is de lengte- en y de
+    # breedtegraad. Bij verwisselde assen zou geen punt ooit in een bbox liggen.
     lon, lat = geo_df.geometry.x, geo_df.geometry.y
+    in_nederland = lon.between(*_NL_LON) & lat.between(*_NL_LAT)
+    if len(geo_df) and in_nederland.mean() < 0.5:
+        logger.error(
+            "%d van %d adrespunten liggen buiten het bereik van Nederland; "
+            "controleer de volgorde van lengte- en breedtegraad. Provinciale "
+            "monumenten worden voor deze punten niet gevonden.",
+            (~in_nederland).sum(),
+            len(geo_df),
+        )
     for provincie in PROVINCIES:
         min_lon, min_lat, max_lon, max_lat = provincie.bbox
         in_bbox = (
@@ -302,11 +319,10 @@ def _voeg_namen_samen(df: DataFrame, kolom: str) -> DataFrame:
 
 def _eerste_exceptie(groep: BaseExceptionGroup[BaseException]) -> BaseException:
     """Geef de eerste niet-gegroepeerde exceptie uit een (geneste) ExceptionGroup."""
-    for exceptie in groep.exceptions:
-        if isinstance(exceptie, BaseExceptionGroup):
-            return _eerste_exceptie(exceptie)
-        return exceptie
-    return groep
+    exceptie: BaseException = groep
+    while isinstance(exceptie, BaseExceptionGroup) and exceptie.exceptions:
+        exceptie = exceptie.exceptions[0]
+    return exceptie
 
 
 async def _query(

@@ -64,16 +64,17 @@ class Provincie:
 
 
 @lru_cache(maxsize=None)
-def _waarschuw_onbekend(provincie: str, veld: str, waarde: object) -> None:
+def _waarschuw_onbekend(provincie: str, veld: str, waarde: str) -> None:
     """Logt één keer per proces dat een onbekende waarde is genegeerd.
 
     Args:
         provincie (str): Naam van de provincie.
         veld (str): Naam van het attribuut met de onbekende waarde.
-        waarde (object): De onbekende waarde.
+        waarde (str): ``repr`` van de onbekende waarde; een string, zodat ook een
+            list of dict uit de service hashbaar is voor de cache.
     """
     logger.warning(
-        "Provinciale monumenten %s: onbekende waarde %r voor %s genegeerd; "
+        "Provinciale monumenten %s: onbekende waarde %s voor %s genegeerd; "
         "controleer of de service is gewijzigd",
         provincie,
         waarde,
@@ -111,10 +112,12 @@ def _omschrijving_noord_holland(attributen: Dict[str, Any]) -> Optional[str]:
         Optional[str]: De categorie, of ``None`` als het vlak niet meetelt.
     """
     categorie = attributen.get("siteName_Spelling")
-    if isinstance(categorie, str) and categorie in _NH_CATEGORIEEN:
-        return categorie
-    if categorie not in _NH_UITGESLOTEN_CATEGORIEEN:
-        _waarschuw_onbekend("Noord-Holland", "siteName_Spelling", categorie)
+    if isinstance(categorie, str):
+        if categorie in _NH_CATEGORIEEN:
+            return categorie
+        if categorie in _NH_UITGESLOTEN_CATEGORIEEN:
+            return None
+    _waarschuw_onbekend("Noord-Holland", "siteName_Spelling", repr(categorie))
     return None
 
 
@@ -122,6 +125,7 @@ def _omschrijving_noord_holland(attributen: Dict[str, Any]) -> Optional[str]:
 # huurprijzen woonruimte, bijlage I). Een voorbeschermd object is nog niet
 # aangewezen.
 _DR_STATUS_BESCHERMD = "beschermd"
+_DR_UITGESLOTEN_STATUSSEN: FrozenSet[str] = frozenset({"voorbeschermd"})
 
 
 def _omschrijving_drenthe(attributen: Dict[str, Any]) -> Optional[str]:
@@ -132,15 +136,21 @@ def _omschrijving_drenthe(attributen: Dict[str, Any]) -> Optional[str]:
 
     Returns:
         Optional[str]: Bijvoorbeeld ``"PM1-0001 Dwarshuisboerderij Rolde"``, of
-        ``None`` als het monument niet de status ``beschermd`` heeft.
+        ``None`` als het monument niet de status ``beschermd`` heeft. Een
+        beschermd monument zonder nummer en naam krijgt een vaste omschrijving,
+        zodat het niet stil wegvalt.
     """
     status = attributen.get("PM_status")
     if status != _DR_STATUS_BESCHERMD:
-        _waarschuw_onbekend("Drenthe", "PM_status", status)
+        if not (isinstance(status, str) and status in _DR_UITGESLOTEN_STATUSSEN):
+            _waarschuw_onbekend("Drenthe", "PM_status", repr(status))
         return None
     nummer = str(attributen.get("PM_nummer") or "").strip()
     naam = " ".join(str(attributen.get("PM_object") or "").split())
-    return " ".join(deel for deel in (nummer, naam) if deel) or None
+    return (
+        " ".join(deel for deel in (nummer, naam) if deel)
+        or "Provinciaal monument Drenthe"
+    )
 
 
 NOORD_HOLLAND = Provincie(
@@ -166,6 +176,10 @@ DRENTHE = Provincie(
 )
 
 PROVINCIES: Tuple[Provincie, ...] = (NOORD_HOLLAND, DRENTHE)
+
+# Een adrespunt ligt nooit ``within`` een punt of lijn, dus zo'n object zou stil
+# niet meetellen. Beide services leveren nu alleen polygonen.
+_VLAK_TYPEN: FrozenSet[str] = frozenset({"Polygon", "MultiPolygon"})
 
 
 async def _get_json(
@@ -260,13 +274,22 @@ async def _query_provinciale_monumenten(
             "f": "geojson",
             "resultOffset": str(offset),
             "resultRecordCount": str(_PAGINA_GROOTTE),
+            # Zonder vaste volgorde kan offset-paginering vlakken overslaan of
+            # dubbel geven.
+            "orderByFields": "OBJECTID",
         }
         pagina = await _get_json(session, provincie, params)
         nieuwe = pagina.get("features") or []
         for feature in nieuwe:
             aantal_vlakken += 1
             omschrijving = provincie.omschrijving(feature.get("properties") or {})
-            if omschrijving is None or feature.get("geometry") is None:
+            geometrie = feature.get("geometry")
+            if omschrijving is None or geometrie is None:
+                continue
+            if geometrie.get("type") not in _VLAK_TYPEN:
+                _waarschuw_onbekend(
+                    provincie.naam, "geometrietype", repr(geometrie.get("type"))
+                )
                 continue
             features.append(
                 {
@@ -275,7 +298,18 @@ async def _query_provinciale_monumenten(
                     "properties": {"provinciaal_monument_omschrijving": omschrijving},
                 }
             )
-        if len(nieuwe) < _PAGINA_GROOTTE and not pagina.get("exceededTransferLimit"):
+        # Bij f=geojson staat de vlag top-level of onder properties.
+        meer = pagina.get("exceededTransferLimit") or (
+            pagina.get("properties") or {}
+        ).get("exceededTransferLimit")
+        if not nieuwe and meer:
+            logger.warning(
+                "Provinciale monumenten %s: lege pagina bij offset %d terwijl de "
+                "service meer vlakken meldt; ophalen gestopt",
+                provincie.naam,
+                offset,
+            )
+        if not nieuwe or (len(nieuwe) < _PAGINA_GROOTTE and not meer):
             break
         offset += len(nieuwe)
 
