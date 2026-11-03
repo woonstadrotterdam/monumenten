@@ -140,6 +140,11 @@ class MonumentenClient:
         columns.insert(rijksmonument_nummer_position + 1, "rijksmonument_bron")
         merged = merged[columns]
 
+        # voorbescherming (Kadaster EWD): geen rijksmonument, wel apart zichtbaar
+        merged["rijksmonument_voorbescherming"] = merged[
+            "rijksmonument_voorbescherming"
+        ].eq(True)
+
         rijksbeschermd_gezicht_naam_position = merged.columns.get_loc(
             "rijksbeschermd_gezicht_naam"
         )

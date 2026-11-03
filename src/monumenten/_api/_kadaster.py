@@ -61,8 +61,8 @@ WHERE {{
       VALUES ?grondslagcode {{
         "GG"  # Besluit monument, Gemeentewet
         "GWA" # Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift)
-        "EWE" # Erfgoedwet: Afschrift inschrijving monument of archeologisch monument in rijksmonumentenregister door minister OCW
-        "EWD" # Erfgoedwet: Toezending ontwerpbesluit aanwijzing rijksmonument door minister OCW (voorbescherming)
+        "EWE" # Erfgoedwet: Afschrift inschrijving monument of archeologisch monument in rijksmonumentenregister door minister OCW (= rijksmonument)
+        "EWD" # Erfgoedwet: Toezending ontwerpbesluit aanwijzing rijksmonument door minister OCW (voorbescherming; geen rijksmonument, zie rijksmonument_voorbescherming)
       }}
     }}
   }}

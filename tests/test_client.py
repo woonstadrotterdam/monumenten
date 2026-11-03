@@ -1,3 +1,8 @@
+from contextlib import contextmanager
+from typing import Iterator
+from unittest.mock import AsyncMock, patch
+
+import geopandas as gpd
 import pandas as pd
 import pytest
 import pytest_asyncio
@@ -40,10 +45,12 @@ async def test_process_from_list(client: MonumentenClient):
         == "https://monumentenregister.cultureelerfgoed.nl/monumenten/524327"
     )
     assert result["0599010000360091"]["rijksbeschermd_gezicht"] is False
+    assert result["0599010000360091"]["rijksmonument_voorbescherming"] is False
 
     # Test non-monument
     assert "0599010000486642" in result
     assert isinstance(result["0599010000486642"], dict)
+    assert result["0599010000486642"]["rijksmonument_voorbescherming"] is False
     assert result["0599010000486642"]["rijksmonument"] is False
     assert result["0599010000486642"]["rijksmonument_bron"] is None
     assert result["0599010000486642"]["rijksmonument_nummer"] is None
@@ -110,6 +117,7 @@ async def test_process_from_list(client: MonumentenClient):
     assert result["0599010000341377"]["rijksbeschermd_gezicht_naam"] is None
     assert result["0599010000341377"]["gemeentelijk_monument"] is False
     assert result["0599010000341377"]["grondslag_gemeentelijk_monument"] is None
+    assert result["0599010000341377"]["rijksmonument_voorbescherming"] is False
 
 
 @pytest.mark.asyncio
@@ -498,3 +506,125 @@ async def test_process_from_df_multiple_beschermd_gezichten(client: MonumentenCl
     # Controleer gemeentelijk monument details
     assert not pd.isna(row["grondslag_gemeentelijk_monument"])
     assert "Gemeentewet" in row["grondslag_gemeentelijk_monument"]
+
+
+# ---------------------------------------------------------------------------
+# Voorbescherming rijksmonument (Kadaster grondslagcode EWD)
+# ---------------------------------------------------------------------------
+
+
+_VO_ALLEEN_EWD = "0599010000000001"
+_VO_ALLEEN_EWE = "0599010000000002"
+_VO_RCE_EN_EWD = "0599010000000003"
+
+
+def _beperking(identificatie: str, grondslagcode: str | None) -> dict:
+    """Een rij zoals _query_verblijfsobjecten die teruggeeft."""
+    # POINT (0 0) ligt buiten Nederland, dus er wordt geen provincie bevraagd
+    return {
+        "identificatie": identificatie,
+        "verblijfsobjectWKT": "POINT (0 0)",
+        "grondslagcode": grondslagcode,
+        "grondslag_gemeentelijk_monument": None,
+    }
+
+
+@contextmanager
+def _mock_api_met_voorbescherming() -> Iterator[None]:
+    """Mockt alleen de API-laag, zodat _process_batch en _query echt draaien.
+
+    Daardoor heeft de data dezelfde vorm als in productie: een adres met alleen
+    EWD komt pas via de merge met de voorbescherming in het rijksmonumentenframe.
+    """
+    rijksmonumenten = [
+        {"identificatie": _VO_RCE_EN_EWD, "rijksmonument_nummer": "12345"}
+    ]
+    verblijfsobjecten = [
+        _beperking(_VO_ALLEEN_EWD, "EWD"),
+        _beperking(_VO_ALLEEN_EWE, "EWE"),
+        _beperking(_VO_RCE_EN_EWD, "EWD"),
+    ]
+    geen_gezichten = gpd.GeoDataFrame(
+        columns=["rijksbeschermd_gezicht_naam", "geometry"], geometry="geometry"
+    )
+    with (
+        patch(
+            "monumenten._processing._query_rijksmonumenten",
+            AsyncMock(return_value=rijksmonumenten),
+        ),
+        patch(
+            "monumenten._processing._query_verblijfsobjecten",
+            AsyncMock(return_value=verblijfsobjecten),
+        ),
+        patch(
+            "monumenten._processing._get_beschermde_gezichten",
+            AsyncMock(return_value=geen_gezichten),
+        ),
+    ):
+        yield
+
+
+@pytest.mark.asyncio
+async def test_voorbescherming_gemockt_df(client: MonumentenClient):
+    """Voorbescherming: rijksmonument False, aparte vlag True, juiste kolomvolgorde."""
+    with _mock_api_met_voorbescherming():
+        result = await client.process_from_df(
+            pd.DataFrame(
+                {
+                    "bag_verblijfsobject_id": [
+                        _VO_ALLEEN_EWD,
+                        _VO_ALLEEN_EWE,
+                        _VO_RCE_EN_EWD,
+                    ]
+                }
+            ),
+            "bag_verblijfsobject_id",
+        )
+
+    assert list(result.columns) == [
+        "bag_verblijfsobject_id",
+        "rijksmonument",
+        "rijksmonument_bron",
+        "rijksmonument_nummer",
+        "rijksmonument_url",
+        "rijksmonument_voorbescherming",
+        "rijksbeschermd_gezicht",
+        "rijksbeschermd_gezicht_naam",
+        "gemeentelijk_monument",
+        "grondslag_gemeentelijk_monument",
+        "provinciaal_monument",
+        "provinciaal_monument_omschrijving",
+    ]
+    rijen = result.set_index("bag_verblijfsobject_id")
+
+    # Alleen EWD: geen rijksmonument, wel voorbescherming
+    row = rijen.loc[_VO_ALLEEN_EWD]
+    assert bool(row["rijksmonument"]) is False
+    assert pd.isna(row["rijksmonument_bron"])
+    assert pd.isna(row["rijksmonument_nummer"])
+    assert pd.isna(row["rijksmonument_url"])
+    assert bool(row["rijksmonument_voorbescherming"]) is True
+    assert bool(row["gemeentelijk_monument"]) is False
+    assert bool(row["provinciaal_monument"]) is False
+
+    # Alleen EWE: rijksmonument via Kadaster, geen voorbescherming
+    row = rijen.loc[_VO_ALLEEN_EWE]
+    assert bool(row["rijksmonument"]) is True
+    assert row["rijksmonument_bron"] == "Kadaster"
+    assert bool(row["rijksmonument_voorbescherming"]) is False
+
+    # RCE en EWD: rijksmonument via RCE, EWD telt niet als Kadaster-bron
+    row = rijen.loc[_VO_RCE_EN_EWD]
+    assert bool(row["rijksmonument"]) is True
+    assert row["rijksmonument_bron"] == "RCE"
+    assert row["rijksmonument_nummer"] == "12345"
+    assert bool(row["rijksmonument_voorbescherming"]) is True
+
+
+@pytest.mark.asyncio
+async def test_voorbescherming_gemockt_vera(client: MonumentenClient):
+    """Voorbescherming heeft geen VERA-code (EENHEIDMONUMENT kent geen voorbescherming)."""
+    with _mock_api_met_voorbescherming():
+        result = await client.process_from_list([_VO_ALLEEN_EWD], to_vera=True)
+
+    assert result[_VO_ALLEEN_EWD] == []
