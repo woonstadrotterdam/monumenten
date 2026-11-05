@@ -6,16 +6,23 @@ import aiohttp
 import geopandas as gpd
 import pandas as pd
 import pytest
+import shapely
 
 from monumenten._api._backoff import MAX_SPLIT_DEPTH, MIN_BATCH_SIZE
 from monumenten._api._cultureel_erfgoed import _query_rijksmonumenten
 from monumenten._api._kadaster import (
     _MAX_PER_BAG_REQUEST,
+    _WFS_MAX_FEATURES,
     _koppel_beperkingen,
     _query_adrespunten,
     _query_beperkingen,
 )
-from monumenten._processing import _QUERY_BATCH_GROOTTE, _query
+from monumenten._processing import (
+    _QUERY_BATCH_GROOTTE,
+    _get_beschermde_gezichten,
+    _process_batch,
+    _query,
+)
 
 
 def _make_batch_result(identificaties, count=None):
@@ -299,13 +306,11 @@ def test_koppel_beperkingen_alleen_binnen_beperkingsgebied():
     assert result == [
         {
             "identificatie": "binnen",
-            "verblijfsobjectWKT": "POINT (5 5)",
             "grondslagcode": "GWA",
             "grondslag_gemeentelijk_monument": "Gemeentewet: Aanwijzing gemeentelijk monument",
         },
         {
             "identificatie": "buiten",
-            "verblijfsobjectWKT": "POINT (15 5)",
             "grondslagcode": None,
             "grondslag_gemeentelijk_monument": None,
         },
@@ -329,6 +334,143 @@ async def test_rijksmonumenten_single_id_failure_returns_empty():
         result = await _query_rijksmonumenten(session, ["only_one"])
 
     assert result == []
+
+
+def _beschermde_gezichten(naam, minx, miny, maxx, maxy):
+    """GeoDataFrame in RD met één beschermd gezicht als rechthoek."""
+    return gpd.GeoDataFrame(
+        {"rijksbeschermd_gezicht_naam": [naam]},
+        geometry=[shapely.box(minx, miny, maxx, maxy)],
+        crs="EPSG:28992",
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_batch_zonder_adrespunten_houdt_rce_rijksmonumenten():
+    """Zonder adrespunten in de batch blijven de rijksmonumenten van de RCE behouden."""
+    with (
+        patch(
+            "monumenten._processing._query_rijksmonumenten",
+            return_value=[{"identificatie": "ligplaats", "rijksmonument_nummer": "1"}],
+        ),
+        patch("monumenten._processing._query_beperkingen", return_value=[]),
+    ):
+        rijksmonumenten, gezichten, gemeentelijk, aantal = await _process_batch(
+            AsyncMock(),
+            ["ligplaats", "onbekend"],
+            _beschermde_gezichten("Gezicht", 0, 0, 10, 10),
+            {},
+        )
+
+    assert aantal == 2
+    assert rijksmonumenten.to_dict("records") == [
+        {
+            "identificatie": "ligplaats",
+            "rijksmonument_nummer": "1",
+            "rijksmonument_bron": "RCE",
+        }
+    ]
+    assert gezichten.empty
+    assert gemeentelijk.empty
+
+
+@pytest.mark.asyncio
+async def test_process_batch_beschermd_gezicht_zonder_brk_pb():
+    """Faalt de BRK-PB voor een batch, dan volgt het beschermd gezicht nog uit het adrespunt."""
+    with (
+        patch("monumenten._processing._query_rijksmonumenten", return_value=[]),
+        patch("monumenten._processing._query_beperkingen", return_value=[]),
+    ):
+        _, gezichten, _, _ = await _process_batch(
+            AsyncMock(),
+            ["binnen", "buiten"],
+            _beschermde_gezichten("Gezicht", 0, 0, 10, 10),
+            {"binnen": (5.0, 5.0), "buiten": (15.0, 5.0)},
+        )
+
+    assert dict(
+        zip(gezichten["identificatie"], gezichten["rijksbeschermd_gezicht_naam"])
+    ) == {"binnen": "Gezicht", "buiten": pytest.approx(float("nan"), nan_ok=True)}
+
+
+@pytest.mark.asyncio
+async def test_query_bag_faalt_definitief_houdt_rce_rijksmonumenten(
+    empty_geodataframe,
+):
+    """Faalt de BAG definitief, dan staan de uitkomsten van de RCE nog in de uitvoer."""
+
+    async def mock_post_wfs(session, endpoint, query, context):
+        raise RuntimeError("BAG onbereikbaar")
+
+    with (
+        patch(
+            "monumenten._processing._get_beschermde_gezichten",
+            return_value=empty_geodataframe,
+        ),
+        patch("monumenten._api._kadaster._post_wfs_json", side_effect=mock_post_wfs),
+        patch(
+            "monumenten._processing._query_rijksmonumenten",
+            return_value=[{"identificatie": "id1", "rijksmonument_nummer": "1"}],
+        ),
+    ):
+        result = await _query(AsyncMock(), ["id1", "id2"])
+
+    assert result[
+        ["identificatie", "rijksmonument_nummer", "rijksmonument_bron"]
+    ].to_dict("records") == [
+        {
+            "identificatie": "id1",
+            "rijksmonument_nummer": "1",
+            "rijksmonument_bron": "RCE",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_beperkingen_afgekapt_antwoord_splitst():
+    """Een afgekapt BRK-PB antwoord (1.000 features) leidt tot splitsen en nieuwe requests."""
+    afgekapt = {
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"grondslagCode": "GG", "grondslagOmschrijving": ""},
+                "geometry": {"type": "Point", "coordinates": [0, 0]},
+            }
+        ]
+        * _WFS_MAX_FEATURES
+    }
+    queries = []
+
+    async def mock_post_wfs(session, endpoint, query, context):
+        queries.append(query)
+        return afgekapt if len(queries) == 1 else {"features": []}
+
+    with patch("monumenten._api._kadaster._post_wfs_json", side_effect=mock_post_wfs):
+        result = await _query_beperkingen(
+            AsyncMock(), {"id1": (0.0, 0.0), "id2": (1.0, 0.0)}
+        )
+
+    assert {r["identificatie"] for r in result} == {"id1", "id2"}
+    assert len(queries) == 3  # 1 afgekapt + 2 per helft
+    assert all(q.count("<gml:Point ") == 1 for q in queries[1:])
+
+
+@pytest.mark.asyncio
+async def test_beschermde_gezichten_buiten_nederland_geeft_fout():
+    """Levert de RCE geen WGS84 meer, dan volgt een fout in plaats van een lege join."""
+    # De cache negeert de session; leeg hem zodat een eerdere test hem niet vult
+    await _get_beschermde_gezichten.cache.clear()
+    with patch(
+        "monumenten._processing._query_beschermde_gezichten",
+        return_value=[
+            {
+                "rijksbeschermd_gezicht_naam": "In RD",
+                "gezichtWKT": "POLYGON ((92000 437000, 93000 437000, 93000 438000, 92000 437000))",
+            }
+        ],
+    ):
+        with pytest.raises(ValueError, match="buiten Nederland"):
+            await _get_beschermde_gezichten(MagicMock())
 
 
 def test_constants():

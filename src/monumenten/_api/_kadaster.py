@@ -60,6 +60,9 @@ _IDENTIFICATIE_FILTER_TEMPLATE = (
 # contour of het perceel zelf). De WFS geeft alle monumentbeperkingen terug waarvan
 # het gebied minstens één van de adrespunten raakt; welk adrespunt binnen welk gebied
 # ligt wordt daarna lokaal bepaald (zie _koppel_beperkingen).
+# Alleen pb_multipolygon wordt bevraagd, niet pb_multipoint of pb_multilinestring:
+# een adrespunt ligt niet zinvol binnen een punt of lijn. De oude KKG-query
+# (geof:sfWithin) had dezelfde beperking.
 _BRK_PB_BEPERKINGEN_QUERY_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 <wfs:GetFeature service="WFS" version="2.0.0" outputFormat="application/json"
     xmlns:wfs="http://www.opengis.net/wfs/2.0"
@@ -234,7 +237,6 @@ def _koppel_beperkingen(
         geometry=gpd.points_from_xy(xs, ys),
         crs=_RD,
     )
-    punten["verblijfsobjectWKT"] = punten.geometry.to_wkt()
     if beperkingen:
         punten = punten.sjoin(
             gpd.GeoDataFrame.from_features(beperkingen, crs=_RD),
@@ -244,7 +246,6 @@ def _koppel_beperkingen(
     gekoppeld = punten.reindex(
         columns=[
             "identificatie",
-            "verblijfsobjectWKT",
             "grondslagCode",
             "grondslagOmschrijving",
         ]
@@ -252,11 +253,10 @@ def _koppel_beperkingen(
     return [
         {
             "identificatie": identificatie,
-            "verblijfsobjectWKT": verblijfsobject_wkt,
             "grondslagcode": grondslagcode,
             "grondslag_gemeentelijk_monument": grondslag,
         }
-        for identificatie, verblijfsobject_wkt, grondslagcode, grondslag in (
+        for identificatie, grondslagcode, grondslag in (
             gekoppeld.where(gekoppeld.notna(), None).itertuples(index=False)
         )
     ]
@@ -322,6 +322,14 @@ async def _query_beperkingen(
 
         beperkingen = brk_pb_data["features"]
         if len(beperkingen) >= _WFS_MAX_FEATURES:
+            # Eigen logregel: lukt splitsen niet meer (bijvoorbeeld bij één adrespunt
+            # met zoveel beperkingen), dan is anders alleen "definitief overgeslagen"
+            # te zien en niet waarom.
+            logger.warning(
+                "BRK-PB response afgekapt op %d features voor %d adrespunten",
+                len(beperkingen),
+                len(adrespunten),
+            )
             raise RuntimeError("BRK-PB response is afgekapt")
 
         if _depth > 0:
