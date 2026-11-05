@@ -361,8 +361,9 @@ async def test_query_provinciale_monumenten_vlag_onder_properties():
 
 
 @pytest.mark.asyncio
-async def test_query_provinciale_monumenten_lege_pagina_met_vlag_stopt(caplog):
-    """Een lege pagina met de vlag aan geeft geen oneindige lus."""
+async def test_query_provinciale_monumenten_lege_pagina_met_vlag_is_fout():
+    """Een lege pagina met de vlag aan: geen oneindige lus, en geen onvolledige
+    set vlakken die stil False geeft."""
     pagina_1 = {
         "type": "FeatureCollection",
         "exceededTransferLimit": True,
@@ -375,12 +376,9 @@ async def test_query_provinciale_monumenten_lege_pagina_met_vlag_stopt(caplog):
     }
     session, aanroepen = _sessie([pagina_1, pagina_2])
 
-    with caplog.at_level(logging.WARNING):
-        features = await _query_provinciale_monumenten(session, DRENTHE)
-
+    with pytest.raises(ProvincialeMonumentenError, match="lege pagina"):
+        await _query_provinciale_monumenten(session, DRENTHE)
     assert len(aanroepen) == 2
-    assert len(features) == _PAGINA_GROOTTE
-    assert "lege pagina" in caplog.text
 
 
 @pytest.mark.asyncio

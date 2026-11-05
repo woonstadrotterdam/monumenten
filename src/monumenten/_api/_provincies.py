@@ -354,11 +354,11 @@ async def _query_provinciale_monumenten(
             pagina.get("properties") or {}
         ).get("exceededTransferLimit")
         if not nieuwe and meer:
-            logger.warning(
-                "Provinciale monumenten %s: lege pagina bij offset %d terwijl de "
-                "service meer vlakken meldt; ophalen gestopt",
-                provincie.naam,
-                offset,
+            # Een pagina voorbij het einde heeft de vlag niet; de set vlakken tot
+            # nu toe is dus onvolledig.
+            raise ProvincialeMonumentenError(
+                f"Service van {provincie.naam} gaf bij offset {offset} een lege "
+                "pagina terwijl zij meer vlakken meldt; paginering werkt niet"
             )
         if not nieuwe or (len(nieuwe) < _PAGINA_GROOTTE and not meer):
             break
