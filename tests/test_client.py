@@ -1,3 +1,9 @@
+"""Tests tegen de echte API's van Kadaster, RCE en PDOK.
+
+Tests met ``@pytest.mark.live`` doen echte netwerkaanroepen. PR's en pushes
+draaien ze niet (``pytest -m "not live"``); de dagelijkse geplande CI-run wel.
+"""
+
 import pandas as pd
 import pytest
 import pytest_asyncio
@@ -11,6 +17,7 @@ async def client():
         yield client
 
 
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_process_from_list(client: MonumentenClient):
     bag_verblijfsobject_ids = [
@@ -112,6 +119,7 @@ async def test_process_from_list(client: MonumentenClient):
     assert result["0599010000341377"]["grondslag_gemeentelijk_monument"] is None
 
 
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_process_from_list_vera(client: MonumentenClient):
     bag_verblijfsobject_ids = [
@@ -171,6 +179,7 @@ async def test_process_from_list_vera(client: MonumentenClient):
     assert result["0599010000341377"][0]["bron"] == ["Kadaster"]
 
 
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_process_from_df(client: MonumentenClient):
     input_df = pd.DataFrame(
@@ -275,6 +284,7 @@ async def test_process_from_list_invalid_ids(client: MonumentenClient):
             )
 
 
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_process_from_df_invalid_ids_warning_and_filtering(
     client: MonumentenClient,
@@ -306,6 +316,7 @@ async def test_process_from_df_invalid_ids_warning_and_filtering(
     assert result.iloc[0]["bag_verblijfsobject_id"] == "0599010000486642"
 
 
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_process_from_list_duplicate_handling(client: MonumentenClient):
     bag_verblijfsobject_ids = [
@@ -333,6 +344,7 @@ async def test_process_from_list_duplicate_handling(client: MonumentenClient):
     assert "Leidschendam" in result["1916010000074542"]["rijksbeschermd_gezicht_naam"]
 
 
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_process_from_list_duplicate_handling_vera(client: MonumentenClient):
     bag_verblijfsobject_ids = [
@@ -367,6 +379,7 @@ async def test_process_from_list_duplicate_handling_vera(client: MonumentenClien
     assert beschermd_gezicht_found
 
 
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_process_from_df_duplicate_handling(client: MonumentenClient):
     input_df = pd.DataFrame(
@@ -397,6 +410,7 @@ async def test_process_from_df_duplicate_handling(client: MonumentenClient):
     assert "Leidschendam" in row["rijksbeschermd_gezicht_naam"]
 
 
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_process_from_list_multiple_beschermd_gezichten(client: MonumentenClient):
     """Test verblijfsobject met meerdere beschermde gezichten en gemeentelijk monument."""
@@ -431,6 +445,7 @@ async def test_process_from_list_multiple_beschermd_gezichten(client: Monumenten
     )
 
 
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_process_from_list_multiple_beschermd_gezichten_vera(
     client: MonumentenClient,
@@ -464,6 +479,7 @@ async def test_process_from_list_multiple_beschermd_gezichten_vera(
     assert gemeentelijk_monument_found
 
 
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_process_from_df_multiple_beschermd_gezichten(client: MonumentenClient):
     """Test DataFrame output voor verblijfsobject met meerdere beschermde gezichten."""
@@ -500,6 +516,7 @@ async def test_process_from_df_multiple_beschermd_gezichten(client: MonumentenCl
     assert "Gemeentewet" in row["grondslag_gemeentelijk_monument"]
 
 
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_process_from_list_beperkingsgebied_bevat_adrespunt(
     client: MonumentenClient,

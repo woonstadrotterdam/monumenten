@@ -223,3 +223,16 @@ Aanroepen naar Kadaster (BAG LV, KKG) en RCE gebruiken een gedeelde retry-logica
 <!-- snippet-end -->
 
 Zie [readthedocs](https://monumenten.readthedocs.io/nl/latest/tutorial/).
+
+## Bijdragen
+
+Installeer de ontwikkelomgeving en draai de tests met [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv sync --all-extras
+uv run pytest -m "not live"
+```
+
+Tests die echte externe API's aanroepen (Kadaster, RCE, de provincies en PDOK) hebben de marker `live`. Met `-m "not live"` draai je alleen de offline tests; die hebben geen netwerk nodig en blijven groen als een bron plat ligt. `uv run pytest` zonder `-m` draait alles, ook de live tests.
+
+In de CI draaien pull requests en pushes naar `main` alleen de offline tests. De dagelijkse geplande run draait de hele suite, inclusief de live tests, en vangt zo wijzigingen of storingen aan de kant van de bronnen. Een nieuwe test die het netwerk op gaat, markeer je met `@pytest.mark.live`.
