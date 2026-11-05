@@ -14,6 +14,7 @@ from monumenten._api._kadaster import (
     _MAX_PER_BAG_REQUEST,
     _WFS_MAX_FEATURES,
     _koppel_beperkingen,
+    _punten_voor_query,
     _query_adrespunten,
     _query_beperkingen,
 )
@@ -283,6 +284,53 @@ async def test_beperkingen_splitst_op_grootste_sprong():
     rotterdam, groningen = sorted(queries, key=lambda q: "233000.0" in q)
     assert rotterdam.count("<gml:Point ") == groningen.count("<gml:Point ") == 6
     assert "233000.0" not in rotterdam and "92000.0" not in groningen
+
+
+@pytest.mark.parametrize(
+    "adrespunten",
+    [
+        {"a": (100.0, 5.0), "b": (200.0, 5.0)},  # horizontaal
+        {"a": (5.0, 100.0), "b": (5.0, 200.0), "c": (5.0, 150.0)},  # verticaal
+    ],
+)
+def test_punten_voor_query_hulppunt_bij_lijn(adrespunten):
+    """Liggen alle adrespunten op één as-lijn, dan krijgt het request een hulppunt."""
+    punten = _punten_voor_query(adrespunten)
+
+    assert punten[:-1] == list(adrespunten.values())
+    xs, ys = zip(*punten)
+    assert max(xs) > min(xs) and max(ys) > min(ys)
+
+
+@pytest.mark.parametrize(
+    "adrespunten",
+    [
+        {"a": (5.0, 5.0)},  # één punt werkt al
+        {"a": (5.0, 5.0), "b": (5.0, 5.0)},  # zelfde punt
+        {"a": (0.0, 0.0), "b": (1.0, 1.0)},  # rechthoek
+    ],
+)
+def test_punten_voor_query_geen_hulppunt(adrespunten):
+    """Een los punt of een echte rechthoek krijgt geen hulppunt."""
+    assert _punten_voor_query(adrespunten) == list(adrespunten.values())
+
+
+@pytest.mark.asyncio
+async def test_beperkingen_hulppunt_niet_in_uitvoer():
+    """Het hulppunt gaat mee in het request maar levert geen rij in de uitvoer."""
+    queries = []
+
+    async def mock_post_wfs(session, endpoint, query, context):
+        queries.append(query)
+        return {"features": []}
+
+    with patch("monumenten._api._kadaster._post_wfs_json", side_effect=mock_post_wfs):
+        result = await _query_beperkingen(
+            AsyncMock(), {"a": (100.0, 5.0), "b": (200.0, 5.0)}
+        )
+
+    assert queries[0].count("<gml:Point ") == 3
+    assert [r["identificatie"] for r in result] == ["a", "b"]
 
 
 def test_koppel_beperkingen_alleen_binnen_beperkingsgebied():

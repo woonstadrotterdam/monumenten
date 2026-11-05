@@ -117,6 +117,9 @@ _ADRESPUNT_TEMPLATE = (
 
 _Adrespunten = Dict[str, Tuple[float, float]]
 
+# Verschuiving van het hulppunt dat een lijnvormige puntenset een rechthoek maakt
+_HULPPUNT_VERSCHUIVING_M = 0.01
+
 _kadaster_semaphore: Optional[asyncio.Semaphore] = None
 
 # Create a module-level logger
@@ -213,6 +216,29 @@ async def _post_wfs_json(
     if last_error is not None:
         raise last_error
     raise RuntimeError("Geen response ontvangen")
+
+
+def _punten_voor_query(adrespunten: _Adrespunten) -> List[Tuple[float, float]]:
+    """Geef de punten voor het BRK-PB request, zo nodig met een hulppunt.
+
+    De BRK-PB WFS vindt niets als alle punten exact op één horizontale of verticale
+    lijn liggen, zodat de omhullende rechthoek geen breedte of hoogte heeft. Gemeten
+    op 5 november 2026: 500 punten op één horizontale lijn door Amsterdam gaven 0
+    beperkingen, met één extra punt 1 cm hoger 111. Bij adrespunten op hele meters
+    (zoals in Amsterdam en Maastricht) liggen de adressen van één pand vaak zo.
+    Een los punt (rechthoek zonder breedte én hoogte) werkt wel.
+
+    Een hulppunt naast de lijn maakt er een rechthoek van. Het hulppunt kan extra
+    beperkingen opleveren, maar die vallen weg in _koppel_beperkingen, dat alleen naar
+    de echte adrespunten kijkt.
+    """
+    punten = list(adrespunten.values())
+    xs, ys = zip(*punten)
+    if len(set(punten)) > 1 and (min(xs) == max(xs) or min(ys) == max(ys)):
+        punten.append(
+            (min(xs) + _HULPPUNT_VERSCHUIVING_M, min(ys) + _HULPPUNT_VERSCHUIVING_M)
+        )
+    return punten
 
 
 def _koppel_beperkingen(
@@ -313,7 +339,7 @@ async def _query_beperkingen(
             brk_pb_query = _BRK_PB_BEPERKINGEN_QUERY_TEMPLATE.format(
                 adrespunten="".join(
                     _ADRESPUNT_TEMPLATE.format(nummer=nummer, x=x, y=y)
-                    for nummer, (x, y) in enumerate(adrespunten.values())
+                    for nummer, (x, y) in enumerate(_punten_voor_query(adrespunten))
                 )
             )
             brk_pb_data = await _post_wfs_json(

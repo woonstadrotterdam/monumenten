@@ -539,3 +539,21 @@ async def test_process_from_list_beperkingsgebied_bevat_adrespunt(
     # Adrespunt binnen het beperkingsgebied: status blijft
     for vbo_id in ["0119010000024715", "0363010001026929"]:
         assert result[vbo_id]["gemeentelijk_monument"] is True, vbo_id
+
+
+@pytest.mark.asyncio
+async def test_process_from_list_adrespunten_op_een_lijn(client: MonumentenClient):
+    """Adrespunten die exact op één verticale lijn liggen krijgen hun beperking.
+
+    De BRK-PB WFS vindt niets als de omhullende rechthoek van de adrespunten geen
+    breedte heeft. Beide adressen hebben x = 177087.49 en verschillen 5 cm in y.
+    """
+    bag_verblijfsobject_ids = [
+        "0935010000036807",  # Lyonnetstraat 13A Maastricht: GWA
+        "0935010000036808",  # Lyonnetstraat 13B Maastricht: GWA
+    ]
+
+    result = await client.process_from_list(bag_verblijfsobject_ids)
+
+    for vbo_id in bag_verblijfsobject_ids:
+        assert result[vbo_id]["gemeentelijk_monument"] is True, vbo_id
