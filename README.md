@@ -264,14 +264,14 @@ Keuzes en beperkingen:
 - **Alleen aangewezen monumenten.** Een voorbeschermd object (voornemen tot aanwijzing) telt niet mee, in lijn met het Besluit huurprijzen woonruimte, dat spreekt van een "door gedeputeerde staten aangewezen provinciaal monument".
 - **Nauwkeurigheid.** Van de gebouwde monumenten in het Noord-Hollandse erfgoedregister (juli 2025) wordt ongeveer 91% gevonden. Gemist worden vooral objecten _bij_ een adres (een grenspaal, seinmast of hek) en een monumentaal bijgebouw op hetzelfde erf als het adres: die krijgen `False`. Andersom kan een nieuw gebouw op een monumentaal terrein (bijvoorbeeld een fort van de Stelling van Amsterdam) onterecht `True` krijgen; controleer twijfelgevallen aan de hand van de omschrijving. Een marge rond de vlakken is bewust niet toegepast: die leverde vrijwel alleen buurpanden op.
 - **Geen download buiten Noord-Holland en Drenthe.** Ligt geen enkel adrespunt binnen een ruime rechthoek om Noord-Holland of Drenthe, dan volgt er geen extra request. Anders haalt de package de provinciegrenzen op bij PDOK (7 dagen gecachet). Een adres is _kandidaat_ voor een provincie als het in de rechthoek ligt én binnen de grens, met een marge van 100 m. Die marge vangt kleine verschillen tussen de datasets op: enkele Drentse monumentvlakken steken tot 1,3 m buiten de grens van PDOK. Alleen provincies met kandidaten worden gedownload (7 dagen gecachet). Zijn de grenzen niet op te halen, dan is elk adres in de rechthoek kandidaat.
-- **Uitval van een provincie.** Mislukt het ophalen van een provincie na retries, dan gaat de rest van de aanroep gewoon door. Alleen haar kandidaten krijgen dan `<NA>` in plaats van `False`, zodat de status nooit stilzwijgend `False` wordt:
+- **Uitval van een provincie.** Mislukt het ophalen van een provincie na retries, of geeft haar service een onverwacht antwoord, dan gaat de rest van de aanroep gewoon door. Alleen haar kandidaten krijgen dan `<NA>` in plaats van `False`, zodat uitval van de provincie niet stilzwijgend `False` geeft:
 
   | Adres ligt in                               | Service werkt     | Service valt uit |
   | ------------------------------------------- | ----------------- | ---------------- |
   | een provincie zonder provinciale monumenten | `False`           | `False`          |
   | Noord-Holland of Drenthe                    | `True` of `False` | `<NA>`           |
 
-  De kolom `provinciaal_monument` is daarom een nullable boolean. Bij `<NA>` volgt een `MonumentStatusOnbepaaldWarning`; het attribuut `verblijfsobject_ids` geeft per provincie de betrokken verblijfsobject ID's. In `process_from_list` is de status dan `None`, en in VERA-referentiedataformaat is de hele value `None` in plaats van een lijst, omdat die lijst onvolledig zou zijn. Wie liever een fout krijgt, zet de waarschuwing om:
+  De kolom `provinciaal_monument` is daarom een nullable boolean. Bij `<NA>` volgt een `MonumentStatusOnbepaaldWarning` met per provincie de oorzaak; het attribuut `verblijfsobject_ids` geeft per provincie de betrokken verblijfsobject ID's. Noemt de oorzaak dat geen enkel vlak een bekende categorie of status heeft, dan is de service van de provincie gewijzigd en moet de package worden bijgewerkt. In `process_from_list` is de status dan `None`, en in VERA-referentiedataformaat is de hele value `None` in plaats van een lijst, omdat die lijst onvolledig zou zijn. Wie liever een fout krijgt, zet de waarschuwing om:
 
   ```python
   import warnings
@@ -280,6 +280,8 @@ Keuzes en beperkingen:
 
   warnings.simplefilter("error", MonumentStatusOnbepaaldWarning)
   ```
+
+  Dit dekt alleen uitval van de provincie. Een batch waarvoor het Kadaster na retries geen antwoord gaf, levert geen adrespunten op; die verblijfsobjecten krijgen, net als bij de andere statussen, `False` met een foutmelding in de log.
 
 - **Combinaties.** Volgens de provinciale verordeningen kan een object niet tegelijk rijks- of gemeentelijk én provinciaal monument zijn. De package dwingt dat niet af, omdat de Kadaster-statussen per perceel gelden en dus ook buurgebouwen kunnen raken.
 

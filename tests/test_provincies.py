@@ -1,5 +1,6 @@
 """Tests voor het ophalen van provinciale monumenten uit de provinciale services."""
 
+import json
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -22,7 +23,7 @@ from monumenten._api._provincies import (
 
 @pytest.fixture(autouse=True)
 def reset_waarschuwingen():
-    """Onbekende waarden worden één keer per proces gelogd; reset per test."""
+    """Onbekende waarden worden één keer per download gelogd; reset per test."""
     _waarschuw_onbekend.cache_clear()
 
 
@@ -101,14 +102,25 @@ _VLAK = {
 }
 
 
-def _feature(properties, geometry=_VLAK):
-    return {"type": "Feature", "properties": properties, "geometry": geometry}
+def _feature(properties, geometry=_VLAK, id=None):
+    feature = {"type": "Feature", "properties": properties, "geometry": geometry}
+    if id is not None:
+        feature["id"] = id
+    return feature
+
+
+class _JsonFout:
+    """Antwoord met HTTP 200 waarvan ``response.json`` deze fout gooit."""
+
+    def __init__(self, fout):
+        self.fout = fout
 
 
 def _sessie(antwoorden):
     """Session-mock waarvan session.get(...) achtereenvolgens ``antwoorden`` geeft.
 
-    Een antwoord is een dict (JSON-body) of een exception die raise_for_status gooit.
+    Een antwoord is een dict (JSON-body), een exception die raise_for_status
+    gooit, of een ``_JsonFout`` waarvan ``response.json`` de fout gooit.
     """
     aanroepen = []
 
@@ -118,6 +130,9 @@ def _sessie(antwoorden):
         response = MagicMock()
         if isinstance(antwoord, BaseException):
             response.raise_for_status = MagicMock(side_effect=antwoord)
+        elif isinstance(antwoord, _JsonFout):
+            response.raise_for_status = MagicMock()
+            response.json = AsyncMock(side_effect=antwoord.fout)
         else:
             response.raise_for_status = MagicMock()
             response.json = AsyncMock(return_value=antwoord)
@@ -196,7 +211,7 @@ async def test_query_provinciale_monumenten_arcgis_fout():
 @pytest.mark.asyncio
 async def test_query_provinciale_monumenten_geen_vlakken_is_fout():
     session, _ = _sessie([{"type": "FeatureCollection", "features": []}])
-    with pytest.raises(ProvincialeMonumentenError, match="Geen provinciale monumenten"):
+    with pytest.raises(ProvincialeMonumentenError, match="geen enkel monumentvlak"):
         await _query_provinciale_monumenten(session, DRENTHE)
 
 
@@ -224,11 +239,108 @@ async def test_query_provinciale_monumenten_niet_herhaalbare_fout():
     assert len(aanroepen) == 1
 
 
-def _drents_vlak(nummer, geometry=_VLAK):
+def _drents_vlak(nummer, geometry=_VLAK, id=None):
     return _feature(
         {"PM_nummer": nummer, "PM_object": "Boerderij", "PM_status": "beschermd"},
         geometry=geometry,
+        id=id,
     )
+
+
+@pytest.mark.asyncio
+async def test_query_provinciale_monumenten_geen_json_herhaald_dan_fout():
+    """Een onderhouds- of proxypagina met HTTP 200 geeft een nette fout."""
+    geen_json = _JsonFout(json.JSONDecodeError("Expecting value", "<html>", 0))
+    session, aanroepen = _sessie([geen_json, geen_json])
+    with patch("monumenten._api._provincies.asyncio.sleep", new=AsyncMock()):
+        with pytest.raises(ProvincialeMonumentenError, match="geen JSON"):
+            await _query_provinciale_monumenten(session, DRENTHE)
+    assert len(aanroepen) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fout",
+    [
+        aiohttp.ClientPayloadError("Response payload is not completed"),
+        aiohttp.ClientOSError(54, "Connection reset by peer"),
+    ],
+)
+async def test_query_provinciale_monumenten_afgebroken_overdracht_herhaald(fout):
+    """Een afgebroken overdracht of verbroken verbinding wordt opnieuw geprobeerd."""
+    pagina = {"type": "FeatureCollection", "features": [_drents_vlak("PM1-0001")]}
+    session, aanroepen = _sessie([_JsonFout(fout), pagina])
+    with patch("monumenten._api._provincies.asyncio.sleep", new=AsyncMock()):
+        features = await _query_provinciale_monumenten(session, DRENTHE)
+    assert len(aanroepen) == 2
+    assert len(features) == 1
+
+
+@pytest.mark.asyncio
+async def test_query_provinciale_monumenten_genegeerde_offset_is_fout():
+    """Een laag die resultOffset negeert, geeft steeds dezelfde volle pagina."""
+    pagina = {
+        "type": "FeatureCollection",
+        "exceededTransferLimit": True,
+        "features": [
+            _drents_vlak(f"PM1-{i:04d}", id=i) for i in range(_PAGINA_GROOTTE)
+        ],
+    }
+    session, aanroepen = _sessie([pagina, pagina, pagina])
+    with pytest.raises(ProvincialeMonumentenError, match="paginering werkt niet"):
+        await _query_provinciale_monumenten(session, DRENTHE)
+    assert len(aanroepen) == 2
+
+
+@pytest.mark.asyncio
+async def test_query_provinciale_monumenten_max_paginas_is_fout():
+    """Zonder feature-id's stopt de lus bij het maximum aantal pagina's."""
+    pagina = {
+        "type": "FeatureCollection",
+        "exceededTransferLimit": True,
+        "features": [_drents_vlak(f"PM1-{i:04d}") for i in range(_PAGINA_GROOTTE)],
+    }
+    session, aanroepen = _sessie([pagina] * 3)
+    with patch("monumenten._api._provincies._MAX_PAGINAS", 3):
+        with pytest.raises(ProvincialeMonumentenError, match="na 3 pagina's"):
+            await _query_provinciale_monumenten(session, DRENTHE)
+    assert len(aanroepen) == 3
+
+
+@pytest.mark.asyncio
+async def test_query_provinciale_monumenten_filter_herkent_niets_is_fout():
+    """Vlakken zonder bekende status: een andere melding dan een lege service."""
+    pagina = {
+        "type": "FeatureCollection",
+        "features": [
+            _feature({"PM_nummer": "PM1-0001", "PM_status": "nieuwe status"}),
+            _feature({"PM_nummer": "PM1-0002", "PM_status": "nieuwe status"}),
+        ],
+    }
+    session, _ = _sessie([pagina])
+    with pytest.raises(
+        ProvincialeMonumentenError,
+        match="Geen van de 2 vlakken van Drenthe.*moet de package",
+    ):
+        await _query_provinciale_monumenten(session, DRENTHE)
+
+
+@pytest.mark.asyncio
+async def test_query_provinciale_monumenten_logt_per_download(caplog):
+    """Een onbekende waarde wordt bij elke nieuwe download opnieuw gelogd."""
+    pagina = {
+        "type": "FeatureCollection",
+        "features": [
+            _drents_vlak("PM1-0001"),
+            _feature({"PM_nummer": "PM1-0002", "PM_status": "nieuw"}),
+            _feature({"PM_nummer": "PM1-0003", "PM_status": "nieuw"}),
+        ],
+    }
+    session, _ = _sessie([pagina, pagina])
+    with caplog.at_level(logging.WARNING):
+        await _query_provinciale_monumenten(session, DRENTHE)
+        await _query_provinciale_monumenten(session, DRENTHE)
+    assert sum("'nieuw'" in record.message for record in caplog.records) == 2
 
 
 @pytest.mark.asyncio

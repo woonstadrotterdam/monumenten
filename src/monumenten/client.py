@@ -122,16 +122,20 @@ class MonumentenClient:
             self._session,
             valid_id_df.loc[:, verblijfsobject_id_col].drop_duplicates().tolist(),
         )
+        onbepaalde_ids = {
+            provincie: o.verblijfsobject_ids for provincie, o in onbepaald.items()
+        }
         if onbepaald:
             warnings.warn(
                 MonumentStatusOnbepaaldWarning(
                     "Provinciale monumenten niet op te halen voor "
-                    + ", ".join(
-                        f"{provincie} ({len(ids)} verblijfsobjecten)"
-                        for provincie, ids in onbepaald.items()
+                    + "; ".join(
+                        f"{provincie} ({len(o.verblijfsobject_ids)} "
+                        f"verblijfsobjecten): {o.oorzaak}"
+                        for provincie, o in onbepaald.items()
                     )
-                    + "; provinciaal_monument is voor die verblijfsobjecten pd.NA",
-                    verblijfsobject_ids=onbepaald,
+                    + ". provinciaal_monument is voor die verblijfsobjecten pd.NA",
+                    verblijfsobject_ids=onbepaalde_ids,
                 ),
                 stacklevel=2,
             )
@@ -228,7 +232,7 @@ class MonumentenClient:
             _status(
                 merged["provinciaal_monument_omschrijving"].notna(),
                 merged[verblijfsobject_id_col].isin(
-                    [vo_id for ids in onbepaald.values() for vo_id in ids]
+                    [vo_id for ids in onbepaalde_ids.values() for vo_id in ids]
                 ),
             ),
         )

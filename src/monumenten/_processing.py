@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
 import aiohttp
@@ -54,6 +55,22 @@ _RD = "EPSG:28992"
 # bovendien maar jaarlijks bijgewerkt. Een te ruime marge kost alleen wat extra
 # kandidaten, een te krappe geeft stil False.
 _GRENS_BUFFER_METER = 100
+
+
+@dataclass(frozen=True)
+class ProvincieOnbepaald:
+    """Een provincie waarvan de monumentvlakken niet op te halen waren.
+
+    Attributes:
+        oorzaak (str): Waarom het ophalen mislukte, voor de waarschuwing aan de
+            gebruiker
+        verblijfsobject_ids (List[str]): De kandidaten in die provincie, waarvoor
+            ``provinciaal_monument`` onbepaald is
+    """
+
+    oorzaak: str
+    verblijfsobject_ids: List[str]
+
 
 _BatchFrames = Tuple[DataFrame, DataFrame, DataFrame, gpd.GeoDataFrame]
 _BatchResult = Tuple[DataFrame, DataFrame, DataFrame, gpd.GeoDataFrame, int]
@@ -289,7 +306,7 @@ async def _get_provinciegrenzen(
 
 async def _bepaal_provinciale_monumenten(
     session: aiohttp.ClientSession, adrespunten: gpd.GeoDataFrame
-) -> Tuple[DataFrame, Dict[str, List[str]]]:
+) -> Tuple[DataFrame, Dict[str, ProvincieOnbepaald]]:
     """Bepaal welke adrespunten binnen een provinciaal monumentvlak liggen.
 
     Een adrespunt is kandidaat voor een provincie als het in haar ruime bounding
@@ -298,20 +315,32 @@ async def _bepaal_provinciale_monumenten(
     bounding box, dan volgt er geen enkele request. Zijn de grenzen niet op te
     halen, dan is elk adrespunt in de bounding box kandidaat.
 
+    Een fout bij een provincie breekt de aanroep niet af: haar kandidaten worden
+    onbepaald.
+
     Args:
         session (aiohttp.ClientSession): De sessie voor HTTP requests
         adrespunten (gpd.GeoDataFrame): Adrespunten met kolom ``identificatie`` en
             een coördinatenstelsel
 
     Returns:
-        Tuple[DataFrame, Dict[str, List[str]]]: De gevonden monumenten (kolommen
-            ``identificatie`` en ``provinciaal_monument_omschrijving``, één rij per
-            combinatie), en per provincie waarvan de monumentvlakken niet op te halen
-            waren de ID's van haar kandidaten
+        Tuple[DataFrame, Dict[str, ProvincieOnbepaald]]: De gevonden monumenten
+            (kolommen ``identificatie`` en ``provinciaal_monument_omschrijving``,
+            één rij per combinatie), en per provincie waarvan de monumentvlakken
+            niet op te halen waren de oorzaak en de ID's van haar kandidaten
     """
-    onbepaald: Dict[str, List[str]] = {}
+    onbepaald: Dict[str, ProvincieOnbepaald] = {}
     # Een verblijfsobject met meerdere beperkingen komt meerdere keren voor
     adrespunten = adrespunten.drop_duplicates(subset="identificatie")
+    # De KKG levert punten; .x en .y falen op iets anders (zoals een multipoint)
+    is_punt = adrespunten.geom_type.eq("Point") & ~adrespunten.is_empty
+    if not is_punt.all():
+        logger.warning(
+            "%d adrespunten zijn geen punt en tellen niet mee voor provinciale "
+            "monumenten",
+            (~is_punt).sum(),
+        )
+        adrespunten = adrespunten[is_punt]
     if adrespunten.empty:
         return _lege_provinciale_monumenten(), onbepaald
 
@@ -340,11 +369,13 @@ async def _bepaal_provinciale_monumenten(
     grenzen: Dict[str, BaseGeometry] | None
     try:
         grenzen = await _get_provinciegrenzen(session)
-    except ProvincialeMonumentenError as e:
+    except Exception as e:
         logger.warning(
             "Provinciegrenzen niet op te halen (%s); elk adrespunt in de bounding "
             "box van een provincie telt als kandidaat",
             e,
+            # Bij een onverwachte fout ook de traceback
+            exc_info=not isinstance(e, ProvincialeMonumentenError),
         )
         grenzen = None
 
@@ -363,13 +394,23 @@ async def _bepaal_provinciale_monumenten(
             continue
         try:
             monumenten_df = await _get_provinciale_monumenten(session, provincie)
-        except ProvincialeMonumentenError as e:
+        except Exception as e:
+            # Ook een onverwachte fout, zoals een geometrie die from_features niet
+            # leest, mag de rest van de aanroep niet afbreken.
+            oorzaak = (
+                str(e)
+                if isinstance(e, ProvincialeMonumentenError)
+                else f"Onverwachte fout bij {provincie.naam}: {type(e).__name__}: {e}"
+            )
             logger.warning(
                 "%s; provinciaal_monument is onbepaald voor %d verblijfsobjecten",
-                e,
+                oorzaak,
                 len(kandidaten),
+                exc_info=not isinstance(e, ProvincialeMonumentenError),
             )
-            onbepaald[provincie.naam] = kandidaten["identificatie"].tolist()
+            onbepaald[provincie.naam] = ProvincieOnbepaald(
+                oorzaak, kandidaten["identificatie"].tolist()
+            )
             continue
         delen.append(
             gpd.sjoin(
@@ -417,7 +458,7 @@ def _voeg_namen_samen(df: DataFrame, kolom: str) -> DataFrame:
 
 async def _query(
     session: aiohttp.ClientSession, verblijfsobject_ids: List[str]
-) -> Tuple[pd.DataFrame, Dict[str, List[str]]]:
+) -> Tuple[pd.DataFrame, Dict[str, ProvincieOnbepaald]]:
     """Voer queries uit voor een lijst verblijfsobjecten.
 
     Batches worden parallel verwerkt. Retry en split-on-failure gebeuren per API
@@ -429,10 +470,10 @@ async def _query(
         verblijfsobject_ids (List[str]): Lijst met verblijfsobject ID's
 
     Returns:
-        Tuple[pd.DataFrame, Dict[str, List[str]]]: Eén rij per verblijfsobject met
-            een monumentstatus, met de kolommen uit ``_RESULTAAT_KOLOMMEN``; en per
-            provincie die niet op te halen was de ID's waarvan
-            ``provinciaal_monument`` onbepaald is
+        Tuple[pd.DataFrame, Dict[str, ProvincieOnbepaald]]: Eén rij per
+            verblijfsobject met een monumentstatus, met de kolommen uit
+            ``_RESULTAAT_KOLOMMEN``; en per provincie die niet op te halen was de
+            oorzaak en de ID's waarvan ``provinciaal_monument`` onbepaald is
     """
     beschermde_gezichten_df = await _get_beschermde_gezichten(session)
 

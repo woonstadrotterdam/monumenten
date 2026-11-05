@@ -708,7 +708,11 @@ async def test_provincie_plat_gemockt_df(client: MonumentenClient):
             )
 
     assert meldingen[0].message.verblijfsobject_ids == {"Noord-Holland": [_VO_HAARLEM]}
-    assert "Noord-Holland (1 verblijfsobjecten)" in str(meldingen[0].message)
+    # De oorzaak staat in de melding, zodat een kapotte service te onderscheiden
+    # is van een filter dat niets meer herkent
+    assert "Noord-Holland (1 verblijfsobjecten): Noord-Holland plat" in str(
+        meldingen[0].message
+    )
     assert result["provinciaal_monument"].dtype == "boolean"
     rijen = result.set_index("bag_verblijfsobject_id")
     assert rijen.loc[_VO_HAARLEM, "provinciaal_monument"] is pd.NA

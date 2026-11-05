@@ -7,7 +7,7 @@ import aiohttp
 import geopandas as gpd
 import pandas as pd
 import pytest
-from shapely.geometry import Point, box
+from shapely.geometry import MultiPoint, Point, box
 
 from monumenten._api._backoff import MAX_SPLIT_DEPTH, MIN_BATCH_SIZE
 from monumenten._api._cultureel_erfgoed import _query_rijksmonumenten
@@ -21,6 +21,7 @@ from monumenten._processing import (
     _QUERY_BATCH_GROOTTE,
     _bepaal_provinciale_monumenten,
     _get_provinciegrenzen,
+    ProvincieOnbepaald,
     _lege_adrespunten,
     _process_batch,
     _query,
@@ -434,7 +435,9 @@ async def test_bepaal_provinciaal_provincie_plat_geeft_onbepaald(caplog):
         )
 
     assert sorted(opgehaald) == ["Drenthe", "Noord-Holland"]
-    assert onbepaald == {"Noord-Holland": ["haarlem"]}
+    assert onbepaald == {
+        "Noord-Holland": ProvincieOnbepaald("Noord-Holland plat", ["haarlem"])
+    }
     assert result["identificatie"].tolist() == ["rolde"]
     assert "Noord-Holland plat" in caplog.text
 
@@ -450,7 +453,10 @@ async def test_bepaal_provinciaal_grenzen_falen_terugval_op_bbox(caplog):
         )
 
     assert opgehaald == ["Noord-Holland"]
-    assert sorted(onbepaald["Noord-Holland"]) == ["haarlem", "leiden"]
+    assert sorted(onbepaald["Noord-Holland"].verblijfsobject_ids) == [
+        "haarlem",
+        "leiden",
+    ]
     assert result.empty
     assert "PDOK plat" in caplog.text
 
@@ -480,7 +486,65 @@ async def test_bepaal_provinciaal_dubbele_id_een_keer_onbepaald():
         {"Noord-Holland": ProvincialeMonumentenError("Noord-Holland plat")},
     )
 
-    assert onbepaald == {"Noord-Holland": ["haarlem"]}
+    assert onbepaald["Noord-Holland"].verblijfsobject_ids == ["haarlem"]
+
+
+@pytest.mark.asyncio
+async def test_bepaal_provinciaal_onverwachte_fout_geeft_onbepaald(caplog):
+    """Een fout buiten ProvincialeMonumentenError (zoals een geometrie die
+    from_features niet leest) breekt de aanroep niet af."""
+    with caplog.at_level(logging.WARNING):
+        (result, onbepaald), _, _ = await _bepaal(
+            _adrespunten({"haarlem": _HAARLEM, "rolde": _ROLDE}),
+            _GRENZEN,
+            {
+                "Noord-Holland": ValueError("ongeldige geometrie"),
+                "Drenthe": _drenthe_monumenten(),
+            },
+        )
+
+    assert onbepaald["Noord-Holland"].verblijfsobject_ids == ["haarlem"]
+    assert "ValueError: ongeldige geometrie" in onbepaald["Noord-Holland"].oorzaak
+    assert result["identificatie"].tolist() == ["rolde"]
+    # De traceback staat in de log
+    assert any(record.exc_info for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_bepaal_provinciaal_onverwachte_fout_grenzen_terugval(caplog):
+    """Ook een onverwachte fout bij de grenzen valt terug op de bbox."""
+    with caplog.at_level(logging.WARNING):
+        (result, onbepaald), opgehaald, _ = await _bepaal(
+            _adrespunten({"haarlem": _HAARLEM}),
+            TypeError("onverwacht"),
+            {"Noord-Holland": _nh_monumenten()},
+        )
+
+    assert opgehaald == ["Noord-Holland"]
+    assert onbepaald == {}
+    assert result["identificatie"].tolist() == ["haarlem"]
+    assert "Provinciegrenzen niet op te halen" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_bepaal_provinciaal_geen_punt_valt_af(caplog):
+    """Een multipoint of lege geometrie geeft geen fout op .x/.y, maar een
+    waarschuwing; de overige punten worden gewoon bepaald."""
+    adrespunten = _adrespunten(
+        {
+            "rolde": _ROLDE,
+            "multi": MultiPoint([_ROLDE, _ROLDE_NAAST]),
+            "leeg": Point(),
+        }
+    )
+    with caplog.at_level(logging.WARNING):
+        (result, onbepaald), _, _ = await _bepaal(
+            adrespunten, _GRENZEN, {"Drenthe": _drenthe_monumenten()}
+        )
+
+    assert result["identificatie"].tolist() == ["rolde"]
+    assert onbepaald == {}
+    assert "2 adrespunten zijn geen punt" in caplog.text
 
 
 @pytest.mark.asyncio

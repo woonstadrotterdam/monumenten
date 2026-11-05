@@ -16,7 +16,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple, Type
 
 import aiohttp
 from shapely.geometry import shape
@@ -33,8 +33,19 @@ logger = logging.getLogger("monumenten.api.provincies")
 
 # De service van Noord-Holland gaf time-outs bij pagina's van 500 vlakken.
 _PAGINA_GROOTTE = 250
+# Vangnet tegen een service die resultOffset negeert en zonder feature-id's
+# blijft melden dat er meer is. Ruim boven de huidige omvang (enkele duizenden
+# vlakken per provincie).
+_MAX_PAGINAS = 400
 
 _RD = "EPSG:28992"
+
+# Ook een afgebroken overdracht (ClientPayloadError) of verbroken verbinding
+# (ClientOSError) is tijdelijk.
+_HERHAALBARE_FOUTEN: Tuple[Type[BaseException], ...] = (
+    *RETRYABLE_NETWORK_EXCEPTIONS,
+    aiohttp.ClientError,
+)
 
 _PROVINCIEGRENZEN_URL = "https://service.pdok.nl/kadaster/bestuurlijkegebieden/wfs/v1_0"
 
@@ -77,7 +88,10 @@ class Provincie:
 
 @lru_cache(maxsize=None)
 def _waarschuw_onbekend(provincie: str, veld: str, waarde: str) -> None:
-    """Logt één keer per proces dat een onbekende waarde is genegeerd.
+    """Logt één keer per download dat een onbekende waarde is genegeerd.
+
+    Een provincie heeft vaak veel vlakken met dezelfde onbekende waarde. De cache
+    wordt bij elke download geleegd (eens per 7 dagen, met de data-cache mee).
 
     Args:
         provincie (str): Naam van de provincie.
@@ -232,10 +246,16 @@ async def _get_json(
                 raise ProvincialeMonumentenError(
                     f"Ophalen van {context} mislukt: HTTP {e.status}"
                 ) from e
-        except RETRYABLE_NETWORK_EXCEPTIONS as e:
+        except _HERHAALBARE_FOUTEN as e:
             if poging == MAX_ATTEMPTS - 1:
                 raise ProvincialeMonumentenError(
-                    f"Ophalen van {context} mislukt (netwerk): {e}"
+                    f"Ophalen van {context} mislukt (netwerk): {type(e).__name__}: {e}"
+                ) from e
+        except ValueError as e:
+            # Geen JSON, bijvoorbeeld een onderhouds- of proxypagina met HTTP 200
+            if poging == MAX_ATTEMPTS - 1:
+                raise ProvincialeMonumentenError(
+                    f"Ophalen van {context} mislukt: antwoord is geen JSON"
                 ) from e
         else:
             if not isinstance(data, dict):
@@ -274,13 +294,17 @@ async def _query_provinciale_monumenten(
         ``provinciaal_monument_omschrijving``.
 
     Raises:
-        ProvincialeMonumentenError: Als de service faalt of geen enkel vlak
-            oplevert.
+        ProvincialeMonumentenError: Als de service faalt, de paginering niet
+            werkt of geen enkel vlak meetelt.
     """
+    # Een nieuwe download meldt onbekende waarden opnieuw, zodat een blijvende
+    # wijziging bij de provincie niet bij één logregel per proces blijft.
+    _waarschuw_onbekend.cache_clear()
     features: List[Dict[str, Any]] = []
     aantal_vlakken = 0
     offset = 0
-    while True:
+    gezien: set[Any] = set()
+    for _ in range(_MAX_PAGINAS):
         params = {
             "where": "1=1",
             "outFields": ",".join(provincie.velden),
@@ -299,6 +323,14 @@ async def _query_provinciale_monumenten(
             f"provinciale monumenten {provincie.naam}",
         )
         nieuwe = pagina.get("features") or []
+        ids = {feature.get("id") for feature in nieuwe} - {None}
+        if ids and ids <= gezien:
+            # Een laag die resultOffset negeert, geeft steeds dezelfde pagina
+            raise ProvincialeMonumentenError(
+                f"Service van {provincie.naam} gaf bij offset {offset} alleen "
+                "vlakken die al waren opgehaald; paginering werkt niet"
+            )
+        gezien |= ids
         for feature in nieuwe:
             aantal_vlakken += 1
             omschrijving = provincie.omschrijving(feature.get("properties") or {})
@@ -331,11 +363,23 @@ async def _query_provinciale_monumenten(
         if not nieuwe or (len(nieuwe) < _PAGINA_GROOTTE and not meer):
             break
         offset += len(nieuwe)
+    else:
+        raise ProvincialeMonumentenError(
+            f"Service van {provincie.naam} meldt na {_MAX_PAGINAS} pagina's nog "
+            "steeds meer vlakken; paginering werkt niet"
+        )
 
     if not features:
+        if aantal_vlakken:
+            # Anders dan een plat liggende service: de package moet worden
+            # bijgewerkt.
+            raise ProvincialeMonumentenError(
+                f"Geen van de {aantal_vlakken} vlakken van {provincie.naam} heeft "
+                "een bekende categorie of status; waarschijnlijk is de service "
+                "gewijzigd en moet de package monumenten worden bijgewerkt"
+            )
         raise ProvincialeMonumentenError(
-            f"Geen provinciale monumenten gevonden voor {provincie.naam} "
-            f"({aantal_vlakken} vlakken opgehaald)"
+            f"Service van {provincie.naam} gaf geen enkel monumentvlak"
         )
     logger.debug(
         "Provinciale monumenten %s: %d van %d vlakken tellen mee",
