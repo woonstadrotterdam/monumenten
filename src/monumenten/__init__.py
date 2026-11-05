@@ -1,6 +1,6 @@
 """Package for retrieving monument data from various Dutch government APIs."""
 
-from ._api._provincies import ProvincialeMonumentenError
+from ._bronfouten import MonumentStatusOnbepaaldWarning
 from .client import MonumentenClient
 
-__all__ = ["MonumentenClient", "ProvincialeMonumentenError"]
+__all__ = ["MonumentStatusOnbepaaldWarning", "MonumentenClient"]

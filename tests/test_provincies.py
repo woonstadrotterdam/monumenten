@@ -10,10 +10,12 @@ from monumenten._api._provincies import (
     _PAGINA_GROOTTE,
     DRENTHE,
     NOORD_HOLLAND,
+    PROVINCIES,
     ProvincialeMonumentenError,
     _omschrijving_drenthe,
     _omschrijving_noord_holland,
     _query_provinciale_monumenten,
+    _query_provinciegrenzen,
     _waarschuw_onbekend,
 )
 
@@ -173,7 +175,7 @@ async def test_query_provinciale_monumenten_pagineert_en_filtert():
 
     assert [p["resultOffset"] for p in aanroepen] == ["0", str(_PAGINA_GROOTTE)]
     assert aanroepen[0]["orderByFields"] == "OBJECTID"
-    assert aanroepen[0]["outSR"] == "4326"
+    assert aanroepen[0]["outSR"] == "28992"
     assert aanroepen[0]["f"] == "geojson"
     # voorbeschermd en zonder geometrie vallen af
     assert len(features) == _PAGINA_GROOTTE + 1
@@ -291,3 +293,52 @@ async def test_query_provinciale_monumenten_alleen_vlakken(caplog):
     ]
     assert "'Point'" in caplog.text
     assert "'LineString'" in caplog.text
+
+
+def _grens(code, geometry=_VLAK):
+    return {"type": "Feature", "properties": {"code": code}, "geometry": geometry}
+
+
+@pytest.mark.asyncio
+async def test_query_provinciegrenzen_vraagt_codes_in_rd():
+    session, aanroepen = _sessie(
+        [{"type": "FeatureCollection", "features": [_grens("27"), _grens("22")]}]
+    )
+
+    grenzen = await _query_provinciegrenzen(session, PROVINCIES)
+
+    assert set(grenzen) == {"27", "22"}
+    assert grenzen["22"].geom_type == "Polygon"
+    params = aanroepen[0]
+    assert params["typeNames"] == "bestuurlijkegebieden:Provinciegebied"
+    assert params["srsName"] == "EPSG:28992"
+    assert "<fes:Or>" in params["FILTER"]
+    assert "<fes:Literal>27</fes:Literal>" in params["FILTER"]
+    assert "<fes:Literal>22</fes:Literal>" in params["FILTER"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "features",
+    [
+        [_grens("27")],  # Drenthe ontbreekt
+        [_grens("27"), _grens("22"), _grens("22")],  # Drenthe dubbel
+        [_grens("27"), _grens("22", geometry=_PUNT)],  # geen vlak
+    ],
+)
+async def test_query_provinciegrenzen_onvolledig_is_fout(features):
+    session, _ = _sessie([{"type": "FeatureCollection", "features": features}])
+    with pytest.raises(ProvincialeMonumentenError, match="'22'"):
+        await _query_provinciegrenzen(session, PROVINCIES)
+
+
+@pytest.mark.asyncio
+async def test_query_provinciegrenzen_http_400_is_fout():
+    """PDOK meldt een ongeldige request met HTTP 400 en een ExceptionReport."""
+    fout = aiohttp.ClientResponseError(
+        request_info=MagicMock(), history=(), status=400, message="Bad Request"
+    )
+    session, aanroepen = _sessie([fout])
+    with pytest.raises(ProvincialeMonumentenError, match="HTTP 400"):
+        await _query_provinciegrenzen(session, PROVINCIES)
+    assert len(aanroepen) == 1

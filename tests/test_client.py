@@ -1,3 +1,4 @@
+import warnings
 from contextlib import contextmanager
 from typing import Iterator
 from unittest.mock import AsyncMock, patch
@@ -6,8 +7,10 @@ import geopandas as gpd
 import pandas as pd
 import pytest
 import pytest_asyncio
+from shapely.geometry import box
 
-from monumenten import MonumentenClient
+from monumenten import MonumentenClient, MonumentStatusOnbepaaldWarning
+from monumenten._api._provincies import ProvincialeMonumentenError
 
 
 @pytest_asyncio.fixture(scope="function")
@@ -629,6 +632,122 @@ async def test_voorbescherming_gemockt_vera(client: MonumentenClient):
         result = await client.process_from_list([_VO_ALLEEN_EWD], to_vera=True)
 
     assert result[_VO_ALLEEN_EWD] == []
+
+
+_VO_HAARLEM = "0392010000000001"  # Noord-Holland, kandidaat
+_VO_LEIDEN = "0546010000000001"  # in de bbox van Noord-Holland, buiten de grens
+
+
+@contextmanager
+def _mock_api_noord_holland_plat() -> Iterator[None]:
+    """Mockt de API-laag met Noord-Holland onbereikbaar.
+
+    Haarlem heeft ook een gemeentelijk monument en een rijksmonument; die
+    statussen blijven bepaald.
+    """
+    verblijfsobjecten = [
+        {
+            "identificatie": _VO_HAARLEM,
+            "verblijfsobjectWKT": "POINT (4.6352 52.3829)",
+            "grondslagcode": "GG",
+            "grondslag_gemeentelijk_monument": "Gemeentewet",
+        },
+        {
+            "identificatie": _VO_LEIDEN,
+            "verblijfsobjectWKT": "POINT (4.4905 52.1597)",
+            "grondslagcode": None,
+            "grondslag_gemeentelijk_monument": None,
+        },
+    ]
+    geen_gezichten = gpd.GeoDataFrame(
+        columns=["rijksbeschermd_gezicht_naam", "geometry"], geometry="geometry"
+    )
+    with (
+        patch(
+            "monumenten._processing._query_rijksmonumenten",
+            AsyncMock(
+                return_value=[
+                    {"identificatie": _VO_HAARLEM, "rijksmonument_nummer": "12345"}
+                ]
+            ),
+        ),
+        patch(
+            "monumenten._processing._query_verblijfsobjecten",
+            AsyncMock(return_value=verblijfsobjecten),
+        ),
+        patch(
+            "monumenten._processing._get_beschermde_gezichten",
+            AsyncMock(return_value=geen_gezichten),
+        ),
+        patch(
+            "monumenten._processing._get_provinciegrenzen",
+            AsyncMock(
+                return_value={
+                    "27": box(100000, 470000, 150000, 580000),
+                    "22": box(200000, 520000, 270000, 580000),
+                }
+            ),
+        ),
+        patch(
+            "monumenten._processing._get_provinciale_monumenten",
+            AsyncMock(side_effect=ProvincialeMonumentenError("Noord-Holland plat")),
+        ),
+    ):
+        yield
+
+
+@pytest.mark.asyncio
+async def test_provincie_plat_gemockt_df(client: MonumentenClient):
+    """Een uitgevallen provincie geeft pd.NA en een waarschuwing, alleen voor haar
+    kandidaten; de andere statussen blijven bepaald."""
+    with _mock_api_noord_holland_plat():
+        with pytest.warns(MonumentStatusOnbepaaldWarning) as meldingen:
+            result = await client.process_from_df(
+                pd.DataFrame({"bag_verblijfsobject_id": [_VO_HAARLEM, _VO_LEIDEN]}),
+                "bag_verblijfsobject_id",
+            )
+
+    assert meldingen[0].message.verblijfsobject_ids == {"Noord-Holland": [_VO_HAARLEM]}
+    assert "Noord-Holland (1 verblijfsobjecten)" in str(meldingen[0].message)
+    assert result["provinciaal_monument"].dtype == "boolean"
+    rijen = result.set_index("bag_verblijfsobject_id")
+    assert rijen.loc[_VO_HAARLEM, "provinciaal_monument"] is pd.NA
+    assert bool(rijen.loc[_VO_HAARLEM, "rijksmonument"]) is True
+    assert bool(rijen.loc[_VO_HAARLEM, "gemeentelijk_monument"]) is True
+    assert bool(rijen.loc[_VO_LEIDEN, "provinciaal_monument"]) is False
+
+
+@pytest.mark.asyncio
+async def test_provincie_plat_gemockt_list_en_vera(client: MonumentenClient):
+    """Onbepaald is None; in VERA is de hele value None, zodat PRO niet stil
+    wegvalt."""
+    with _mock_api_noord_holland_plat():
+        with pytest.warns(MonumentStatusOnbepaaldWarning):
+            result = await client.process_from_list([_VO_HAARLEM, _VO_LEIDEN])
+        with pytest.warns(MonumentStatusOnbepaaldWarning):
+            vera = await client.process_from_list(
+                [_VO_HAARLEM, _VO_LEIDEN], to_vera=True
+            )
+
+    assert result[_VO_HAARLEM]["provinciaal_monument"] is None
+    assert result[_VO_HAARLEM]["gemeentelijk_monument"] is True
+    assert result[_VO_LEIDEN]["provinciaal_monument"] is False
+    assert vera[_VO_HAARLEM] is None
+    assert vera[_VO_LEIDEN] == []
+
+
+@pytest.mark.asyncio
+async def test_provincie_bereikbaar_geen_waarschuwing(client: MonumentenClient):
+    with _mock_api_met_voorbescherming():
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", MonumentStatusOnbepaaldWarning)
+            result = await client.process_from_df(
+                pd.DataFrame({"bag_verblijfsobject_id": [_VO_ALLEEN_EWD]}),
+                "bag_verblijfsobject_id",
+            )
+
+    assert result["provinciaal_monument"].dtype == "boolean"
+    assert bool(result.iloc[0]["provinciaal_monument"]) is False
 
 
 @pytest.mark.asyncio

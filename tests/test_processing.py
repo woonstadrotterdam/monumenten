@@ -1,5 +1,6 @@
 """Tests for batch processing and API-level retry/split logic."""
 
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
@@ -13,19 +14,21 @@ from monumenten._api._cultureel_erfgoed import _query_rijksmonumenten
 from monumenten._api._kadaster import _query_verblijfsobjecten
 from monumenten._api._provincies import (
     DRENTHE,
-    NOORD_HOLLAND,
     ProvincialeMonumentenError,
 )
 from monumenten._processing import (
+    _GRENS_BUFFER_METER,
     _QUERY_BATCH_GROOTTE,
-    _koppel_provinciale_monumenten,
+    _bepaal_provinciale_monumenten,
+    _get_provinciegrenzen,
+    _lege_adrespunten,
     _process_batch,
     _query,
 )
 
 
 def _make_batch_result(identificaties, count=None):
-    """Minimal valid (rm, beschermd_gezicht, gemeentelijk, provinciaal) frames + count."""
+    """Minimal valid (rm, beschermd_gezicht, gemeentelijk, adrespunten) frames + count."""
     n = count if count is not None else len(identificaties)
     ids_df = pd.DataFrame({"identificatie": list(identificaties)[:n]})
     rm = ids_df.assign(
@@ -35,8 +38,7 @@ def _make_batch_result(identificaties, count=None):
     )
     bg = ids_df.assign(rijksbeschermd_gezicht_naam=pd.NA)
     gm = ids_df.assign(grondslag_gemeentelijk_monument=pd.NA)
-    pm = ids_df.assign(provinciaal_monument_omschrijving=pd.NA)
-    return (rm, bg, gm, pm, n)
+    return (rm, bg, gm, _lege_adrespunten(), n)
 
 
 @pytest.fixture
@@ -60,8 +62,9 @@ async def test_query_success(empty_geodataframe):
         patch("monumenten._processing._process_batch", side_effect=mock_process_batch),
     ):
         async with aiohttp.ClientSession() as session:
-            result = await _query(session, ids)
+            result, onbepaald = await _query(session, ids)
 
+    assert onbepaald == {}
     assert len(result) == 3
     assert set(result["identificatie"]) == {"id1", "id2", "id3"}
     assert list(result.columns) == [
@@ -91,7 +94,7 @@ async def test_query_batch_failure_logged(empty_geodataframe):
         patch("monumenten._processing._process_batch", side_effect=mock_process_batch),
     ):
         async with aiohttp.ClientSession() as session:
-            result = await _query(session, ids)
+            result, _ = await _query(session, ids)
 
     assert len(result) == 0
     assert list(result.columns) == [
@@ -288,54 +291,91 @@ def test_constants():
     assert MAX_SPLIT_DEPTH == 10
 
 
-@pytest.mark.asyncio
-async def test_query_provinciale_fout_wordt_niet_overgeslagen(empty_geodataframe):
-    """Een ProvincialeMonumentenError mag niet als lege batch eindigen: dan zou een
-    hele provincie stil False krijgen. De fout komt onverpakt (geen ExceptionGroup)
-    bij de aanroeper."""
+# ---------------------------------------------------------------------------
+# Provinciale monumenten: kandidaten via bbox en provinciegrens, daarna sjoin
+# ---------------------------------------------------------------------------
 
-    async def mock_process_batch(session, batch, bg_df):
-        raise ProvincialeMonumentenError("Drenthe onbereikbaar")
+# Adrespunten in RD, zoals PDOK ze levert
+_ROLDE = Point(239495.0, 556475.0)  # Kerkbrink 7, PM1-0001
+_ROLDE_NAAST = Point(239600.0, 556600.0)  # wel in Drenthe, geen monument
+_HAARLEM = Point(103800.0, 488600.0)
+_LEIDEN = Point(93911.705, 464260.065)  # in de bbox van Noord-Holland, niet erin
+_ROTTERDAM = Point(92500.0, 437500.0)
+
+_DRENTSE_GRENS = box(200000, 520000, 270000, 580000)
+_NH_GRENS = box(100000, 470000, 150000, 580000)
+
+
+def _adrespunten(punten, crs="EPSG:28992"):
+    return gpd.GeoDataFrame(
+        {"identificatie": list(punten)}, geometry=list(punten.values()), crs=crs
+    )
+
+
+def _drenthe_monumenten():
+    return gpd.GeoDataFrame(
+        {"provinciaal_monument_omschrijving": ["PM1-0001 Dwarshuisboerderij Rolde"]},
+        geometry=[_ROLDE.buffer(5)],
+        crs="EPSG:28992",
+    )
+
+
+def _nh_monumenten():
+    return gpd.GeoDataFrame(
+        {"provinciaal_monument_omschrijving": ["Stelling van Amsterdam"]},
+        geometry=[_HAARLEM.buffer(5)],
+        crs="EPSG:28992",
+    )
+
+
+async def _bepaal(adrespunten, grenzen=None, monumenten=None):
+    """Draai _bepaal_provinciale_monumenten met gemockte grenzen en vlakken.
+
+    ``grenzen`` is een dict of een exception; ``monumenten`` per provincienaam een
+    GeoDataFrame of een exception. Geeft het resultaat en de opgehaalde provincies.
+    """
+    opgehaald = []
+
+    async def get_monumenten(session, provincie):
+        opgehaald.append(provincie.naam)
+        antwoord = (monumenten or {})[provincie.naam]
+        if isinstance(antwoord, BaseException):
+            raise antwoord
+        return antwoord
 
     with (
         patch(
-            "monumenten._processing._get_beschermde_gezichten",
-            return_value=empty_geodataframe,
+            "monumenten._processing._get_provinciegrenzen",
+            AsyncMock(
+                side_effect=grenzen
+                if isinstance(grenzen, BaseException)
+                else lambda session: grenzen
+            ),
+        ) as get_grenzen,
+        patch(
+            "monumenten._processing._get_provinciale_monumenten",
+            side_effect=get_monumenten,
         ),
-        patch("monumenten._processing._process_batch", side_effect=mock_process_batch),
     ):
-        async with aiohttp.ClientSession() as session:
-            with pytest.raises(
-                ProvincialeMonumentenError, match="Drenthe onbereikbaar"
-            ):
-                await _query(session, ["id1", "id2"])
+        resultaat = await _bepaal_provinciale_monumenten(MagicMock(), adrespunten)
+    return resultaat, opgehaald, get_grenzen
+
+
+_GRENZEN = {"27": _NH_GRENS, "22": _DRENTSE_GRENS}
 
 
 @pytest.mark.asyncio
-async def test_koppel_provinciale_monumenten_alleen_benodigde_provincie():
-    """Alleen provincies met een adrespunt in hun bounding box worden opgehaald."""
-    geo_df = gpd.GeoDataFrame(
-        {"identificatie": ["rolde_in", "rolde_uit", "rotterdam"]},
-        geometry=[Point(6.646, 52.9885), Point(6.70, 52.95), Point(4.48, 51.92)],
+async def test_bepaal_provinciaal_alleen_benodigde_provincie():
+    """Alleen provincies met een kandidaat worden opgehaald."""
+    adrespunten = _adrespunten(
+        {"rolde_in": _ROLDE, "rolde_uit": _ROLDE_NAAST, "rotterdam": _ROTTERDAM}
     )
-    drenthe_df = gpd.GeoDataFrame(
-        {"provinciaal_monument_omschrijving": ["PM1-0001 Dwarshuisboerderij Rolde"]},
-        geometry=[box(6.645, 52.988, 6.647, 52.989)],
+    (result, onbepaald), opgehaald, _ = await _bepaal(
+        adrespunten, _GRENZEN, {"Drenthe": _drenthe_monumenten()}
     )
-    opgehaald = []
 
-    async def mock_get(session, provincie):
-        opgehaald.append(provincie.naam)
-        assert provincie is DRENTHE
-        return drenthe_df
-
-    with patch(
-        "monumenten._processing._get_provinciale_monumenten", side_effect=mock_get
-    ):
-        result = await _koppel_provinciale_monumenten(MagicMock(), geo_df)
-
-    assert opgehaald == ["Drenthe"]
-    assert NOORD_HOLLAND.naam not in opgehaald
+    assert opgehaald == [DRENTHE.naam]
+    assert onbepaald == {}
     assert result.to_dict(orient="records") == [
         {
             "identificatie": "rolde_in",
@@ -345,16 +385,15 @@ async def test_koppel_provinciale_monumenten_alleen_benodigde_provincie():
 
 
 @pytest.mark.asyncio
-async def test_koppel_provinciale_monumenten_buiten_nh_en_dr_geen_download():
-    geo_df = gpd.GeoDataFrame(
-        {"identificatie": ["rotterdam"]}, geometry=[Point(4.48, 51.92)]
+async def test_bepaal_provinciaal_buiten_bbox_geen_enkele_request():
+    """Buiten de bboxen wordt ook de grens niet opgehaald."""
+    (result, onbepaald), opgehaald, get_grenzen = await _bepaal(
+        _adrespunten({"rotterdam": _ROTTERDAM}), AssertionError("geen grenzen")
     )
-    with patch(
-        "monumenten._processing._get_provinciale_monumenten",
-        side_effect=AssertionError("mag niet worden aangeroepen"),
-    ):
-        result = await _koppel_provinciale_monumenten(MagicMock(), geo_df)
 
+    assert opgehaald == []
+    get_grenzen.assert_not_called()
+    assert onbepaald == {}
     assert result.empty
     assert list(result.columns) == [
         "identificatie",
@@ -363,18 +402,113 @@ async def test_koppel_provinciale_monumenten_buiten_nh_en_dr_geen_download():
 
 
 @pytest.mark.asyncio
-async def test_koppel_provinciale_monumenten_verwisselde_assen_geeft_fout(caplog):
-    """POINT(lat lon) valt buiten Nederland en zou stil nooit in een bbox liggen."""
-    geo_df = gpd.GeoDataFrame(
-        {"identificatie": ["rolde"]}, geometry=[Point(52.9885, 6.646)]
+async def test_bepaal_provinciaal_in_bbox_buiten_grens_geen_download():
+    """Leiden ligt in de bbox van Noord-Holland, maar niet binnen de grens: False,
+    ook als Noord-Holland plat ligt."""
+    (result, onbepaald), opgehaald, _ = await _bepaal(
+        _adrespunten({"leiden": _LEIDEN}),
+        _GRENZEN,
+        {"Noord-Holland": ProvincialeMonumentenError("Noord-Holland plat")},
     )
-    with patch(
-        "monumenten._processing._get_provinciale_monumenten",
-        side_effect=AssertionError("mag niet worden aangeroepen"),
-    ):
-        await _koppel_provinciale_monumenten(MagicMock(), geo_df)
 
+    assert opgehaald == []
+    assert onbepaald == {}
+    assert result.empty
+
+
+@pytest.mark.asyncio
+async def test_bepaal_provinciaal_provincie_plat_geeft_onbepaald(caplog):
+    """Een kandidaat in een uitgevallen provincie is onbepaald; de andere
+    provincie wordt gewoon bepaald."""
+    adrespunten = _adrespunten(
+        {"haarlem": _HAARLEM, "leiden": _LEIDEN, "rolde": _ROLDE}
+    )
+    with caplog.at_level(logging.WARNING):
+        (result, onbepaald), opgehaald, _ = await _bepaal(
+            adrespunten,
+            _GRENZEN,
+            {
+                "Noord-Holland": ProvincialeMonumentenError("Noord-Holland plat"),
+                "Drenthe": _drenthe_monumenten(),
+            },
+        )
+
+    assert sorted(opgehaald) == ["Drenthe", "Noord-Holland"]
+    assert onbepaald == {"Noord-Holland": ["haarlem"]}
+    assert result["identificatie"].tolist() == ["rolde"]
+    assert "Noord-Holland plat" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_bepaal_provinciaal_grenzen_falen_terugval_op_bbox(caplog):
+    """Zonder grenzen is elk punt in de bbox kandidaat, ook Leiden."""
+    with caplog.at_level(logging.WARNING):
+        (result, onbepaald), opgehaald, _ = await _bepaal(
+            _adrespunten({"haarlem": _HAARLEM, "leiden": _LEIDEN}),
+            ProvincialeMonumentenError("PDOK plat"),
+            {"Noord-Holland": ProvincialeMonumentenError("Noord-Holland plat")},
+        )
+
+    assert opgehaald == ["Noord-Holland"]
+    assert sorted(onbepaald["Noord-Holland"]) == ["haarlem", "leiden"]
+    assert result.empty
+    assert "PDOK plat" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_bepaal_provinciaal_wgs84_en_rd_geven_hetzelfde():
+    """De KKG levert WGS84, PDOK RD: de uitkomst is gelijk."""
+    rd = _adrespunten({"rolde": _ROLDE, "haarlem": _HAARLEM, "leiden": _LEIDEN})
+    wgs84 = rd.to_crs("EPSG:4326")
+    monumenten = {"Drenthe": _drenthe_monumenten(), "Noord-Holland": _nh_monumenten()}
+
+    (uit_rd, _), _, _ = await _bepaal(rd, _GRENZEN, monumenten)
+    (uit_wgs84, _), _, _ = await _bepaal(wgs84, _GRENZEN, monumenten)
+
+    assert sorted(uit_rd["identificatie"]) == ["haarlem", "rolde"]
+    assert sorted(uit_wgs84["identificatie"]) == sorted(uit_rd["identificatie"])
+
+
+@pytest.mark.asyncio
+async def test_bepaal_provinciaal_dubbele_id_een_keer_onbepaald():
+    """Een verblijfsobject met meerdere beperkingen staat één keer in de melding."""
+    adrespunten = _adrespunten({"haarlem": _HAARLEM})
+    adrespunten = pd.concat([adrespunten, adrespunten], ignore_index=True)
+    (_, onbepaald), _, _ = await _bepaal(
+        adrespunten,
+        _GRENZEN,
+        {"Noord-Holland": ProvincialeMonumentenError("Noord-Holland plat")},
+    )
+
+    assert onbepaald == {"Noord-Holland": ["haarlem"]}
+
+
+@pytest.mark.asyncio
+async def test_bepaal_provinciaal_verwisselde_assen_geeft_fout(caplog):
+    """POINT(lat lon) valt buiten Nederland en zou stil nooit in een bbox liggen."""
+    (_, _), opgehaald, _ = await _bepaal(
+        _adrespunten({"rolde": Point(52.9885, 6.646)}, crs="EPSG:4326"),
+        AssertionError("geen grenzen"),
+    )
+
+    assert opgehaald == []
     assert "buiten het bereik van Nederland" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_get_provinciegrenzen_buffer():
+    """Een punt 50 m buiten de grens is kandidaat, een punt op 150 m niet."""
+    grens = box(100000, 470000, 150000, 580000)
+    with patch(
+        "monumenten._processing._query_provinciegrenzen",
+        AsyncMock(return_value={"27": grens, "22": _DRENTSE_GRENS}),
+    ):
+        # Zonder de cache, zodat andere tests er geen last van hebben
+        gebieden = await _get_provinciegrenzen.__wrapped__(MagicMock())
+
+    assert _GRENS_BUFFER_METER == 100
+    assert gebieden["27"].contains(Point(99950, 500000))
+    assert not gebieden["27"].contains(Point(99850, 500000))
 
 
 @pytest.mark.asyncio
@@ -399,7 +533,8 @@ async def test_query_provinciaal_samen_met_rijks_en_gemeentelijk():
     drenthe_df = gpd.GeoDataFrame(
         {"provinciaal_monument_omschrijving": ["PM1-0001 Dwarshuisboerderij Rolde"]},
         geometry=[box(6.645, 52.988, 6.647, 52.989)],
-    )
+        crs="EPSG:4326",
+    ).to_crs("EPSG:28992")
     with (
         patch(
             "monumenten._processing._get_beschermde_gezichten",
@@ -420,13 +555,20 @@ async def test_query_provinciaal_samen_met_rijks_en_gemeentelijk():
             AsyncMock(return_value=verblijfsobjecten),
         ),
         patch(
+            "monumenten._processing._get_provinciegrenzen",
+            AsyncMock(return_value=_GRENZEN),
+        ),
+        patch(
             "monumenten._processing._get_provinciale_monumenten",
             AsyncMock(return_value=drenthe_df),
         ),
     ):
         async with aiohttp.ClientSession() as session:
-            result = await _query(session, ["rolde_alles", "rolde_provinciaal"])
+            result, onbepaald = await _query(
+                session, ["rolde_alles", "rolde_provinciaal"]
+            )
 
+    assert onbepaald == {}
     assert sorted(result["identificatie"]) == ["rolde_alles", "rolde_provinciaal"]
     alles = _rij(result, "rolde_alles")
     assert alles["rijksmonument_nummer"] == "12345"
@@ -584,7 +726,7 @@ async def test_process_batch_rce_en_ewe(empty_geodataframe):
 @pytest.mark.asyncio
 async def test_process_batch_zonder_beperking(empty_geodataframe):
     """Verblijfsobject zonder beperking komt niet in rijksmonumenten_df."""
-    rm_df, _, gm_df, pm_df, _ = await _run_process_batch(
+    rm_df, _, gm_df, adrespunten, _ = await _run_process_batch(
         rijksmonumenten=[],
         verblijfsobjecten=[_beperking("vo_leeg")],
         beschermde_gezichten_df=empty_geodataframe,
@@ -592,7 +734,9 @@ async def test_process_batch_zonder_beperking(empty_geodataframe):
 
     assert rm_df.empty
     assert gm_df.empty
-    assert pm_df.empty
+    # Het adrespunt gaat door naar de provinciale stap, in WGS84
+    assert adrespunten["identificatie"].tolist() == ["vo_leeg"]
+    assert adrespunten.crs == "EPSG:4326"
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,23 @@ import aiohttp
 import numpy as np
 import pandas as pd
 
+from monumenten._bronfouten import MonumentStatusOnbepaaldWarning
 from monumenten._processing import _query
+
+
+def _status(aanwezig: pd.Series[bool], onbepaald: pd.Series[bool]) -> pd.Series[bool]:
+    """Bepaal een monumentstatus als nullable boolean.
+
+    Args:
+        aanwezig (pd.Series[bool]): Of de status bij een bron is gevonden
+        onbepaald (pd.Series[bool]): Of een bron waar de status van afhangt geen
+            antwoord gaf
+
+    Returns:
+        pd.Series[bool]: ``True`` als de status is gevonden, ``pd.NA`` als zij niet is
+            gevonden maar een benodigde bron geen antwoord gaf, anders ``False``
+    """
+    return aanwezig.astype("boolean").mask(onbepaald & ~aanwezig)
 
 
 class MonumentenClient:
@@ -38,7 +54,12 @@ class MonumentenClient:
         if self._owns_session and self._session:
             await self._session.close()
 
-    def _naar_referentiedata(self, row: pd.Series[bool]) -> List[Dict[str, object]]:
+    def _naar_referentiedata(
+        self, row: pd.Series[bool]
+    ) -> Optional[List[Dict[str, object]]]:
+        # Met een niet-bepaalde status zou de lijst onvolledig zijn
+        if row.provinciaal_monument is None:
+            return None
         statuses = []
         if row.rijksmonument:
             statuses.append(
@@ -68,10 +89,14 @@ class MonumentenClient:
             verblijfsobject_id_col (str): Naam van de kolom met de verblijfsobject ID's
 
         Returns:
-            pd.DataFrame: DataFrame met toegevoegde monumentinformatie
+            pd.DataFrame: DataFrame met toegevoegde monumentinformatie. De kolom
+                ``provinciaal_monument`` is een nullable boolean: ``pd.NA`` betekent
+                dat de monumenten van de provincie niet opgehaald konden worden. In dat
+                geval volgt ook een ``MonumentStatusOnbepaaldWarning``.
 
         Raises:
             RuntimeError: Als de client niet als context manager wordt gebruikt
+            ValueError: Als er geen enkel geldig verblijfsobject ID is
         """
 
         if not self._session:
@@ -93,10 +118,23 @@ class MonumentenClient:
         valid_id_df = df.loc[~invalid_verblijf_object_ids]
         if valid_id_df.empty:
             raise ValueError("Geen enkel geldig verblijfsobject ID gevonden")
-        results = await _query(
+        results, onbepaald = await _query(
             self._session,
             valid_id_df.loc[:, verblijfsobject_id_col].drop_duplicates().tolist(),
         )
+        if onbepaald:
+            warnings.warn(
+                MonumentStatusOnbepaaldWarning(
+                    "Provinciale monumenten niet op te halen voor "
+                    + ", ".join(
+                        f"{provincie} ({len(ids)} verblijfsobjecten)"
+                        for provincie, ids in onbepaald.items()
+                    )
+                    + "; provinciaal_monument is voor die verblijfsobjecten pd.NA",
+                    verblijfsobject_ids=onbepaald,
+                ),
+                stacklevel=2,
+            )
         merged = pd.merge(
             valid_id_df,
             results,
@@ -187,7 +225,12 @@ class MonumentenClient:
         merged.insert(
             provinciaal_monument_position,
             "provinciaal_monument",
-            merged["provinciaal_monument_omschrijving"].notna(),
+            _status(
+                merged["provinciaal_monument_omschrijving"].notna(),
+                merged[verblijfsobject_id_col].isin(
+                    [vo_id for ids in onbepaald.values() for vo_id in ids]
+                ),
+            ),
         )
 
         merged = merged.replace([np.nan, ""], pd.NA)
@@ -196,7 +239,7 @@ class MonumentenClient:
 
     async def process_from_list(
         self, verblijfsobject_ids: List[str], to_vera: bool = False
-    ) -> Union[Dict[str, List[Dict[str, str]]], Dict[str, Dict[str, Any]]]:
+    ) -> Union[Dict[str, Optional[List[Dict[str, str]]]], Dict[str, Dict[str, Any]]]:
         """Verwerk een lijst met verblijfsobject ID's.
 
         Args:
@@ -204,7 +247,10 @@ class MonumentenClient:
             to_vera (bool): Of de output in VERA-referentiedataformaat moet zijn. Standaard is False.
 
         Returns:
-            Union[Dict[str, List[Dict[str, str]]], Dict[str, Dict[str, Any]]]: Dictionary met verblijfsobject ID's als keys en lijst van monumentstatussen als values
+            Union[Dict[str, Optional[List[Dict[str, str]]]], Dict[str, Dict[str, Any]]]: Dictionary
+                met verblijfsobject ID's als keys en lijst van monumentstatussen als values. Een
+                status die niet bepaald kon worden omdat een bron geen antwoord gaf is ``None``;
+                in VERA-referentiedataformaat is dan de hele value ``None`` in plaats van een lijst.
         """
         df = pd.DataFrame(
             {"bag_verblijfsobject_id": verblijfsobject_ids}
@@ -233,6 +279,9 @@ class MonumentenClient:
             )
 
         return cast(
-            Dict[str, List[Dict[str, str]]],
-            result_indexed.apply(self._naar_referentiedata, axis=1).to_dict(),
+            Dict[str, Optional[List[Dict[str, str]]]],
+            {
+                verblijfsobject_id: self._naar_referentiedata(row)
+                for verblijfsobject_id, row in result_indexed.iterrows()
+            },
         )

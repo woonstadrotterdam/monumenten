@@ -3,9 +3,11 @@
 Alleen deze twee provincies wijzen provinciale monumenten aan. Het Kadaster
 registreert ze niet (de grondslagcodes MP en PVA zijn leeg) en de landelijke
 PDOK-dataset loopt achter op de provincies zelf. Daarom worden de ArcGIS
-REST-services van de provincies rechtstreeks bevraagd. Beide leveren
-monumentvlakken als GeoJSON in WGS84, hetzelfde stelsel als de adrespunten
-van het Kadaster, zodat er geen herprojectie nodig is.
+REST-services van de provincies rechtstreeks bevraagd. Beide slaan de
+monumentvlakken op in RD (EPSG:28992) en leveren ze in dat stelsel als GeoJSON.
+
+Welke adrespunten in een provincie liggen, volgt uit de provinciegrenzen van
+PDOK (Bestuurlijke Gebieden, afgeleid uit de BRK).
 """
 
 from __future__ import annotations
@@ -17,6 +19,8 @@ from functools import lru_cache
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
 import aiohttp
+from shapely.geometry import shape
+from shapely.geometry.base import BaseGeometry
 
 from monumenten._api._backoff import (
     MAX_ATTEMPTS,
@@ -30,13 +34,17 @@ logger = logging.getLogger("monumenten.api.provincies")
 # De service van Noord-Holland gaf time-outs bij pagina's van 500 vlakken.
 _PAGINA_GROOTTE = 250
 
+_RD = "EPSG:28992"
+
+_PROVINCIEGRENZEN_URL = "https://service.pdok.nl/kadaster/bestuurlijkegebieden/wfs/v1_0"
+
 
 class ProvincialeMonumentenError(RuntimeError):
-    """De provinciale monumenten van een provincie konden niet worden opgehaald.
+    """De provinciale monumenten of de provinciegrenzen konden niet worden opgehaald.
 
-    Deze fout wordt niet stil overgeslagen: zonder de data zou elk
-    verblijfsobject in die provincie onterecht ``provinciaal_monument = False``
-    krijgen, terwijl die status meetelt in de woningwaardering.
+    De fout blijft intern. Zonder de monumentvlakken van een provincie wordt
+    ``provinciaal_monument`` voor haar adressen ``pd.NA`` in plaats van stil
+    ``False``, omdat die status meetelt in de woningwaardering.
     """
 
 
@@ -46,17 +54,21 @@ class Provincie:
 
     Attributes:
         naam (str): Naam van de provincie, voor logging en foutmeldingen.
+        code (str): Provinciecode van de BRK, waarmee de provinciegrens bij PDOK
+            wordt opgevraagd.
         url (str): ArcGIS REST ``query``-endpoint van de laag met monumentvlakken.
         velden (Tuple[str, ...]): Attributen die per vlak worden opgevraagd.
         bbox (Tuple[float, float, float, float]): Ruime omhullende rechthoek van
             de provincie als (min_lon, min_lat, max_lon, max_lat) in WGS84. De
-            service wordt alleen bevraagd als een adrespunt hierbinnen ligt.
+            grens en de service worden alleen bevraagd als een adrespunt
+            hierbinnen ligt.
         omschrijving (Callable[[Dict[str, Any]], Optional[str]]): Bepaalt uit de
             attributen van een vlak de omschrijving van het monument, of ``None``
             als het vlak niet als provinciaal monument telt.
     """
 
     naam: str
+    code: str
     url: str
     velden: Tuple[str, ...]
     bbox: Tuple[float, float, float, float]
@@ -155,6 +167,7 @@ def _omschrijving_drenthe(attributen: Dict[str, Any]) -> Optional[str]:
 
 NOORD_HOLLAND = Provincie(
     naam="Noord-Holland",
+    code="27",
     url=(
         "https://geoservices.noord-holland.nl/ags/rest/services/"
         "oi_dataservice_protected_sites/MapServer/2/query"
@@ -166,6 +179,7 @@ NOORD_HOLLAND = Provincie(
 
 DRENTHE = Provincie(
     naam="Drenthe",
+    code="22",
     url=(
         "https://kaartportaal.drenthe.nl/server/rest/services/37/"
         "Provinciale_monumenten_Drenthe/MapServer/3/query"
@@ -183,14 +197,15 @@ _VLAK_TYPEN: FrozenSet[str] = frozenset({"Polygon", "MultiPolygon"})
 
 
 async def _get_json(
-    session: aiohttp.ClientSession, provincie: Provincie, params: Dict[str, str]
+    session: aiohttp.ClientSession, url: str, params: Dict[str, str], context: str
 ) -> Dict[str, Any]:
-    """Haalt één pagina op bij de service van een provincie, met retries.
+    """Haalt één JSON-antwoord op bij een kaartservice, met retries.
 
     Args:
         session (aiohttp.ClientSession): De sessie voor HTTP-requests.
-        provincie (Provincie): De provincie waarvan de service wordt bevraagd.
-        params (Dict[str, str]): Queryparameters voor het ArcGIS-endpoint.
+        url (str): Het endpoint.
+        params (Dict[str, str]): Queryparameters voor het endpoint.
+        context (str): Wat er wordt opgehaald, voor logging en foutmeldingen.
 
     Returns:
         Dict[str, Any]: De JSON-response.
@@ -199,10 +214,9 @@ async def _get_json(
         ProvincialeMonumentenError: Als de service na alle pogingen geen geldig
             antwoord geeft.
     """
-    context = f"provinciale monumenten {provincie.naam}"
     for poging in range(MAX_ATTEMPTS):
         try:
-            async with session.get(provincie.url, params=params) as response:
+            async with session.get(url, params=params) as response:
                 response.raise_for_status()
                 # ArcGIS antwoordt met application/geo+json
                 data = await response.json(content_type=None)
@@ -256,7 +270,7 @@ async def _query_provinciale_monumenten(
         provincie (Provincie): De provincie waarvan de monumenten worden opgehaald.
 
     Returns:
-        List[Dict[str, Any]]: GeoJSON-features (WGS84) met als enige property
+        List[Dict[str, Any]]: GeoJSON-features (RD) met als enige property
         ``provinciaal_monument_omschrijving``.
 
     Raises:
@@ -270,7 +284,7 @@ async def _query_provinciale_monumenten(
         params = {
             "where": "1=1",
             "outFields": ",".join(provincie.velden),
-            "outSR": "4326",
+            "outSR": "28992",
             "f": "geojson",
             "resultOffset": str(offset),
             "resultRecordCount": str(_PAGINA_GROOTTE),
@@ -278,7 +292,12 @@ async def _query_provinciale_monumenten(
             # dubbel geven.
             "orderByFields": "OBJECTID",
         }
-        pagina = await _get_json(session, provincie, params)
+        pagina = await _get_json(
+            session,
+            provincie.url,
+            params,
+            f"provinciale monumenten {provincie.naam}",
+        )
         nieuwe = pagina.get("features") or []
         for feature in nieuwe:
             aantal_vlakken += 1
@@ -325,3 +344,61 @@ async def _query_provinciale_monumenten(
         aantal_vlakken,
     )
     return features
+
+
+def _filter_op_codes(codes: List[str]) -> str:
+    """FES-filter dat de provinciegebieden met de gegeven codes selecteert."""
+    gelijk = "".join(
+        "<fes:PropertyIsEqualTo><fes:ValueReference>code</fes:ValueReference>"
+        f"<fes:Literal>{code}</fes:Literal></fes:PropertyIsEqualTo>"
+        for code in codes
+    )
+    if len(codes) > 1:
+        gelijk = f"<fes:Or>{gelijk}</fes:Or>"
+    return (
+        f'<fes:Filter xmlns:fes="http://www.opengis.net/fes/2.0">{gelijk}</fes:Filter>'
+    )
+
+
+async def _query_provinciegrenzen(
+    session: aiohttp.ClientSession, provincies: Tuple[Provincie, ...]
+) -> Dict[str, BaseGeometry]:
+    """Haalt de grenzen van provincies op bij PDOK, in RD.
+
+    Args:
+        session (aiohttp.ClientSession): De sessie voor HTTP-requests.
+        provincies (Tuple[Provincie, ...]): De provincies waarvan de grens nodig is.
+
+    Returns:
+        Dict[str, BaseGeometry]: Per provinciecode de grens als (multi)polygoon.
+
+    Raises:
+        ProvincialeMonumentenError: Als PDOK faalt of niet voor elke provincie
+            precies één (multi)polygoon geeft.
+    """
+    codes = [provincie.code for provincie in provincies]
+    params = {
+        "service": "WFS",
+        "version": "2.0.0",
+        "request": "GetFeature",
+        "typeNames": "bestuurlijkegebieden:Provinciegebied",
+        "srsName": _RD,
+        "outputFormat": "application/json",
+        "propertyName": "code,geom",
+        "FILTER": _filter_op_codes(codes),
+    }
+    data = await _get_json(session, _PROVINCIEGRENZEN_URL, params, "provinciegrenzen")
+    grenzen: Dict[str, List[BaseGeometry]] = {code: [] for code in codes}
+    for feature in data.get("features") or []:
+        code = (feature.get("properties") or {}).get("code")
+        geometrie = feature.get("geometry") or {}
+        if code in grenzen and geometrie.get("type") in _VLAK_TYPEN:
+            grenzen[code].append(shape(geometrie))
+    afwijkend = {
+        code: len(vlakken) for code, vlakken in grenzen.items() if len(vlakken) != 1
+    }
+    if afwijkend:
+        raise ProvincialeMonumentenError(
+            f"Onverwachte provinciegrenzen van PDOK: aantal vlakken per code {afwijkend}"
+        )
+    return {code: vlakken[0] for code, vlakken in grenzen.items()}

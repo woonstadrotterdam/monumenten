@@ -7,7 +7,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-04-07T01:51:56.209666992Z"
+exclude-newer = "2026-10-29T08:54:34.659092Z"
 exclude-newer-span = "P1W"
 
 [[package]]
@@ -446,6 +446,7 @@ dependencies = [
     { name = "aiohttp" },
     { name = "geopandas" },
     { name = "pandas" },
+    { name = "shapely" },
     { name = "tqdm" },
 ]
 
@@ -474,10 +475,11 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.0.0" },
     { name = "pandas-stubs", marker = "extra == 'dev'", specifier = ">=2.0.0" },
     { name = "pre-commit", marker = "extra == 'test'", specifier = "==3.*" },
-    { name = "pytest", marker = "extra == 'test'", specifier = "==8.*" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=8,<10" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = "==0.24.*" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = "==5.*" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.9.5" },
+    { name = "shapely", specifier = ">=2.0.0" },
     { name = "tqdm", specifier = ">=4.66.5" },
 ]
 provides-extras = ["test", "dev"]

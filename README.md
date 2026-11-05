@@ -102,6 +102,7 @@ flowchart TB
     subgraph Provincies["Provincies Noord-Holland en Drenthe"]
         V1["Monumentvlak<br>ArcGIS REST (GeoJSON)"]
         V2["categorie (NH) /<br>nummer, naam, status (DR)"]
+        V3["Provinciegrens<br>PDOK Bestuurlijke Gebieden"]
     end
 
     %% ========================
@@ -173,6 +174,7 @@ flowchart TB
 
     %% Provincies (alleen bevraagd als een adrespunt in NH of DR ligt)
     K2 --> P4
+    V3 -->|"welke adressen kandidaat zijn"| P4
     V1 --> P4
     V2 -->|"filter en omschrijving"| P4
 
@@ -239,6 +241,8 @@ Alle beperkingen van de RCE (grondslagcodes EWE en EWD) zijn met type `BRK` vast
 | **Kadaster KKG** | `https://data.kkg.kadaster.nl/service/sparql`                        |
 | **RCE**          | `https://api.linkeddata.cultureelerfgoed.nl/datasets/rce/cho/sparql` |
 
+De provinciale services staan hieronder bij [Provinciale monumenten](#provinciale-monumenten). De provinciegrenzen komen van PDOK Bestuurlijke Gebieden (`https://service.pdok.nl/kadaster/bestuurlijkegebieden/wfs/v1_0`, laag `Provinciegebied`, licentie CC BY 4.0).
+
 ### Retry-gedrag
 
 Aanroepen naar Kadaster (BAG LV, KKG) en RCE gebruiken een gedeelde retry-logica: maximaal 2 pogingen per request, bij mislukking 3 seconden wachten. Alleen tijdelijke fouten worden herhaald (HTTP 429, 500, 502, 503, 504 en netwerk-/verbindingsfouten); permanente 4xx worden direct doorgegeven. Faalt een aanroep na retries, dan wordt de set IDs/URIs in tweeën gedeeld en elk deel opnieuw geprobeerd (recursief, per API, tot min. 1 ID of max. splitdiepte 10); definitief falende aanroepen worden overgeslagen met een waarschuwing.
@@ -259,7 +263,24 @@ Keuzes en beperkingen:
 - **Dijken tellen niet mee.** Bij de Noord-Hollandse categorie _Keringselementen_ is de dijk zelf het monument, niet de bebouwing erop. Zonder dit filter kregen bijvoorbeeld 173 vakantiehuisjes op de Zeedijk bij Uitdam onterecht de status. Ook archeologische terreinen en het provinciaal beschermd dorpsgezicht Barsingerhorn tellen niet mee: een pand wordt geen monument doordat het in een beschermd gebied ligt. Een onbekende categorie of status wordt genegeerd met een waarschuwing in de log.
 - **Alleen aangewezen monumenten.** Een voorbeschermd object (voornemen tot aanwijzing) telt niet mee, in lijn met het Besluit huurprijzen woonruimte, dat spreekt van een "door gedeputeerde staten aangewezen provinciaal monument".
 - **Nauwkeurigheid.** Van de gebouwde monumenten in het Noord-Hollandse erfgoedregister (juli 2025) wordt ongeveer 91% gevonden. Gemist worden vooral objecten _bij_ een adres (een grenspaal, seinmast of hek) en een monumentaal bijgebouw op hetzelfde erf als het adres: die krijgen `False`. Andersom kan een nieuw gebouw op een monumentaal terrein (bijvoorbeeld een fort van de Stelling van Amsterdam) onterecht `True` krijgen; controleer twijfelgevallen aan de hand van de omschrijving. Een marge rond de vlakken is bewust niet toegepast: die leverde vrijwel alleen buurpanden op.
-- **Geen download buiten Noord-Holland en Drenthe.** De service van een provincie wordt alleen opgehaald (en 7 dagen gecachet) als een adrespunt binnen een ruime rechthoek om die provincie ligt. Mislukt het ophalen na retries, dan stopt de hele aanroep met een `ProvincialeMonumentenError`; de status wordt dus nooit stilzwijgend `False` voor een hele provincie.
+- **Geen download buiten Noord-Holland en Drenthe.** Ligt geen enkel adrespunt binnen een ruime rechthoek om Noord-Holland of Drenthe, dan volgt er geen extra request. Anders haalt de package de provinciegrenzen op bij PDOK (7 dagen gecachet). Een adres is _kandidaat_ voor een provincie als het in de rechthoek ligt én binnen de grens, met een marge van 100 m. Die marge vangt kleine verschillen tussen de datasets op: enkele Drentse monumentvlakken steken tot 1,3 m buiten de grens van PDOK. Alleen provincies met kandidaten worden gedownload (7 dagen gecachet). Zijn de grenzen niet op te halen, dan is elk adres in de rechthoek kandidaat.
+- **Uitval van een provincie.** Mislukt het ophalen van een provincie na retries, dan gaat de rest van de aanroep gewoon door. Alleen haar kandidaten krijgen dan `<NA>` in plaats van `False`, zodat de status nooit stilzwijgend `False` wordt:
+
+  | Adres ligt in                               | Service werkt     | Service valt uit |
+  | ------------------------------------------- | ----------------- | ---------------- |
+  | een provincie zonder provinciale monumenten | `False`           | `False`          |
+  | Noord-Holland of Drenthe                    | `True` of `False` | `<NA>`           |
+
+  De kolom `provinciaal_monument` is daarom een nullable boolean. Bij `<NA>` volgt een `MonumentStatusOnbepaaldWarning`; het attribuut `verblijfsobject_ids` geeft per provincie de betrokken verblijfsobject ID's. In `process_from_list` is de status dan `None`, en in VERA-referentiedataformaat is de hele value `None` in plaats van een lijst, omdat die lijst onvolledig zou zijn. Wie liever een fout krijgt, zet de waarschuwing om:
+
+  ```python
+  import warnings
+
+  from monumenten import MonumentStatusOnbepaaldWarning
+
+  warnings.simplefilter("error", MonumentStatusOnbepaaldWarning)
+  ```
+
 - **Combinaties.** Volgens de provinciale verordeningen kan een object niet tegelijk rijks- of gemeentelijk én provinciaal monument zijn. De package dwingt dat niet af, omdat de Kadaster-statussen per perceel gelden en dus ook buurgebouwen kunnen raken.
 
 ## Tutorial
