@@ -293,10 +293,42 @@ async def _query_beperkingen(
     session: aiohttp.ClientSession,
     adrespunten: _Adrespunten,
     uitval: Bronuitval,
-    *,
-    _depth: int = 0,
 ) -> List[Dict[str, Any]]:
     """Stage 2: query BRK-PB for the beperkingen at the given adrespunten.
+
+    Eerst gaan alle requests de deur uit (zie _vraag_beperkingen), daarna wordt per
+    request bepaald binnen welke beperkingen de adrespunten liggen. Een fout bij dat
+    koppelen is geen uitval van de BRK-PB, die wel antwoord gaf: zij bereikt de
+    aanroeper, die de batch als mislukte verwerking vastlegt. Pas koppelen als alle
+    requests klaar zijn, voorkomt dat een request na zo'n fout nog ongezien doorloopt.
+
+    Args:
+        session (aiohttp.ClientSession): De sessie voor HTTP requests
+        adrespunten (_Adrespunten): Adrespunt (x, y in RD) per verblijfsobject ID
+        uitval (Bronuitval): Hierin legt de BRK-PB vast voor welke verblijfsobjecten
+            zij wel en geen antwoord gaf
+
+    Returns:
+        List[Dict[str, Any]]: Eén rij per verblijfsobject en beperking, en één rij
+            zonder grondslag voor een verblijfsobject zonder beperking. Zonder
+            antwoord van de BRK-PB volgen er voor een verblijfsobject geen rijen.
+    """
+    antwoorden = await _vraag_beperkingen(session, adrespunten, uitval)
+    return [
+        rij
+        for punten, beperkingen in antwoorden
+        for rij in _koppel_beperkingen(punten, beperkingen)
+    ]
+
+
+async def _vraag_beperkingen(
+    session: aiohttp.ClientSession,
+    adrespunten: _Adrespunten,
+    uitval: Bronuitval,
+    *,
+    _depth: int = 0,
+) -> List[Tuple[_Adrespunten, List[Dict[str, Any]]]]:
+    """Vraag de BRK-PB om de beperkingen bij de adrespunten.
 
     De BRK-PB WFS doorzoekt de omhullende rechthoek van alle adrespunten in een request
     en wordt traag als die groot is. Opeenvolgende adrespunten horen daarom bij elkaar
@@ -307,7 +339,8 @@ async def _query_beperkingen(
     behalve bij een rate limit (429): splitsen levert dan alleen meer requests op.
     Is de BRK-PB gestoord, dan wordt de request overgeslagen (zie Bronuitval).
     In uitval wordt vastgelegd voor welke verblijfsobjecten de BRK-PB wel en geen
-    antwoord gaf. Zonder antwoord volgen er geen beperkingen.
+    antwoord gaf. Geeft per beantwoorde request de adrespunten en de GeoJSON features
+    die de BRK-PB teruggaf.
     """
     if not adrespunten:
         return []
@@ -316,13 +349,13 @@ async def _query_beperkingen(
     if len(punten) > _MAX_PER_BRK_PB_REQUEST:
         delen = await asyncio.gather(
             *(
-                _query_beperkingen(
+                _vraag_beperkingen(
                     session, dict(punten[i : i + _MAX_PER_BRK_PB_REQUEST]), uitval
                 )
                 for i in range(0, len(punten), _MAX_PER_BRK_PB_REQUEST)
             )
         )
-        return [rij for deel in delen for rij in deel]
+        return [antwoord for deel in delen for antwoord in deel]
 
     xs, ys = zip(*adrespunten.values())
     omhullende_km2 = (max(xs) - min(xs)) * (max(ys) - min(ys)) / 1e6
@@ -334,8 +367,8 @@ async def _query_beperkingen(
             key=lambda i: math.dist(punten[i - 1][1], punten[i][1]),
         )
         left, right = await asyncio.gather(
-            _query_beperkingen(session, dict(punten[:sprong]), uitval),
-            _query_beperkingen(session, dict(punten[sprong:]), uitval),
+            _vraag_beperkingen(session, dict(punten[:sprong]), uitval),
+            _vraag_beperkingen(session, dict(punten[sprong:]), uitval),
         )
         return left + right
 
@@ -364,15 +397,6 @@ async def _query_beperkingen(
                 len(adrespunten),
             )
             raise RuntimeError("BRK-PB response is afgekapt")
-
-        if _depth > 0:
-            logger.info(
-                "BRK-PB query geslaagd na splitsing (depth %d)",
-                _depth,
-            )
-        rijen = _koppel_beperkingen(adrespunten, beperkingen)
-        uitval.registreer_antwoord(BRK_PB, len(adrespunten))
-        return rijen
     except Exception as e:
         uitval.registreer_mislukte_request(BRK_PB, e)
         if (
@@ -388,10 +412,10 @@ async def _query_beperkingen(
                 len(punten) - mid,
                 _depth + 1,
             )
-            left = await _query_beperkingen(
+            left = await _vraag_beperkingen(
                 session, dict(punten[:mid]), uitval, _depth=_depth + 1
             )
-            right = await _query_beperkingen(
+            right = await _vraag_beperkingen(
                 session, dict(punten[mid:]), uitval, _depth=_depth + 1
             )
             return left + right
@@ -401,6 +425,14 @@ async def _query_beperkingen(
         )
         uitval.registreer_fout(BRK_PB, adrespunten, e)
         return []
+
+    if _depth > 0:
+        logger.info(
+            "BRK-PB query geslaagd na splitsing (depth %d)",
+            _depth,
+        )
+    uitval.registreer_antwoord(BRK_PB, len(adrespunten))
+    return [(adrespunten, beperkingen)]
 
 
 async def _query_adrespunten(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import aiohttp
 import geopandas as gpd
@@ -33,7 +33,8 @@ from monumenten._api._provincies import (
     _query_provinciale_monumenten,
     _query_provinciegrenzen,
 )
-from monumenten._bronfouten import BAG, RCE, VERWERKING, Bronuitval
+from monumenten._api._backoff import MAX_CONSECUTIVE_FAILURES
+from monumenten._bronfouten import BAG, BRK_PB, RCE, VERWERKING, Bronuitval
 
 logger = logging.getLogger("monumenten.processing")
 
@@ -61,7 +62,25 @@ _WGS84 = "EPSG:4326"
 _GRENS_BUFFER_METER = 100
 
 
-_BatchFrames = Tuple[DataFrame, DataFrame, DataFrame]
+# Alle grondslagcodes waar een status van afhangt; andere beperkingen vallen per batch
+# al weg, zodat bij miljoenen verblijfsobjecten alleen deze rijen bewaard blijven
+_RELEVANTE_GRONDSLAGCODES = (
+    _RIJKSMONUMENT_GRONDSLAGCODES
+    + _VOORBESCHERMING_GRONDSLAGCODES
+    + _GEMEENTELIJK_GRONDSLAGCODES
+)
+
+_RCE_KOLOMMEN = ["identificatie", "rijksmonument_nummer"]
+_BEPERKING_KOLOMMEN = [
+    "identificatie",
+    "grondslagcode",
+    "grondslag_gemeentelijk_monument",
+]
+
+# De antwoorden van de RCE en de BRK-PB voor een batch. De statussen worden pas na
+# de herkansing afgeleid, uit de antwoorden van alle batches: zo hoeft de herkansing
+# alleen de bron opnieuw te bevragen die geen antwoord gaf.
+_BatchAntwoorden = Tuple[DataFrame, DataFrame]
 
 _RESULTAAT_KOLOMMEN = [
     "identificatie",
@@ -74,20 +93,17 @@ _RESULTAAT_KOLOMMEN = [
 ]
 
 
-def _lege_batch_frames() -> _BatchFrames:
-    """Lege resultaatframes voor een batch, in de volgorde van _process_batch."""
-    return (
-        pd.DataFrame(
-            columns=[
-                "identificatie",
-                "rijksmonument_nummer",
-                "rijksmonument_bron",
-                "rijksmonument_voorbescherming",
-            ]
-        ),
-        pd.DataFrame(columns=["identificatie", "rijksbeschermd_gezicht_naam"]),
-        pd.DataFrame(columns=["identificatie", "grondslag_gemeentelijk_monument"]),
+def _rce_frame(rijksmonumenten: List[Dict[str, Any]]) -> DataFrame:
+    return pd.DataFrame(rijksmonumenten, columns=_RCE_KOLOMMEN, dtype="string")
+
+
+def _beperkingen_frame(beperkingen: List[Dict[str, Any]]) -> DataFrame:
+    beperkingen_df = pd.DataFrame(beperkingen, columns=_BEPERKING_KOLOMMEN).astype(
+        {"identificatie": "string"}
     )
+    return beperkingen_df[
+        beperkingen_df["grondslagcode"].isin(_RELEVANTE_GRONDSLAGCODES)
+    ].reset_index(drop=True)
 
 
 def _lege_provinciale_monumenten() -> DataFrame:
@@ -97,33 +113,28 @@ def _lege_provinciale_monumenten() -> DataFrame:
 
 async def _process_batch(
     session: aiohttp.ClientSession,
-    batch: List[str],
-    beschermde_gezichten_df: gpd.GeoDataFrame,
-    adrespunten: _Adrespunten,
+    rce_ids: List[str],
+    brk_pb_adrespunten: _Adrespunten,
     uitval: Bronuitval,
-) -> _BatchFrames:
-    """Verwerk een batch verblijfsobjecten.
+) -> _BatchAntwoorden:
+    """Bevraag de RCE en de BRK-PB voor een batch verblijfsobjecten.
 
     Args:
         session (aiohttp.ClientSession): De sessie voor HTTP requests
-        batch (List[str]): Lijst met verblijfsobject ID's
-        beschermde_gezichten_df (gpd.GeoDataFrame): GeoDataFrame met beschermde gezichten
-        adrespunten (_Adrespunten): Adrespunt per verblijfsobject ID uit de BAG
+        rce_ids (List[str]): De verblijfsobject ID's voor de RCE
+        brk_pb_adrespunten (_Adrespunten): De adrespunten voor de BRK-PB
         uitval (Bronuitval): Hierin leggen de bronnen vast voor welke
             verblijfsobjecten zij wel en geen antwoord gaven
 
     Returns:
-        _BatchFrames: Tuple met rijksmonumenten, beschermde gezichten en
-            gemeentelijke monumenten. De provinciale monumenten worden na alle
-            batches bepaald, uit alle adrespunten.
+        _BatchAntwoorden: De rijksmonumenten van de RCE en de beperkingen van de
+            BRK-PB met een grondslagcode waar een status van afhangt
     """
-    batch_adrespunten = {i: adrespunten[i] for i in batch if i in adrespunten}
-
     rijksmonumenten_taak = asyncio.create_task(
-        _query_rijksmonumenten(session, batch, uitval)
+        _query_rijksmonumenten(session, rce_ids, uitval)
     )
     beperkingen_taak = asyncio.create_task(
-        _query_beperkingen(session, batch_adrespunten, uitval)
+        _query_beperkingen(session, brk_pb_adrespunten, uitval)
     )
     try:
         rijksmonumenten, beperkingen = await asyncio.gather(
@@ -135,20 +146,24 @@ async def _process_batch(
         # herkansing, nog antwoorden en fouten in uitval kunnen vastleggen.
         rijksmonumenten_taak.cancel()
         beperkingen_taak.cancel()
+    return _rce_frame(rijksmonumenten), _beperkingen_frame(beperkingen)
 
-    # Geen vroege return als de beperkingen leeg zijn: de RCE-query heeft geen
-    # adrespunt nodig, en het beschermd gezicht volgt uit het adrespunt zelf.
-    beperkingen_df = pd.DataFrame(
-        beperkingen,
-        columns=["identificatie", "grondslagcode", "grondslag_gemeentelijk_monument"],
-    ).astype({"identificatie": "string"})
 
+def _bepaal_rijks_en_gemeentelijke_monumenten(
+    rce_df: DataFrame, beperkingen_df: DataFrame
+) -> Tuple[DataFrame, DataFrame]:
+    """Leid de rijks- en gemeentelijke monumenten af uit de antwoorden.
+
+    Args:
+        rce_df (DataFrame): De rijksmonumenten van de RCE
+        beperkingen_df (DataFrame): De beperkingen van de BRK-PB
+
+    Returns:
+        Tuple[DataFrame, DataFrame]: De rijksmonumenten (met bron en voorbescherming)
+            en de gemeentelijke monumenten
+    """
     rijksmonumenten_df = pd.merge(
-        pd.DataFrame(
-            rijksmonumenten,
-            columns=["identificatie", "rijksmonument_nummer"],
-            dtype="string",
-        ),
+        rce_df,
         beperkingen_df[
             beperkingen_df["grondslagcode"].isin(_RIJKSMONUMENT_GRONDSLAGCODES)
         ][["identificatie", "grondslagcode"]],
@@ -198,32 +213,38 @@ async def _process_batch(
         "rijksmonument_voorbescherming"
     ].eq(True)
 
-    # Process gemeentelijke monumenten
     gemeentelijke_monumenten_df = beperkingen_df[
         beperkingen_df["grondslagcode"].isin(_GEMEENTELIJK_GRONDSLAGCODES)
     ][["identificatie", "grondslag_gemeentelijk_monument"]]
 
-    # Process beschermde gezichten
-    xs = [x for x, _ in batch_adrespunten.values()]
-    ys = [y for _, y in batch_adrespunten.values()]
-    geo_df = gpd.GeoDataFrame(
-        {"identificatie": pd.Series(list(batch_adrespunten), dtype="string")},
+    return rijksmonumenten_df, gemeentelijke_monumenten_df
+
+
+def _bepaal_beschermde_gezichten(
+    adrespunten: _Adrespunten, beschermde_gezichten_df: gpd.GeoDataFrame
+) -> DataFrame:
+    """Bepaal welke adrespunten in een rijksbeschermd gezicht liggen.
+
+    Args:
+        adrespunten (_Adrespunten): Adrespunt (RD) per verblijfsobject ID uit de BAG
+        beschermde_gezichten_df (gpd.GeoDataFrame): De beschermde gezichten (RD)
+
+    Returns:
+        DataFrame: Eén rij per verblijfsobject en gezicht waarin het ligt
+    """
+    if not adrespunten:
+        return pd.DataFrame(columns=["identificatie", "rijksbeschermd_gezicht_naam"])
+    xs, ys = zip(*adrespunten.values())
+    punten = gpd.GeoDataFrame(
+        {"identificatie": pd.Series(list(adrespunten), dtype="string")},
         geometry=gpd.points_from_xy(xs, ys),
         crs=_RD,
     )
-
-    # Find objects within beschermde gezichten
-    verblijfsobjecten_in_beschermde_gezichten_df = gpd.sjoin(
-        geo_df,
-        beschermde_gezichten_df,
-        how="left",
-        predicate="within",
-    )[["identificatie", "rijksbeschermd_gezicht_naam"]]
-
-    return (
-        rijksmonumenten_df,
-        verblijfsobjecten_in_beschermde_gezichten_df,
-        gemeentelijke_monumenten_df,
+    in_gezicht: DataFrame = gpd.sjoin(
+        punten, beschermde_gezichten_df, how="inner", predicate="within"
+    )
+    return in_gezicht[["identificatie", "rijksbeschermd_gezicht_naam"]].reset_index(
+        drop=True
     )
 
 
@@ -477,18 +498,23 @@ def _sorteer_ruimtelijk(
     )
 
 
-def _zonder(result: _BatchFrames, verblijfsobject_ids: Set[str]) -> _BatchFrames:
-    """Laat uit een batchresultaat de rijen van de gegeven verblijfsobjecten weg."""
-    rijksmonumenten, beschermde_gezichten, gemeentelijke_monumenten = result
-    return (
-        rijksmonumenten[~rijksmonumenten["identificatie"].isin(verblijfsobject_ids)],
-        beschermde_gezichten[
-            ~beschermde_gezichten["identificatie"].isin(verblijfsobject_ids)
-        ],
-        gemeentelijke_monumenten[
-            ~gemeentelijke_monumenten["identificatie"].isin(verblijfsobject_ids)
-        ],
-    )
+def _eerst_verspreid(batches: List[List[str]]) -> List[List[str]]:
+    """Zet MAX_CONSECUTIVE_FAILURES batches die over de hele aanroep verspreid
+    liggen vooraan.
+
+    Na de ruimtelijke sortering liggen opeenvolgende batches in hetzelfde gebied. Een
+    datafout die bij één gebied hoort, liet anders de eerste batches allemaal
+    mislukken, en dan geldt de verwerking als kansloos (zie Bronuitval). De batches
+    zelf blijven ruimtelijk bij elkaar; alleen de volgorde verandert.
+    """
+    if len(batches) <= MAX_CONSECUTIVE_FAILURES:
+        return batches
+    stap = (len(batches) - 1) / (MAX_CONSECUTIVE_FAILURES - 1)
+    eerst = sorted({round(nummer * stap) for nummer in range(MAX_CONSECUTIVE_FAILURES)})
+    eerst_set = set(eerst)
+    return [batches[i] for i in eerst] + [
+        batch for i, batch in enumerate(batches) if i not in eerst_set
+    ]
 
 
 async def _query(
@@ -502,11 +528,13 @@ async def _query(
     Mislukt de verwerking van een batch onverwacht, dan worden zijn statussen
     onbepaald, zodat één fout niet het werk van een hele aanroep weggooit.
     Verblijfsobjecten waarvoor een bron geen antwoord gaf krijgen aan het einde één
-    herkansing. De provinciale monumenten worden daarna in één stap bepaald.
+    herkansing, alleen bij die bron. Daarna worden de statussen in één keer afgeleid
+    uit de antwoorden van alle batches, en de beschermde gezichten en provinciale
+    monumenten uit alle adrespunten.
 
-    Gaf een bron voor geen enkel bevraagd verblijfsobject antwoord, dan volgt een
-    BronFoutError. Lukte de verwerking van geen enkele batch, dan bereikt de
-    oorspronkelijke fout de aanroeper.
+    Gaf een bron, ook na de herkansing, voor geen enkel bevraagd verblijfsobject
+    antwoord, dan volgt een BronFoutError. Lukte de verwerking van geen enkele batch,
+    dan bereikt de oorspronkelijke fout de aanroeper.
 
     Args:
         session (aiohttp.ClientSession): De sessie voor HTTP requests
@@ -522,7 +550,7 @@ async def _query(
     uitval = Bronuitval()
 
     # Eerst alle adrespunten ophalen: de BRK-PB heeft ze nodig, en de batches worden
-    # erop gesorteerd. Zonder de BAG valt er verder niets te bepalen.
+    # erop gesorteerd. Ligt de BAG plat, dan valt er verder niets te bepalen.
     with tqdm_asyncio(
         total=len(verblijfsobject_ids),
         desc="Adrespunten (BAG)",
@@ -531,38 +559,32 @@ async def _query(
         adrespunten = await _query_adrespunten(
             session, verblijfsobject_ids, uitval, voortgang=bag_voortgang.update
         )
-    uitval.controleer()
-
-    # Verblijfsobjecten waarvoor de BAG geen antwoord gaf, krijgen een herkansing en
-    # anders pd.NA; alleen de rest staat echt niet in de BAG.
-    bag_mislukt = uitval.mislukt.get(BAG, set())
-    zonder_adrespunt = sum(
-        1 for i in verblijfsobject_ids if i not in adrespunten and i not in bag_mislukt
-    )
-    if zonder_adrespunt:
-        logger.warning(
-            "%d van %d verblijfsobjecten hebben geen adrespunt uit de BAG; die krijgen "
-            "geen Kadaster-beperking, geen beschermd gezicht en geen provinciaal monument",
-            zonder_adrespunt,
-            len(verblijfsobject_ids),
-        )
+    uitval.controleer_tussentijds()
 
     batch_semaphore = asyncio.Semaphore(_BATCH_CONCURRENCY)
     # De traceback van een onverwachte fout één keer per fouttype loggen, niet voor
     # elke batch opnieuw
     gelogde_fouttypes: Set[type] = set()
 
-    async def _verwerk_batch(batch: List[str]) -> Optional[_BatchFrames]:
+    async def _verwerk_batch(
+        batch: List[str], rce: Optional[Set[str]], brk_pb: Optional[Set[str]]
+    ) -> Optional[_BatchAntwoorden]:
         # Ligt een bron plat, dan kan de aanroep niet meer slagen: bevraag ook de
         # andere bronnen niet meer. Hetzelfde geldt als de verwerking kansloos is.
-        # uitval.controleer() geeft daarna de fout.
+        # uitval.controleer_tussentijds() geeft daarna de fout.
         if uitval.sla_over_als_bron_plat_ligt(
             batch
         ) or uitval.sla_over_als_verwerking_kansloos(batch):
             return None
+        rce_ids = batch if rce is None else [i for i in batch if i in rce]
+        brk_pb_adrespunten = {
+            i: adrespunten[i]
+            for i in batch
+            if i in adrespunten and (brk_pb is None or i in brk_pb)
+        }
         try:
-            result = await _process_batch(
-                session, batch, beschermde_gezichten_df, adrespunten, uitval
+            antwoorden = await _process_batch(
+                session, rce_ids, brk_pb_adrespunten, uitval
             )
         except Exception as fout:
             # Niet stil overslaan: dan kreeg de batch overal False. Uitval van een
@@ -579,16 +601,22 @@ async def _query(
             uitval.registreer_mislukte_verwerking(batch, fout)
             return None
         uitval.registreer_antwoord(VERWERKING, len(batch))
-        return result
+        return antwoorden
 
-    async def _verwerk(batches: List[List[str]], fase: str) -> List[_BatchFrames]:
-        resultaten: List[_BatchFrames] = []
+    async def _verwerk(
+        batches: List[List[str]],
+        fase: str,
+        rce: Optional[Set[str]] = None,
+        brk_pb: Optional[Set[str]] = None,
+    ) -> List[_BatchAntwoorden]:
+        """Verwerk de batches; rce en brk_pb beperken zo nodig wie welke bron krijgt."""
+        resultaten: List[_BatchAntwoorden] = []
         onvolledig = 0
 
         async def _run_batch(batch: List[str]) -> None:
             nonlocal onvolledig
             async with batch_semaphore:
-                result = await _verwerk_batch(batch)
+                result = await _verwerk_batch(batch, rce, brk_pb)
             if result is not None:
                 resultaten.append(result)
             # Ook een mislukte of overgeslagen batch is afgehandeld: de balk loopt vol,
@@ -610,62 +638,104 @@ async def _query(
         return resultaten
 
     async def _proefrequest(bron: str, verblijfsobject_id: str) -> None:
-        if bron == RCE:
-            await _query_rijksmonumenten(session, [verblijfsobject_id], uitval)
-        elif bron == BAG:
-            await _query_adrespunten(session, [verblijfsobject_id], uitval)
-        else:
-            await _query_beperkingen(
-                session, {verblijfsobject_id: adrespunten[verblijfsobject_id]}, uitval
+        try:
+            if bron == RCE:
+                await _query_rijksmonumenten(session, [verblijfsobject_id], uitval)
+            elif bron == BAG:
+                await _query_adrespunten(session, [verblijfsobject_id], uitval)
+            else:
+                await _query_beperkingen(
+                    session,
+                    {verblijfsobject_id: adrespunten[verblijfsobject_id]},
+                    uitval,
+                )
+        except Exception as fout:
+            # Bijvoorbeeld een fout bij het koppelen van de beperkingen. De bron gaf
+            # dan wel antwoord; het verblijfsobject blijft onbeantwoord en krijgt de
+            # herkansing.
+            logger.warning(
+                "Proefrequest voor %s mislukt (%s: %s)", bron, type(fout).__name__, fout
             )
 
-    results_list = await _verwerk(
-        _in_batches(_sorteer_ruimtelijk(verblijfsobject_ids, adrespunten)),
+    antwoorden = await _verwerk(
+        _eerst_verspreid(
+            _in_batches(_sorteer_ruimtelijk(verblijfsobject_ids, adrespunten))
+        ),
         "Monumentstatus",
     )
-    uitval.controleer()
+    uitval.controleer_tussentijds()
 
     # Herkansing: een bron die halverwege haperde geeft aan het einde vaak weer
-    # antwoord. De verblijfsobjecten zonder antwoord worden daarom één keer opnieuw
-    # verwerkt; hun eerdere, onvolledige rijen vervallen.
+    # antwoord. Wie geen antwoord kreeg, wordt daarom één keer opnieuw bevraagd, en
+    # alleen bij de bron die geen antwoord gaf: wat de andere bronnen al antwoordden,
+    # blijft staan. Een mislukte verwerking krijgt beide bronnen opnieuw.
     if uitval.mislukt:
         # Een bron die nog gestoord is krijgt eerst één proefrequest voor één
-        # verblijfsobject. Blijft zij gestoord, dan heeft opnieuw verwerken geen zin.
+        # verblijfsobject. Blijft zij gestoord, dan heeft opnieuw bevragen geen zin.
         await uitval.wacht_op_proefrequest()
         for bron in uitval.gestoorde_bronnen():
             await _proefrequest(bron, next(iter(uitval.mislukt[bron])))
-        opnieuw = uitval.herkansbaar()
+        herkansing = uitval.herkansbaar()
+        verwerking = herkansing.get(VERWERKING, set())
+        bag = herkansing.get(BAG, set())
+        if bag:
+            uitval.vergeet(BAG, bag)
+            adrespunten.update(
+                await _query_adrespunten(
+                    session, [i for i in verblijfsobject_ids if i in bag], uitval
+                )
+            )
+        rce = herkansing.get(RCE, set()) | verwerking
+        # Een adrespunt dat de BAG pas nu gaf, gaat ook naar de BRK-PB
+        brk_pb = {
+            i
+            for i in herkansing.get(BRK_PB, set()) | verwerking | bag
+            if i in adrespunten
+        }
+        # Alleen wissen wat opnieuw wordt bevraagd: de rest zou anders stil False
+        # krijgen
+        uitval.vergeet(VERWERKING, verwerking)
+        uitval.vergeet(RCE, rce)
+        uitval.vergeet(BRK_PB, brk_pb)
+        opnieuw = [i for i in verblijfsobject_ids if i in rce or i in brk_pb]
         if opnieuw:
             logger.info(
                 "Herkansing voor %d verblijfsobjecten waarvoor een bron geen antwoord gaf",
                 len(opnieuw),
             )
-            bag_mislukt = uitval.mislukt.get(BAG, set())
-            zonder_bag_antwoord = [i for i in opnieuw if i in bag_mislukt]
-            uitval.vergeet(opnieuw)
-            adrespunten.update(
-                await _query_adrespunten(session, zonder_bag_antwoord, uitval)
+            antwoorden += await _verwerk(
+                _in_batches(_sorteer_ruimtelijk(opnieuw, adrespunten)),
+                "Herkansing",
+                rce=rce,
+                brk_pb=brk_pb,
             )
-            herkansing = await _verwerk(
-                _in_batches(_sorteer_ruimtelijk(opnieuw, adrespunten)), "Herkansing"
-            )
-            # Eén set voor alle batches: bij miljoenen verblijfsobjecten telt dat
-            opnieuw_set = set(opnieuw)
-            results_list = [_zonder(r, opnieuw_set) for r in results_list] + herkansing
-            uitval.controleer()
+    uitval.controleer()
 
-    # Per monumenttype de frames van alle batches samenvoegen
-    lege_rm, lege_bg, lege_gm = _lege_batch_frames()
-    rijksmonumenten_result = _voeg_frames_samen([r[0] for r in results_list], lege_rm)
-    verblijfsobjecten_in_beschermd_gezicht_result = _voeg_frames_samen(
-        [r[1] for r in results_list], lege_bg
+    # Na de herkansing: pas dan is bekend welke verblijfsobjecten echt niet in de
+    # BAG staan. Voor wie de BAG geen antwoord gaf volgt pd.NA en de waarschuwing.
+    bag_mislukt = uitval.mislukt.get(BAG, set())
+    zonder_adrespunt = sum(
+        1 for i in verblijfsobject_ids if i not in adrespunten and i not in bag_mislukt
     )
-    gemeentelijke_monumenten_result = _voeg_frames_samen(
-        [r[2] for r in results_list], lege_gm
-    )
+    if zonder_adrespunt:
+        logger.warning(
+            "%d van %d verblijfsobjecten hebben geen adrespunt uit de BAG; die krijgen "
+            "geen Kadaster-beperking, geen beschermd gezicht en geen provinciaal monument",
+            zonder_adrespunt,
+            len(verblijfsobject_ids),
+        )
 
+    rijksmonumenten_result, gemeentelijke_monumenten_result = (
+        _bepaal_rijks_en_gemeentelijke_monumenten(
+            _voeg_frames_samen([a[0] for a in antwoorden], _rce_frame([])),
+            _voeg_frames_samen([a[1] for a in antwoorden], _beperkingen_frame([])),
+        )
+    )
     # Uit alle adrespunten en niet per batch, na de herkansing: dan zijn ook de
     # adrespunten bekend die de BAG pas in de herkansing gaf
+    verblijfsobjecten_in_beschermd_gezicht_result = _bepaal_beschermde_gezichten(
+        adrespunten, beschermde_gezichten_df
+    )
     provinciale_monumenten_result = await _bepaal_provinciale_monumenten(
         session, adrespunten, uitval
     )
@@ -681,9 +751,9 @@ async def _query(
     ):
         return pd.DataFrame(columns=_RESULTAAT_KOLOMMEN), uitval
 
-    # The filtering in _process_batch already separates the data correctly:
-    # - EWE rows go to rijksmonumenten_df (EWD only sets rijksmonument_voorbescherming)
-    # - GG/GWA rows go to gemeentelijke_monumenten_df
+    # The derivation already separates the data correctly:
+    # - EWE rows go to rijksmonumenten (EWD only sets rijksmonument_voorbescherming)
+    # - GG/GWA rows go to gemeentelijke monumenten
     # We only remove truly duplicate rows (all columns identical) to preserve unique information
 
     if not rijksmonumenten_result.empty:

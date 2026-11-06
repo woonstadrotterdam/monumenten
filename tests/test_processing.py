@@ -50,8 +50,13 @@ from monumenten._processing import (
     _bepaal_provinciale_monumenten,
     _get_beschermde_gezichten,
     _get_provinciegrenzen,
+    _bepaal_beschermde_gezichten,
+    _bepaal_rijks_en_gemeentelijke_monumenten,
+    _eerst_verspreid,
+    _beperkingen_frame,
     _process_batch,
     _query,
+    _rce_frame,
 )
 from monumenten.client import MonumentenClient
 
@@ -59,16 +64,13 @@ _RD = "EPSG:28992"
 
 
 def _make_batch_result(identificaties):
-    """Minimal valid (rm, beschermd_gezicht, gemeentelijk) frames."""
-    ids_df = pd.DataFrame({"identificatie": list(identificaties)})
-    rm = ids_df.assign(
-        rijksmonument_nummer="",
-        rijksmonument_bron=None,
-        rijksmonument_voorbescherming=False,
+    """Answers of a batch in which the RCE knows every ID as a rijksmonument."""
+    return (
+        _rce_frame(
+            [{"identificatie": i, "rijksmonument_nummer": "1"} for i in identificaties]
+        ),
+        _beperkingen_frame([]),
     )
-    bg = ids_df.assign(rijksbeschermd_gezicht_naam=pd.NA)
-    gm = ids_df.assign(grondslag_gemeentelijk_monument=pd.NA)
-    return (rm, bg, gm)
 
 
 @pytest.fixture
@@ -111,7 +113,7 @@ async def test_query_success(empty_geodataframe):
     """_query returns merged result when _process_batch succeeds."""
     ids = ["id1", "id2", "id3"]
 
-    async def mock_process_batch(session, batch, bg_df, adrespunten, uitval):
+    async def mock_process_batch(session, batch, brk_pb_adrespunten, uitval):
         return _make_batch_result(batch)
 
     with (
@@ -145,7 +147,7 @@ async def test_query_batch_failure_is_not_swallowed(empty_geodataframe):
     instead of an empty result (which would read as "no monument")."""
     ids = ["only_one"]
 
-    async def mock_process_batch(session, batch, bg_df, adrespunten, uitval):
+    async def mock_process_batch(session, batch, brk_pb_adrespunten, uitval):
         raise RuntimeError("always fail")
 
     with (
@@ -172,7 +174,7 @@ async def test_query_sorteert_batches_ruimtelijk(empty_geodataframe):
     }
     batches = []
 
-    async def mock_process_batch(session, batch, bg_df, adrespunten, uitval):
+    async def mock_process_batch(session, batch, brk_pb_adrespunten, uitval):
         batches.append(set(batch))
         return _make_batch_result(batch)
 
@@ -475,13 +477,12 @@ async def test_process_batch_zonder_adrespunten_houdt_rce_rijksmonumenten():
         ),
         patch("monumenten._processing._query_beperkingen", return_value=[]),
     ):
-        rijksmonumenten, gezichten, gemeentelijk = await _process_batch(
-            AsyncMock(),
-            ["ligplaats", "onbekend"],
-            _beschermde_gezichten("Gezicht", 0, 0, 10, 10),
-            {},
-            Bronuitval(),
+        rce_df, beperkingen_df = await _process_batch(
+            AsyncMock(), ["ligplaats", "onbekend"], {}, Bronuitval()
         )
+    rijksmonumenten, gemeentelijk = _bepaal_rijks_en_gemeentelijke_monumenten(
+        rce_df, beperkingen_df
+    )
 
     assert rijksmonumenten.to_dict("records") == [
         {
@@ -491,28 +492,20 @@ async def test_process_batch_zonder_adrespunten_houdt_rce_rijksmonumenten():
             "rijksmonument_voorbescherming": False,
         }
     ]
-    assert gezichten.empty
     assert gemeentelijk.empty
 
 
 @pytest.mark.asyncio
-async def test_process_batch_beschermd_gezicht_zonder_brk_pb():
-    """Faalt de BRK-PB voor een batch, dan volgt het beschermd gezicht nog uit het adrespunt."""
-    with (
-        patch("monumenten._processing._query_rijksmonumenten", return_value=[]),
-        patch("monumenten._processing._query_beperkingen", return_value=[]),
-    ):
-        _, gezichten, _ = await _process_batch(
-            AsyncMock(),
-            ["binnen", "buiten"],
-            _beschermde_gezichten("Gezicht", 0, 0, 10, 10),
-            {"binnen": (5.0, 5.0), "buiten": (15.0, 5.0)},
-            Bronuitval(),
-        )
+async def test_beschermd_gezicht_volgt_uit_het_adrespunt():
+    """Het beschermd gezicht volgt alleen uit het adrespunt, niet uit de BRK-PB."""
+    gezichten = _bepaal_beschermde_gezichten(
+        {"binnen": (5.0, 5.0), "buiten": (15.0, 5.0)},
+        _beschermde_gezichten("Gezicht", 0, 0, 10, 10),
+    )
 
-    assert dict(
-        zip(gezichten["identificatie"], gezichten["rijksbeschermd_gezicht_naam"])
-    ) == {"binnen": "Gezicht", "buiten": pytest.approx(float("nan"), nan_ok=True)}
+    assert gezichten.to_dict("records") == [
+        {"identificatie": "binnen", "rijksbeschermd_gezicht_naam": "Gezicht"}
+    ]
 
 
 @pytest.mark.asyncio
@@ -719,7 +712,7 @@ async def test_beperkingen_brk_pb_failure_is_registered_per_verblijfsobject():
 async def test_query_raises_when_source_fails_for_all_ids(empty_geodataframe):
     """A source that answers for no ID at all, over all batches, stops the call."""
 
-    async def mock_process_batch(session, batch, bg_df, adrespunten, uitval):
+    async def mock_process_batch(session, batch, brk_pb_adrespunten, uitval):
         uitval.registreer_antwoord(RCE, len(batch))
         uitval.registreer_fout(BRK_PB, batch, RuntimeError("503"))
         return _make_batch_result([])
@@ -748,12 +741,13 @@ async def test_query_returns_partial_failure(empty_geodataframe):
     retry at the end."""
     pogingen = Counter()
 
-    async def mock_process_batch(session, batch, bg_df, adrespunten, uitval):
-        pogingen[tuple(batch)] += 1
-        if batch == ["id1"]:
-            uitval.registreer_fout(BRK_PB, batch, RuntimeError("503"))
+    async def mock_process_batch(session, batch, brk_pb_adrespunten, uitval):
+        pogingen[(tuple(batch), tuple(brk_pb_adrespunten))] += 1
+        uitval.registreer_antwoord(RCE, len(batch))
+        if "id1" in brk_pb_adrespunten:
+            uitval.registreer_fout(BRK_PB, ["id1"], RuntimeError("503"))
             return _make_batch_result([])
-        uitval.registreer_antwoord(BRK_PB, len(batch))
+        uitval.registreer_antwoord(BRK_PB, len(brk_pb_adrespunten))
         return _make_batch_result(batch)
 
     with (
@@ -761,14 +755,22 @@ async def test_query_returns_partial_failure(empty_geodataframe):
             "monumenten._processing._get_beschermde_gezichten",
             return_value=empty_geodataframe,
         ),
-        patch("monumenten._processing._query_adrespunten", return_value={}),
+        patch(
+            "monumenten._processing._query_adrespunten",
+            return_value={"id1": (0.0, 0.0), "id2": (1.0, 1.0)},
+        ),
         patch("monumenten._processing._process_batch", side_effect=mock_process_batch),
         patch("monumenten._processing._QUERY_BATCH_GROOTTE", 1),
     ):
         async with aiohttp.ClientSession() as session:
             result, uitval = await _query(session, ["id1", "id2"])
 
-    assert pogingen == {("id1",): 2, ("id2",): 1}
+    # In de herkansing alleen de BRK-PB, niet opnieuw de RCE
+    assert pogingen == {
+        (("id1",), ("id1",)): 1,
+        (("id2",), ("id2",)): 1,
+        ((), ("id1",)): 1,
+    }
     assert list(result["identificatie"]) == ["id2"]
     assert list(uitval.mislukt) == [BRK_PB]
     assert list(uitval.mislukt[BRK_PB]) == ["id1"]
@@ -1199,10 +1201,10 @@ def test_retry_is_only_for_sources_that_are_not_down():
     uitval.registreer_fout(RCE, ["id2", "id3"], fout)
 
     assert uitval.gestoorde_bronnen() == [BRK_PB]
-    assert sorted(uitval.herkansbaar()) == ["id2", "id3"]
+    assert uitval.herkansbaar() == {RCE: {"id2", "id3"}}
 
-    uitval.vergeet(["id2", "id3"])
-    assert uitval.mislukt == {BRK_PB: {"id1"}}
+    uitval.vergeet(RCE, ["id2", "id3"])
+    assert uitval.mislukt == {BRK_PB: {"id1", "id2"}}
     assert uitval.laatste_fout[BRK_PB] is fout
 
 
@@ -1345,6 +1347,7 @@ def _counting_sources(fails, batch_grootte, kadaster_wacht=False):
             "monumenten._processing._sorteer_ruimtelijk",
             side_effect=lambda verblijfsobject_ids, adrespunten: verblijfsobject_ids,
         ),
+        patch("monumenten._processing._eerst_verspreid", side_effect=lambda b: b),
     ):
         yield session, requests
 
@@ -1401,7 +1404,8 @@ async def test_query_continues_without_a_source_that_goes_down_halfway():
     assert requests == {RCE: 20, BAG: 4, BRK_PB: 2 + MAX_CONSECUTIVE_FAILURES + 1}
     assert list(uitval.mislukt) == [BRK_PB]
     assert sorted(uitval.mislukt[BRK_PB]) == ids[2 * 16 :]
-    assert sorted(result["identificatie"]) == ids
+    # Geen bron kent een van deze verblijfsobjecten als monument
+    assert result.empty
     assert isinstance(uitval.waarschuwing(), MonumentStatusOnbepaaldWarning)
 
 
@@ -1424,8 +1428,9 @@ async def test_query_resumes_when_a_source_recovers():
 
     assert not uitval.is_gestoord(BRK_PB)
     assert uitval.mislukt == {}
-    assert sorted(result["identificatie"]) == ids
-    assert 20 < requests[RCE] <= 20 + _BATCH_CONCURRENCY
+    assert result.empty
+    # De RCE gaf overal antwoord en krijgt in de herkansing niets opnieuw
+    assert requests[RCE] == 20
     assert requests[BAG] == 4
 
 
@@ -1449,12 +1454,13 @@ async def test_query_retry_at_the_end_fills_what_a_short_outage_left_open(klok):
         result, uitval = await _query(session, ids)
 
     assert klok.nu - start == OUTAGE_PROBE_SECONDS
-    assert requests[RCE] == 20 + 18
+    # Alleen de BRK-PB krijgt de herkansing; de RCE gaf al overal antwoord
+    assert requests[RCE] == 20
     assert requests[BAG] == 4
     assert requests[BRK_PB] >= 2 + MAX_CONSECUTIVE_FAILURES + 1 + 18
     assert uitval.mislukt == {}
     assert uitval.waarschuwing() is None
-    assert sorted(result["identificatie"]) == ids
+    assert result.empty
 
 
 @pytest.mark.asyncio
@@ -1748,7 +1754,7 @@ async def test_query_mislukte_batch_bepaalt_provinciaal_monument_wel(
     """Geeft de RCE geen antwoord voor een batch, dan wordt het provinciale monument
     toch bepaald: de adrespunten zijn er al voor de batches beginnen."""
 
-    async def mislukte_batch(session, batch, bg_df, adrespunten, uitval):
+    async def mislukte_batch(session, batch, brk_pb_adrespunten, uitval):
         if batch == ["rolde"]:
             uitval.registreer_fout(RCE, batch, RuntimeError("RCE onbereikbaar"))
         else:
@@ -1902,25 +1908,11 @@ _EWE_GRONDSLAG = (
 )
 
 
-async def _run_process_batch(rijksmonumenten, beperkingen, beschermde_gezichten_df):
-    ids = sorted({r["identificatie"] for r in beperkingen})
-    # Rotterdam ligt buiten de bbox van Noord-Holland en Drenthe, dus er wordt
-    # geen provincie bevraagd
-    adrespunten = {i: (_ROTTERDAM.x, _ROTTERDAM.y) for i in ids}
-    with (
-        patch(
-            "monumenten._processing._query_rijksmonumenten",
-            AsyncMock(return_value=rijksmonumenten),
-        ),
-        patch(
-            "monumenten._processing._query_beperkingen",
-            AsyncMock(return_value=beperkingen),
-        ),
-    ):
-        async with aiohttp.ClientSession() as session:
-            return await _process_batch(
-                session, ids, beschermde_gezichten_df, adrespunten, Bronuitval()
-            )
+def _leid_af(rijksmonumenten, beperkingen):
+    """De rijks- en gemeentelijke monumenten uit de antwoorden van RCE en BRK-PB."""
+    return _bepaal_rijks_en_gemeentelijke_monumenten(
+        _rce_frame(rijksmonumenten), _beperkingen_frame(beperkingen)
+    )
 
 
 def _rij(rm_df, identificatie):
@@ -1934,10 +1926,9 @@ def _rij(rm_df, identificatie):
 @pytest.mark.asyncio
 async def test_process_batch_ewd_is_geen_rijksmonument(empty_geodataframe):
     """EWD (voorbescherming) zet alleen rijksmonument_voorbescherming, geen bron."""
-    rm_df, _, gm_df = await _run_process_batch(
+    rm_df, gm_df = _leid_af(
         rijksmonumenten=[],
         beperkingen=[_beperking("vo_ewd", "EWD", _EWD_GRONDSLAG)],
-        beschermde_gezichten_df=empty_geodataframe,
     )
 
     assert list(rm_df.columns) == [
@@ -1958,10 +1949,9 @@ async def test_process_batch_ewd_is_geen_rijksmonument(empty_geodataframe):
 async def test_process_batch_ewe_is_rijksmonument_zonder_voorbescherming(
     empty_geodataframe,
 ):
-    rm_df, _, _ = await _run_process_batch(
+    rm_df, _ = _leid_af(
         rijksmonumenten=[],
         beperkingen=[_beperking("vo_ewe", "EWE", _EWE_GRONDSLAG)],
-        beschermde_gezichten_df=empty_geodataframe,
     )
 
     row = _rij(rm_df, "vo_ewe")
@@ -1972,13 +1962,12 @@ async def test_process_batch_ewe_is_rijksmonument_zonder_voorbescherming(
 @pytest.mark.asyncio
 async def test_process_batch_ewe_en_ewd_op_zelfde_verblijfsobject(empty_geodataframe):
     """EWE + EWD: één rij, bron Kadaster én voorbescherming True."""
-    rm_df, _, _ = await _run_process_batch(
+    rm_df, _ = _leid_af(
         rijksmonumenten=[],
         beperkingen=[
             _beperking("vo_beide", "EWE", _EWE_GRONDSLAG),
             _beperking("vo_beide", "EWD", _EWD_GRONDSLAG),
         ],
-        beschermde_gezichten_df=empty_geodataframe,
     )
 
     row = _rij(rm_df, "vo_beide")
@@ -1989,10 +1978,9 @@ async def test_process_batch_ewe_en_ewd_op_zelfde_verblijfsobject(empty_geodataf
 @pytest.mark.asyncio
 async def test_process_batch_rce_en_ewd(empty_geodataframe):
     """RCE-nummer + EWD: bron is alleen RCE (EWD telt niet als Kadaster-bron)."""
-    rm_df, _, _ = await _run_process_batch(
+    rm_df, _ = _leid_af(
         rijksmonumenten=[{"identificatie": "vo_rce", "rijksmonument_nummer": "12345"}],
         beperkingen=[_beperking("vo_rce", "EWD", _EWD_GRONDSLAG)],
-        beschermde_gezichten_df=empty_geodataframe,
     )
 
     row = _rij(rm_df, "vo_rce")
@@ -2003,10 +1991,9 @@ async def test_process_batch_rce_en_ewd(empty_geodataframe):
 
 @pytest.mark.asyncio
 async def test_process_batch_rce_en_ewe(empty_geodataframe):
-    rm_df, _, _ = await _run_process_batch(
+    rm_df, _ = _leid_af(
         rijksmonumenten=[{"identificatie": "vo_rce", "rijksmonument_nummer": "12345"}],
         beperkingen=[_beperking("vo_rce", "EWE", _EWE_GRONDSLAG)],
-        beschermde_gezichten_df=empty_geodataframe,
     )
 
     row = _rij(rm_df, "vo_rce")
@@ -2017,10 +2004,9 @@ async def test_process_batch_rce_en_ewe(empty_geodataframe):
 @pytest.mark.asyncio
 async def test_process_batch_zonder_beperking(empty_geodataframe):
     """Verblijfsobject zonder beperking komt niet in rijksmonumenten_df."""
-    rm_df, _, gm_df = await _run_process_batch(
+    rm_df, gm_df = _leid_af(
         rijksmonumenten=[],
         beperkingen=[_beperking("vo_leeg")],
-        beschermde_gezichten_df=empty_geodataframe,
     )
 
     assert rm_df.empty
@@ -2034,10 +2020,9 @@ async def test_process_batch_geen_bron_is_none(empty_geodataframe):
     De client leidt rijksmonument af uit een gevulde bron (notna), dus een lege
     string zou zo'n rij ten onrechte als rijksmonument laten tellen.
     """
-    rm_df, _, _ = await _run_process_batch(
+    rm_df, _ = _leid_af(
         rijksmonumenten=[{"identificatie": "vo_rce", "rijksmonument_nummer": None}],
         beperkingen=[_beperking("vo_rce")],
-        beschermde_gezichten_df=empty_geodataframe,
     )
 
     row = _rij(rm_df, "vo_rce")
@@ -2055,13 +2040,14 @@ def _batch_faalt(faalt, eenmalig=False):
     echte_process_batch = _process_batch
     aanroepen = []
 
-    async def process_batch(session, batch, *args):
-        aanroepen.append(list(batch))
+    async def process_batch(session, rce_ids, brk_pb_adrespunten, uitval):
+        batch = sorted({*rce_ids, *brk_pb_adrespunten})
+        aanroepen.append(batch)
         if any(i in faalt for i in batch):
             if eenmalig:
                 faalt.difference_update(batch)
             raise ValueError("onverwachte data")
-        return await echte_process_batch(session, batch, *args)
+        return await echte_process_batch(session, rce_ids, brk_pb_adrespunten, uitval)
 
     with (
         patch("monumenten._processing._process_batch", side_effect=process_batch),
@@ -2073,8 +2059,9 @@ def _batch_faalt(faalt, eenmalig=False):
 @pytest.mark.asyncio
 async def test_client_onverwachte_batchfout_maakt_alleen_die_batch_onbepaald(caplog):
     """Een onverwachte fout in één batch breekt de aanroep niet af. De statussen uit
-    die batch zijn pd.NA; het provinciaal monument wordt na de batches uit de
-    adrespunten bepaald en blijft bepaald. De batch krijgt één herkansing."""
+    de RCE en de BRK-PB van die batch zijn pd.NA; het beschermd gezicht en het
+    provinciaal monument worden na de batches uit de adrespunten bepaald en blijven
+    bepaald. De batch krijgt één herkansing."""
     with (
         _mocked_sources() as client,
         _batch_faalt({_VO_GEMEENTE}) as aanroepen,
@@ -2094,7 +2081,7 @@ async def test_client_onverwachte_batchfout_maakt_alleen_die_batch_onbepaald(cap
         _statussen(
             result,
             rijksmonument=[True, False, pd.NA, True, False],
-            rijksbeschermd_gezicht=[False, False, pd.NA, False, False],
+            rijksbeschermd_gezicht=[False, False, True, False, False],
             gemeentelijk_monument=[False, False, pd.NA, False, False],
             rijksmonument_voorbescherming=[False, False, pd.NA, False, False],
         ),
@@ -2294,11 +2281,7 @@ async def test_process_batch_annuleert_andere_query_bij_onverwachte_fout(
     ):
         with pytest.raises(ValueError, match="onverwacht"):
             await _process_batch(
-                AsyncMock(),
-                ["id1"],
-                empty_geodataframe,
-                {"id1": (0.0, 0.0)},
-                Bronuitval(),
+                AsyncMock(), ["id1"], {"id1": (0.0, 0.0)}, Bronuitval()
             )
         await asyncio.wait_for(geannuleerd.wait(), timeout=1)
 
@@ -2364,5 +2347,124 @@ def test_overgeslagen_batch_bij_kansloze_verwerking_wordt_vastgelegd():
     assert not uitval.sla_over_als_verwerking_kansloos(["volgende"])
     uitval.controleer()
     assert "overgeslagen" in uitval.mislukt[VERWERKING]
-    assert "overgeslagen" in uitval.herkansbaar()
+    assert "overgeslagen" in uitval.herkansbaar()[VERWERKING]
     assert "volgende" not in uitval.mislukt[VERWERKING]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("down", ["rce_down", "bag_down", "brk_pb_down"])
+async def test_client_een_id_overleeft_korte_hapering(down):
+    """Eén verblijfsobject en een bron die één keer hapert: de herkansing redt de
+    aanroep, in plaats van direct een BronFoutError."""
+    hapert = [_VO_RIJKS]
+    with (
+        _mocked_sources(**{down: hapert}) as client,
+        patch.object(
+            Bronuitval, "wacht_op_proefrequest", AsyncMock(side_effect=hapert.clear)
+        ),
+        warnings.catch_warnings(),
+    ):
+        warnings.simplefilter("error", MonumentStatusOnbepaaldWarning)
+        result = await client.process_from_list([_VO_RIJKS])
+
+    assert result[_VO_RIJKS]["rijksmonument"] is True
+
+
+@pytest.mark.asyncio
+async def test_herkansing_vraagt_alleen_de_bron_die_geen_antwoord_gaf():
+    """De RCE faalt voor het gemeentelijk monument, de BRK-PB gaf wel antwoord. In de
+    herkansing gaat alleen de RCE opnieuw; dat de BRK-PB intussen hapert, maakt het
+    gemeentelijk monument dus niet alsnog onbepaald."""
+    rce_down = [_VO_GEMEENTE]
+    brk_pb_down = []
+
+    def herstel_rce_en_storing_brk_pb():
+        rce_down.clear()
+        brk_pb_down.append(_VO_GEMEENTE)
+
+    with (
+        _mocked_sources(rce_down=rce_down, brk_pb_down=brk_pb_down) as client,
+        patch.object(
+            Bronuitval,
+            "wacht_op_proefrequest",
+            AsyncMock(side_effect=herstel_rce_en_storing_brk_pb),
+        ),
+        warnings.catch_warnings(),
+    ):
+        warnings.simplefilter("error", MonumentStatusOnbepaaldWarning)
+        result = await client.process_from_df(
+            pd.DataFrame({_ID_KOLOM: _ALLE}), _ID_KOLOM
+        )
+
+    assert bool(result.loc[2, "gemeentelijk_monument"]) is True
+    assert bool(result.loc[2, "rijksmonument"]) is False
+
+
+@pytest.mark.asyncio
+async def test_fout_bij_koppelen_is_verwerking_en_geen_brk_pb_uitval(caplog):
+    """Een fout bij het koppelen van de beperkingen is geen uitval van de BRK-PB, die
+    wel antwoord gaf: er wordt niet gesplitst, en de waarschuwing noemt verwerking."""
+    echte_koppel = _koppel_beperkingen
+    koppelingen = []
+
+    def koppel(adrespunten, beperkingen):
+        koppelingen.append(sorted(adrespunten))
+        if _VO_GEMEENTE in adrespunten:
+            raise ValueError("onleesbare geometrie")
+        return echte_koppel(adrespunten, beperkingen)
+
+    with (
+        _mocked_sources() as client,
+        patch("monumenten._api._kadaster._koppel_beperkingen", side_effect=koppel),
+        patch("monumenten._processing._QUERY_BATCH_GROOTTE", 1),
+    ):
+        with pytest.warns(MonumentStatusOnbepaaldWarning) as record:
+            await client.process_from_list(_ALLE)
+
+    assert _onbepaald(record) == {VERWERKING: [_VO_GEMEENTE]}
+    # Eén keer in de batch en één keer in de herkansing, zonder splitsen
+    assert koppelingen.count([_VO_GEMEENTE]) == 2
+
+
+def test_eerst_verspreid_zet_verspreide_batches_vooraan():
+    """De eerste MAX_CONSECUTIVE_FAILURES batches komen uit de hele aanroep, zodat een
+    datafout in één gebied ze niet allemaal raakt; elke batch blijft er één keer in."""
+    batches = [[f"b{nummer}"] for nummer in range(100)]
+
+    volgorde = _eerst_verspreid(batches)
+
+    eerst = [int(batch[0][1:]) for batch in volgorde[:MAX_CONSECUTIVE_FAILURES]]
+    assert eerst[0] == 0 and eerst[-1] == 99
+    assert min(b - a for a, b in zip(eerst, eerst[1:])) >= 10
+    assert sorted(map(tuple, volgorde)) == sorted(map(tuple, batches))
+    # Weinig batches: de volgorde blijft
+    assert _eerst_verspreid(batches[:5]) == batches[:5]
+
+
+@pytest.mark.asyncio
+async def test_waarschuwing_zonder_adrespunt_telt_de_herkansing_mee(caplog):
+    """Geeft de BAG pas in de herkansing antwoord dat een verblijfsobject niet in de
+    BAG staat, dan telt het mee in de logregel over verblijfsobjecten zonder
+    adrespunt."""
+    bag_down = [_VO_ONBEKEND]
+    with (
+        _mocked_sources(bag_down=bag_down) as client,
+        patch.object(
+            Bronuitval, "wacht_op_proefrequest", AsyncMock(side_effect=bag_down.clear)
+        ),
+        caplog.at_level(logging.WARNING, logger="monumenten.processing"),
+    ):
+        await client.process_from_list(_ALLE)
+
+    assert "1 van 5 verblijfsobjecten hebben geen adrespunt" in caplog.text
+
+
+def test_aantal_onvolledig_totaal_telt_elk_verblijfsobject_een_keer():
+    uitval = Bronuitval()
+    fout = RuntimeError("503")
+    uitval.registreer_fout(RCE, ["id1", "id2", "id3"], fout)
+    uitval.registreer_fout(BRK_PB, ["id2", "id4"], fout)
+    uitval.registreer_fout(VERWERKING, ["id4"], fout)
+
+    assert uitval.aantal_onvolledig_totaal() == 4
+    assert "van 4 verblijfsobject(en)" in str(uitval.waarschuwing())

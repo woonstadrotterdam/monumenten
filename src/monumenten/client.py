@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import functools
+import operator
 import warnings
-from typing import Any, Dict, FrozenSet, List, Optional, Set, Union, cast
+from typing import Any, Dict, FrozenSet, List, Optional, Union, cast
 
 import aiohttp
 import numpy as np
@@ -16,13 +18,14 @@ from monumenten._processing import _query
 # Per status de bronnen waar zij van afhangt. Is een status niet gevonden en gaf een
 # van die bronnen voor het verblijfsobject geen antwoord, dan is zij pd.NA in plaats
 # van False. Het adrespunt uit de BAG is nodig voor de BRK-PB, het beschermd gezicht
-# en het provinciaal monument; het provinciaal monument wordt na alle batches uit de
-# adrespunten bepaald en hangt dus niet van de verwerking van een batch af. De tabel
+# en het provinciaal monument. Het beschermd gezicht en het provinciaal monument
+# worden na alle batches uit de adrespunten bepaald en hangen dus niet van de
+# verwerking van een batch af. De tabel
 # "Geen antwoord van" in de README beschrijft hetzelfde; een test houdt ze gelijk.
 _AFHANKELIJKHEDEN: Dict[str, FrozenSet[str]] = {
     "rijksmonument": frozenset({RCE, BAG, BRK_PB, VERWERKING}),
     "rijksmonument_voorbescherming": frozenset({BAG, BRK_PB, VERWERKING}),
-    "rijksbeschermd_gezicht": frozenset({BAG, VERWERKING}),
+    "rijksbeschermd_gezicht": frozenset({BAG}),
     "gemeentelijk_monument": frozenset({BAG, BRK_PB, VERWERKING}),
     "provinciaal_monument": frozenset({BAG, *(p.naam for p in PROVINCIES)}),
 }
@@ -161,18 +164,22 @@ class MonumentenClient:
         if "identificatie" not in df.columns:
             merged = merged.drop(columns=["identificatie"])
 
-        verblijfsobject_ids = merged[verblijfsobject_id_col]
+        # Eén masker per bron, en niet per status een nieuwe unie: bij een uitval
+        # voor miljoenen verblijfsobjecten telt dat
+        zonder_antwoord = {
+            bron: merged[verblijfsobject_id_col].isin(ids)
+            for bron, ids in uitval.mislukt.items()
+        }
+        geen_uitval = pd.Series(False, index=merged.index)
 
         def onbepaald(status: str) -> pd.Series[bool]:
             """Of een bron waar de status van afhangt geen antwoord gaf."""
-            zonder_antwoord: Set[str] = set().union(
-                *(
-                    uitval.mislukt[bron]
-                    for bron in _AFHANKELIJKHEDEN[status]
-                    if bron in uitval.mislukt
-                )
-            )
-            return verblijfsobject_ids.isin(zonder_antwoord)
+            maskers = [
+                zonder_antwoord[bron]
+                for bron in _AFHANKELIJKHEDEN[status]
+                if bron in zonder_antwoord
+            ]
+            return functools.reduce(operator.or_, maskers, geen_uitval)
 
         rijksmonument_nummer_position = merged.columns.get_loc("rijksmonument_nummer")
 

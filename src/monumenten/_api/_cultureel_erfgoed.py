@@ -98,6 +98,9 @@ async def _query_rijksmonumenten(
         aiohttp.ClientConnectorError: Bij verbindingsfout na uitgeputte retries.
         aiohttp.ServerDisconnectedError: Bij server-verbreking na uitgeputte retries.
     """
+    if not identificaties:
+        # Bijvoorbeeld een batch in de herkansing die alleen de BRK-PB nodig heeft
+        return []
     try:
         async with _get_semaphore(asyncio.get_running_loop()):
             if uitval.sla_over_bij_storing(RCE, identificaties):
