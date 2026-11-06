@@ -7,7 +7,7 @@ import heapq
 import logging
 import time
 from asyncio import Semaphore
-from collections import Counter
+from dataclasses import dataclass, field
 from typing import (
     Awaitable,
     Callable,
@@ -74,7 +74,7 @@ class BronFoutError(_MetVerblijfsobjectIds, RuntimeError):
         melding (str): Omschrijving van de fout
         verblijfsobject_ids (Optional[Dict[str, List[str]]]): Per bron zonder
             antwoord ("RCE", "BAG" of "BRK-PB") de gesorteerde verblijfsobject ID's
-            zonder antwoord, ook uit batches die daarna zijn overgeslagen
+            zonder antwoord
     """
 
 
@@ -90,6 +90,32 @@ class MonumentStatusOnbepaaldWarning(_MetVerblijfsobjectIds, UserWarning):
             "BAG", "BRK-PB", "verwerking" of een provincie zoals "Noord-Holland")
             de gesorteerde verblijfsobject ID's zonder antwoord
     """
+
+
+@dataclass
+class _Bron:
+    """De toestand van één bron binnen één aanroep."""
+
+    # Voor zoveel verblijfsobjecten gaf de bron antwoord
+    beantwoord: int = 0
+    # Zoveel requests mislukten er achter elkaar, zonder antwoord ertussen
+    fouten_op_rij: int = 0
+    # De laatste fout van de reeks mislukte requests; None zonder storing
+    storing: Optional[Exception] = None
+    # Tijdstip (time.monotonic) vanaf wanneer een proefrequest mag
+    proef_vanaf: float = 0.0
+    # De verblijfsobject ID's waarvoor de bron, ook na retries en splitsen, geen
+    # antwoord gaf
+    mislukt: Set[str] = field(default_factory=set)
+    # De laatste fout waardoor de bron geen antwoord gaf
+    laatste_fout: Optional[Exception] = None
+    # Beperkt het aantal gelijktijdige requests aan de bron. Per aanroep en niet per
+    # proces: een semaphore bindt zich aan de event loop waarin zij voor het eerst
+    # moet wachten, en een tweede asyncio.run in hetzelfde proces zou op een
+    # gedeelde semaphore een RuntimeError krijgen.
+    semaphore: Semaphore = field(
+        default_factory=lambda: Semaphore(MAX_PARALLELLE_REQUESTS)
+    )
 
 
 class Bronuitval:
@@ -111,26 +137,30 @@ class Bronuitval:
     """
 
     def __init__(self) -> None:
-        self._beantwoord: Counter[str] = Counter()
-        self._fouten_op_rij: Counter[str] = Counter()
-        # Bron met een storing -> laatste fout van de reeks mislukte requests
-        self._storing: Dict[str, Exception] = {}
-        # Bron met een storing -> tijdstip (time.monotonic) vanaf wanneer een
-        # proefrequest mag
-        self._proef_vanaf: Dict[str, float] = {}
-        # Bron -> verblijfsobject ID's waarvoor zij, ook na retries en splitsen,
-        # geen antwoord gaf
-        self.mislukt: Dict[str, Set[str]] = {}
-        # Bron in mislukt -> de laatste fout waardoor zij geen antwoord gaf
-        self.laatste_fout: Dict[str, Exception] = {}
-        self._semaphores: Dict[str, Semaphore] = {}
+        self._bronnen: Dict[str, _Bron] = {}
+
+    def _bron(self, naam: str) -> _Bron:
+        return self._bronnen.setdefault(naam, _Bron())
+
+    @property
+    def mislukt(self) -> Dict[str, Set[str]]:
+        """Per bron de verblijfsobject ID's waarvoor zij, ook na retries en splitsen,
+        geen antwoord gaf; alleen bronnen met zulke ID's."""
+        return {
+            naam: bron.mislukt for naam, bron in self._bronnen.items() if bron.mislukt
+        }
+
+    @property
+    def laatste_fout(self) -> Dict[str, Exception]:
+        """Per bron in ``mislukt`` de laatste fout waardoor zij geen antwoord gaf."""
+        return {
+            naam: bron.laatste_fout
+            for naam, bron in self._bronnen.items()
+            if bron.mislukt and bron.laatste_fout is not None
+        }
 
     def semaphore(self, bron: str) -> Semaphore:
         """Geef de semaphore die het aantal gelijktijdige requests aan een bron beperkt.
-
-        Per aanroep en niet per proces: een semaphore bindt zich aan de event loop
-        waarin zij voor het eerst moet wachten, en een tweede ``asyncio.run`` in
-        hetzelfde proces zou op een gedeelde semaphore een RuntimeError krijgen.
 
         Args:
             bron (str): De bron
@@ -138,9 +168,7 @@ class Bronuitval:
         Returns:
             Semaphore: De semaphore van de bron, met MAX_PARALLELLE_REQUESTS plaatsen
         """
-        if bron not in self._semaphores:
-            self._semaphores[bron] = Semaphore(MAX_PARALLELLE_REQUESTS)
-        return self._semaphores[bron]
+        return self._bron(bron).semaphore
 
     async def bevraag(
         self,
@@ -217,24 +245,24 @@ class Bronuitval:
         self.registreer_antwoord(bron, len(verblijfsobject_ids))
         return rijen
 
-    def registreer_antwoord(self, bron: str, aantal: int) -> None:
+    def registreer_antwoord(self, naam: str, aantal: int) -> None:
         """Leg vast dat een bron voor een aantal verblijfsobjecten antwoord gaf.
 
         Een antwoord beëindigt een storing.
 
         Args:
-            bron (str): De bron die antwoord gaf
+            naam (str): De bron die antwoord gaf
             aantal (int): Aantal verblijfsobjecten waarvoor het antwoord geldt
         """
-        self._beantwoord[bron] += aantal
-        self._fouten_op_rij[bron] = 0
-        if bron in self._storing:
-            del self._storing[bron]
-            del self._proef_vanaf[bron]
-            logger.info("%s geeft weer antwoord en wordt weer bevraagd.", bron)
+        bron = self._bron(naam)
+        bron.beantwoord += aantal
+        bron.fouten_op_rij = 0
+        if bron.storing is not None:
+            bron.storing = None
+            logger.info("%s geeft weer antwoord en wordt weer bevraagd.", naam)
 
     def registreer_mislukte_request(
-        self, bron: str, fout: Exception, *, kan_kleiner: bool = False
+        self, naam: str, fout: Exception, *, kan_kleiner: bool = False
     ) -> None:
         """Tel een request die na retries mislukte.
 
@@ -248,28 +276,128 @@ class Bronuitval:
         proefrequest, dan begint de pauze tot de volgende proefrequest opnieuw.
 
         Args:
-            bron (str): De bron die geen antwoord gaf
+            naam (str): De bron die geen antwoord gaf
             fout (Exception): De fout die na retries overbleef
             kan_kleiner (bool): Of de request bij een fout nog gesplitst kan worden
         """
         if kan_kleiner and is_fout_van_de_request(fout):
             return
-        self._fouten_op_rij[bron] += 1
-        had_storing = bron in self._storing
-        if not had_storing and self._fouten_op_rij[bron] < MAX_CONSECUTIVE_FAILURES:
+        bron = self._bron(naam)
+        bron.fouten_op_rij += 1
+        had_storing = bron.storing is not None
+        if not had_storing and bron.fouten_op_rij < MAX_CONSECUTIVE_FAILURES:
             return
-        self._storing[bron] = fout
-        self._proef_vanaf[bron] = time.monotonic() + OUTAGE_PROBE_SECONDS
+        bron.storing = fout
+        bron.proef_vanaf = time.monotonic() + OUTAGE_PROBE_SECONDS
         if not had_storing:
             logger.warning(
                 "%s heeft een storing: %d requests achter elkaar mislukt (%s: %s). De "
                 "bron wordt overgeslagen; elke %d seconden volgt een proefrequest.",
-                bron,
+                naam,
                 MAX_CONSECUTIVE_FAILURES,
                 type(fout).__name__,
                 fout,
                 OUTAGE_PROBE_SECONDS,
             )
+
+    def registreer_fout(
+        self, naam: str, verblijfsobject_ids: Iterable[str], fout: Exception
+    ) -> None:
+        """Leg vast dat een bron voor verblijfsobjecten definitief geen antwoord gaf.
+
+        Args:
+            naam (str): De bron die geen antwoord gaf
+            verblijfsobject_ids (Iterable[str]): De betrokken verblijfsobject ID's
+            fout (Exception): De fout die na retries en splitsen overbleef
+        """
+        bron = self._bron(naam)
+        bron.mislukt.update(verblijfsobject_ids)
+        bron.laatste_fout = fout
+
+    def in_storing(self, naam: str) -> bool:
+        """Geef aan of een bron een storing heeft; er wordt dan niet gesplitst.
+
+        Args:
+            naam (str): De bron
+
+        Returns:
+            bool: Of de bron een storing heeft
+        """
+        return self._bron(naam).storing is not None
+
+    def bronnen_in_storing(self) -> List[str]:
+        """Geef de bronnen die op dit moment een storing hebben.
+
+        Returns:
+            List[str]: De bronnen met een storing
+        """
+        return [naam for naam, bron in self._bronnen.items() if bron.storing]
+
+    def sla_over_bij_storing(
+        self, naam: str, verblijfsobject_ids: Iterable[str]
+    ) -> bool:
+        """Registreer verblijfsobjecten direct als mislukt als de bron een storing heeft.
+
+        Eén request per OUTAGE_PROBE_SECONDS wordt niet overgeslagen: die proefrequest
+        laat zien of de bron weer antwoord geeft.
+
+        Args:
+            naam (str): De bron die bevraagd zou worden
+            verblijfsobject_ids (Iterable[str]): De verblijfsobject ID's van de request
+
+        Returns:
+            bool: Of de request moet worden overgeslagen
+        """
+        bron = self._bron(naam)
+        if bron.storing is None:
+            return False
+        if time.monotonic() >= bron.proef_vanaf:
+            # Dit is de proefrequest; de volgende mag pas na een nieuwe pauze
+            bron.proef_vanaf = time.monotonic() + OUTAGE_PROBE_SECONDS
+            return False
+        self.registreer_fout(naam, verblijfsobject_ids, bron.storing)
+        return True
+
+    async def wacht_op_proefrequest(self) -> None:
+        """Wacht tot elke bron met een storing haar volgende proefrequest mag krijgen."""
+        wachttijd = (
+            max(
+                (bron.proef_vanaf for bron in self._bronnen.values() if bron.storing),
+                default=0.0,
+            )
+            - time.monotonic()
+        )
+        if wachttijd > 0:
+            await asyncio.sleep(wachttijd)
+
+    def herkansbaar(self) -> Dict[str, Set[str]]:
+        """Geef per bron de verblijfsobjecten die bij haar een herkansing verdienen.
+
+        Dat zijn de verblijfsobjecten waarvoor een batchbron geen antwoord gaf die op
+        dit moment geen storing heeft: een bron met een storing opnieuw bevragen heeft
+        geen zin. Alleen de bron die geen antwoord gaf wordt opnieuw bevraagd; wat de
+        andere bronnen al antwoordden blijft staan.
+
+        Returns:
+            Dict[str, Set[str]]: Per bron de verblijfsobject ID's
+        """
+        return {
+            naam: set(bron.mislukt)
+            for naam, bron in self._bronnen.items()
+            if naam in BATCHBRONNEN and bron.mislukt and bron.storing is None
+        }
+
+    def vergeet(self, naam: str, verblijfsobject_ids: Iterable[str]) -> None:
+        """Wis de uitval van een bron voor verblijfsobjecten die een herkansing krijgen.
+
+        De bron legt tijdens de herkansing opnieuw vast voor welke daarvan zij geen
+        antwoord gaf.
+
+        Args:
+            naam (str): De bron die de verblijfsobjecten opnieuw krijgt
+            verblijfsobject_ids (Iterable[str]): De verblijfsobject ID's
+        """
+        self._bron(naam).mislukt.difference_update(verblijfsobject_ids)
 
     def aantal_onvolledig_bepaald(self, verblijfsobject_ids: Iterable[str]) -> int:
         """Tel de onvolledig bepaalde verblijfsobjecten: een bron gaf tot nu toe geen
@@ -281,11 +409,8 @@ class Bronuitval:
         Returns:
             int: Hoeveel daarvan onvolledig bepaald zijn
         """
-        return sum(
-            1
-            for verblijfsobject_id in verblijfsobject_ids
-            if any(verblijfsobject_id in ids for ids in self.mislukt.values())
-        )
+        mislukt = list(self.mislukt.values())
+        return sum(1 for i in verblijfsobject_ids if any(i in ids for ids in mislukt))
 
     def aantal_onvolledig_bepaald_totaal(self) -> int:
         """Tel alle onvolledig bepaalde verblijfsobjecten, zonder een kopie van hun ID's.
@@ -303,104 +428,6 @@ class Bronuitval:
             for nummer, ids in enumerate(sets)
         )
 
-    def in_storing(self, bron: str) -> bool:
-        """Geef aan of een bron een storing heeft; er wordt dan niet gesplitst.
-
-        Args:
-            bron (str): De bron
-
-        Returns:
-            bool: Of de bron een storing heeft
-        """
-        return bron in self._storing
-
-    def sla_over_bij_storing(
-        self, bron: str, verblijfsobject_ids: Iterable[str]
-    ) -> bool:
-        """Registreer verblijfsobjecten direct als mislukt als de bron een storing heeft.
-
-        Eén request per OUTAGE_PROBE_SECONDS wordt niet overgeslagen: die proefrequest
-        laat zien of de bron weer antwoord geeft.
-
-        Args:
-            bron (str): De bron die bevraagd zou worden
-            verblijfsobject_ids (Iterable[str]): De verblijfsobject ID's van de request
-
-        Returns:
-            bool: Of de request moet worden overgeslagen
-        """
-        fout = self._storing.get(bron)
-        if fout is None:
-            return False
-        if time.monotonic() >= self._proef_vanaf[bron]:
-            # Dit is de proefrequest; de volgende mag pas na een nieuwe pauze
-            self._proef_vanaf[bron] = time.monotonic() + OUTAGE_PROBE_SECONDS
-            return False
-        self.registreer_fout(bron, verblijfsobject_ids, fout)
-        return True
-
-    def registreer_fout(
-        self, bron: str, verblijfsobject_ids: Iterable[str], fout: Exception
-    ) -> None:
-        """Leg vast dat een bron voor verblijfsobjecten definitief geen antwoord gaf.
-
-        Args:
-            bron (str): De bron die geen antwoord gaf
-            verblijfsobject_ids (Iterable[str]): De betrokken verblijfsobject ID's
-            fout (Exception): De fout die na retries en splitsen overbleef
-        """
-        self.mislukt.setdefault(bron, set()).update(verblijfsobject_ids)
-        self.laatste_fout[bron] = fout
-
-    def herkansbaar(self) -> Dict[str, Set[str]]:
-        """Geef per bron de verblijfsobjecten die bij haar een herkansing verdienen.
-
-        Dat zijn de verblijfsobjecten waarvoor een batchbron geen antwoord gaf die op
-        dit moment geen storing heeft: een bron met een storing opnieuw bevragen heeft
-        geen zin.
-        Alleen de bron die geen antwoord gaf wordt opnieuw bevraagd; wat de andere
-        bronnen al antwoordden blijft staan.
-
-        Returns:
-            Dict[str, Set[str]]: Per bron de verblijfsobject ID's
-        """
-        return {
-            bron: set(ids)
-            for bron, ids in self.mislukt.items()
-            if bron in BATCHBRONNEN and bron not in self._storing
-        }
-
-    def vergeet(self, bron: str, verblijfsobject_ids: Iterable[str]) -> None:
-        """Wis de uitval van een bron voor verblijfsobjecten die een herkansing krijgen.
-
-        De bron legt tijdens de herkansing opnieuw vast voor welke daarvan zij geen
-        antwoord gaf.
-
-        Args:
-            bron (str): De bron die de verblijfsobjecten opnieuw krijgt
-            verblijfsobject_ids (Iterable[str]): De verblijfsobject ID's
-        """
-        if bron not in self.mislukt:
-            return
-        self.mislukt[bron].difference_update(verblijfsobject_ids)
-        if not self.mislukt[bron]:
-            del self.mislukt[bron]
-            del self.laatste_fout[bron]
-
-    def bronnen_in_storing(self) -> List[str]:
-        """Geef de bronnen die op dit moment een storing hebben.
-
-        Returns:
-            List[str]: De bronnen met een storing
-        """
-        return list(self._storing)
-
-    async def wacht_op_proefrequest(self) -> None:
-        """Wacht tot elke bron met een storing haar volgende proefrequest mag krijgen."""
-        wachttijd = max(self._proef_vanaf.values(), default=0.0) - time.monotonic()
-        if wachttijd > 0:
-            await asyncio.sleep(wachttijd)
-
     def controleer(self) -> None:
         """Stop als een bron of de verwerking voor geen enkel verblijfsobject slaagde.
 
@@ -415,9 +442,9 @@ class Bronuitval:
                 batch lukte
         """
         zonder_antwoord = {
-            bron: ids
-            for bron, ids in self.mislukt.items()
-            if bron in _EXTERNE_BATCHBRONNEN and not self._beantwoord[bron]
+            naam: ids
+            for naam, ids in self.mislukt.items()
+            if naam in _EXTERNE_BATCHBRONNEN and not self._bron(naam).beantwoord
         }
         if zonder_antwoord:
             raise BronFoutError(
@@ -426,7 +453,8 @@ class Bronuitval:
                 + self._beschrijf(zonder_antwoord),
                 _ids_per_bron(zonder_antwoord),
             ) from self.laatste_fout[next(iter(zonder_antwoord))]
-        if VERWERKING in self.mislukt and not self._beantwoord[VERWERKING]:
+        verwerking = self._bron(VERWERKING)
+        if verwerking.mislukt and not verwerking.beantwoord:
             raise self.laatste_fout[VERWERKING]
 
     def waarschuwing(self) -> Optional[MonumentStatusOnbepaaldWarning]:
@@ -436,27 +464,28 @@ class Bronuitval:
             Optional[MonumentStatusOnbepaaldWarning]: De waarschuwing, of ``None``
                 als elke bron voor elk verblijfsobject antwoord gaf
         """
-        if not self.mislukt:
+        mislukt = self.mislukt
+        if not mislukt:
             return None
         aantal = self.aantal_onvolledig_bepaald_totaal()
         return MonumentStatusOnbepaaldWarning(
             f"De monumentstatus van {aantal} verblijfsobject(en) kon niet volledig "
             "worden bepaald: een bron gaf, ook na retries, geen antwoord. De "
             "statussen die van die bron afhangen zijn pd.NA. "
-            + self._beschrijf(self.mislukt),
-            _ids_per_bron(self.mislukt),
+            + self._beschrijf(mislukt),
+            _ids_per_bron(mislukt),
         )
 
     def _beschrijf(self, mislukt: Dict[str, Set[str]]) -> str:
         """Som per bron de laatste fout en de verblijfsobjecten zonder antwoord op."""
         delen = []
-        for bron, ids in mislukt.items():
-            fout = self.laatste_fout[bron]
+        for naam, ids in mislukt.items():
+            fout = self.laatste_fout[naam]
             genoemd = ", ".join(heapq.nsmallest(_MAX_IDS_IN_MELDING, ids))
             if len(ids) > _MAX_IDS_IN_MELDING:
                 genoemd += f" en {len(ids) - _MAX_IDS_IN_MELDING} andere"
             delen.append(
-                f"{bron} ({len(ids)} verblijfsobject(en), "
+                f"{naam} ({len(ids)} verblijfsobject(en), "
                 f"{type(fout).__name__}: {fout}): {genoemd}"
             )
         return "; ".join(delen)
