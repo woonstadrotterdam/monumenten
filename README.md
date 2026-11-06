@@ -247,6 +247,8 @@ De BRK-PB WFS doorzoekt per verzoek de omhullende rechthoek van alle opgevraagde
 
 Een bezit dat in één regio ligt gaat daardoor het snelst. Adressen verspreid over heel Nederland kosten meer en tragere verzoeken.
 
+Bij een grote aanroep toont de package een voortgangsbalk voor elke fase: het ophalen van de adrespunten (vanaf 10.000 verblijfsobjecten), het verwerken van de batches en de herkansing (vanaf twee batches). Een aanroep voor één verblijfsobject toont er geen.
+
 De provinciale services staan hieronder bij [Provinciale monumenten](#provinciale-monumenten). De provinciegrenzen komen van PDOK Bestuurlijke Gebieden (`https://service.pdok.nl/kadaster/bestuurlijkegebieden/wfs/v1_0`, laag `Provinciegebied`, licentie CC BY 4.0).
 
 ### Retry-gedrag
@@ -264,17 +266,20 @@ De grens van 10 laat ruimte voor het splitsen waarvoor het bedoeld is. Per bron 
 Een verblijfsobject waarvan de status niet bepaald kon worden is iets anders dan een verblijfsobject zonder monumentstatus. De package geeft daarom nooit `False` terug voor een status die een bron niet heeft kunnen bevestigen of ontkennen:
 
 - **Een bron geeft voor geen enkel verblijfsobject antwoord** (bijvoorbeeld bij een storing): de aanroep stopt met een `BronFoutError`. De melding noemt de bron (`RCE`, `BAG` of `BRK-PB`) en de laatste fout; het attribuut `verblijfsobject_ids` bevat per bron de ID's zonder antwoord. Wie één verblijfsobject opvraagt krijgt bij een falende bron dus altijd deze fout. Bij een storing komt de fout na 10 mislukte requests, niet pas nadat elke batch tot op één ID is gesplitst (zie [Retry-gedrag](#retry-gedrag)).
-- **Een bron geeft voor een deel van de verblijfsobjecten geen antwoord**: het resultaat komt terug met `pd.NA` voor de statussen die niet bepaald konden worden, en er volgt een `MonumentStatusOnbepaaldWarning`. De waarschuwing noemt per bron de betrokken ID's, die ook in het attribuut `verblijfsobject_ids` staan. Dat is pas zo als ook de herkansing aan het einde van de aanroep geen antwoord opleverde (zie [Retry-gedrag](#retry-gedrag)).
+- **Een bron geeft voor een deel van de verblijfsobjecten geen antwoord**: het resultaat komt terug met `pd.NA` voor de statussen die niet bepaald konden worden, en er volgt één `MonumentStatusOnbepaaldWarning`. De waarschuwing noemt per bron de laatste fout en de betrokken ID's, die ook in het attribuut `verblijfsobject_ids` staan (per bron gesorteerd). Dat is pas zo als ook de herkansing aan het einde van de aanroep geen antwoord opleverde (zie [Retry-gedrag](#retry-gedrag)).
+- **De verwerking van een batch mislukt onverwacht** (bijvoorbeeld door data die de package niet verwacht): de aanroep gaat door, zodat één fout niet het werk van een aanroep met miljoenen verblijfsobjecten weggooit. De statussen van die batch worden `pd.NA` en de waarschuwing noemt de bron `verwerking`; de traceback staat één keer in de log. Ook zo'n batch krijgt de herkansing. Mislukt de verwerking van geen enkele batch, dan is er vrijwel zeker iets mis met de package zelf: de aanroep stopt dan met de oorspronkelijke fout, al na de eerste 10 batches.
 
-Welke status `pd.NA` wordt hangt af van de bron die geen antwoord gaf. De BAG levert het adrespunt; daar hangen het rijksbeschermd gezicht, het provinciaal monument en de beperkingen uit de BRK-PB van af. Uitval van een provinciale service staat bij [Provinciale monumenten](#provinciale-monumenten).
+Welke status `pd.NA` wordt hangt af van de bron die geen antwoord gaf. De BAG levert het adrespunt; daar hangen het rijksbeschermd gezicht, het provinciaal monument en de beperkingen uit de BRK-PB van af. Een status die wel gevonden is blijft `True`. Meer over uitval van een provincie staat bij [Provinciale monumenten](#provinciale-monumenten).
 
-| Geen antwoord van | `rijksmonument`                                                | `rijksbeschermd_gezicht` | `gemeentelijk_monument` | `provinciaal_monument` |
-| ----------------- | -------------------------------------------------------------- | ------------------------ | ----------------------- | ---------------------- |
-| RCE               | `pd.NA`, tenzij het Kadaster het rijksmonument wel registreert | bepaald                  | bepaald                 | bepaald                |
-| BAG               | `pd.NA`, tenzij de RCE het rijksmonument wel registreert       | `pd.NA`                  | `pd.NA`                 | `pd.NA`                |
-| BRK-PB            | `pd.NA`, tenzij de RCE het rijksmonument wel registreert       | bepaald                  | `pd.NA`                 | bepaald                |
+| Geen antwoord van                  | `rijksmonument`                                                | `rijksmonument_voorbescherming` | `rijksbeschermd_gezicht` | `gemeentelijk_monument` | `provinciaal_monument` |
+| ---------------------------------- | -------------------------------------------------------------- | ------------------------------- | ------------------------ | ----------------------- | ---------------------- |
+| RCE                                | `pd.NA`, tenzij het Kadaster het rijksmonument wel registreert | bepaald                         | bepaald                  | bepaald                 | bepaald                |
+| BAG                                | `pd.NA`, tenzij de RCE het rijksmonument wel registreert       | `pd.NA`                         | `pd.NA`                  | `pd.NA`                 | `pd.NA`                |
+| BRK-PB                             | `pd.NA`, tenzij de RCE het rijksmonument wel registreert       | `pd.NA`                         | bepaald                  | `pd.NA`                 | bepaald                |
+| verwerking (fout in een batch)     | `pd.NA`                                                        | `pd.NA`                         | `pd.NA`                  | `pd.NA`                 | bepaald                |
+| provincie (Noord-Holland, Drenthe) | bepaald                                                        | bepaald                         | bepaald                  | bepaald                 | `pd.NA`                |
 
-- De kolommen `rijksmonument`, `rijksbeschermd_gezicht`, `gemeentelijk_monument` en `provinciaal_monument` hebben altijd het nullable pandas-dtype `boolean`. In `process_from_list` is een niet-bepaalde status `None`; in VERA-referentiedataformaat is dan de hele value van het verblijfsobject `None` in plaats van een lijst, omdat die lijst onvolledig zou zijn.
+- De kolommen `rijksmonument`, `rijksmonument_voorbescherming`, `rijksbeschermd_gezicht`, `gemeentelijk_monument` en `provinciaal_monument` hebben altijd het nullable pandas-dtype `boolean`. In `process_from_list` is een niet-bepaalde status `None`; in VERA-referentiedataformaat is dan de hele value van het verblijfsobject `None` in plaats van een lijst, omdat die lijst onvolledig zou zijn. De voorbescherming staat niet in het VERA-formaat en telt daar dus niet mee.
 - Blijft `rijksmonument` `True` doordat één bron de status geeft terwijl de andere geen antwoord gaf, dan noemt `rijksmonument_bron` alleen de bron die antwoord gaf.
 - Een ID dat niet in de BAG voorkomt is geen fout maar een geldig leeg antwoord: de statussen uit het Kadaster zijn dan `False`.
 
@@ -312,17 +317,9 @@ Keuzes en beperkingen:
   | een provincie zonder provinciale monumenten | `False`           | `False`          |
   | Noord-Holland of Drenthe                    | `True` of `False` | `<NA>`           |
 
-  De kolom `provinciaal_monument` is daarom een nullable boolean. Bij `<NA>` volgt een `MonumentStatusOnbepaaldWarning` met per provincie de oorzaak; het attribuut `verblijfsobject_ids` geeft per provincie de betrokken verblijfsobject ID's. Noemt de oorzaak dat geen enkel vlak een bekende categorie of status heeft, dan is de service van de provincie gewijzigd en moet de package worden bijgewerkt. In `process_from_list` is de status dan `None`, en in VERA-referentiedataformaat is de hele value `None` in plaats van een lijst, omdat die lijst onvolledig zou zijn. Wie liever een fout krijgt, zet de waarschuwing om:
+  De kolom `provinciaal_monument` is daarom een nullable boolean. Bij `<NA>` noemt de `MonumentStatusOnbepaaldWarning` de provincie als bron, met haar fout als oorzaak; het attribuut `verblijfsobject_ids` geeft per provincie de betrokken verblijfsobject ID's. Het is dezelfde waarschuwing als bij een andere bron zonder antwoord, en wie liever een fout krijgt zet haar op dezelfde manier om (zie [Als een bron geen antwoord geeft](#als-een-bron-geen-antwoord-geeft)). Noemt de oorzaak dat geen enkel vlak een bekende categorie of status heeft, dan is de service van de provincie gewijzigd en moet de package worden bijgewerkt. Een provincie krijgt geen herkansing en stopt de aanroep nooit: zij raakt alleen `provinciaal_monument`.
 
-  ```python
-  import warnings
-
-  from monumenten import MonumentStatusOnbepaaldWarning
-
-  warnings.simplefilter("error", MonumentStatusOnbepaaldWarning)
-  ```
-
-  Geeft de BAG voor een verblijfsobject ook na de herkansing geen adrespunt, dan is `provinciaal_monument` eveneens `<NA>`, met de waarschuwing voor de BAG (zie [Als een bron geen antwoord geeft](#als-een-bron-geen-antwoord-geeft)). Geven de RCE of de BRK-PB voor een batch geen antwoord, dan raakt dat het provinciale monument niet: het hangt alleen van het adrespunt af, en de package haalt alle adrespunten op voordat de batches beginnen.
+  Geeft de BAG voor een verblijfsobject ook na de herkansing geen adrespunt, dan is `provinciaal_monument` eveneens `<NA>`, met de waarschuwing voor de BAG (zie [Als een bron geen antwoord geeft](#als-een-bron-geen-antwoord-geeft)). Geven de RCE of de BRK-PB voor een batch geen antwoord, of mislukt de verwerking van een batch, dan raakt dat het provinciale monument niet: het hangt alleen van het adrespunt af, en de package bepaalt het na de batches en de herkansing uit alle adrespunten.
 
 - **Combinaties.** Volgens de provinciale verordeningen kan een object niet tegelijk rijks- of gemeentelijk én provinciaal monument zijn. De package dwingt dat niet af, omdat de Kadaster-statussen per perceel gelden en dus ook buurgebouwen kunnen raken.
 

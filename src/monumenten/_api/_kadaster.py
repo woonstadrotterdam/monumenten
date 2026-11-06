@@ -307,7 +307,7 @@ async def _query_beperkingen(
     behalve bij een rate limit (429): splitsen levert dan alleen meer requests op.
     Is de BRK-PB gestoord, dan wordt de request overgeslagen (zie Bronuitval).
     In uitval wordt vastgelegd voor welke verblijfsobjecten de BRK-PB wel en geen
-    antwoord gaf. Zonder antwoord komen de adrespunten terug zonder beperkingen.
+    antwoord gaf. Zonder antwoord volgen er geen beperkingen.
     """
     if not adrespunten:
         return []
@@ -342,7 +342,7 @@ async def _query_beperkingen(
     try:
         async with _get_semaphore(asyncio.get_running_loop()):
             if uitval.sla_over_bij_storing(BRK_PB, adrespunten):
-                return _koppel_beperkingen(adrespunten, [])
+                return []
             brk_pb_query = _BRK_PB_BEPERKINGEN_QUERY_TEMPLATE.format(
                 adrespunten="".join(
                     _ADRESPUNT_TEMPLATE.format(nummer=nummer, x=x, y=y)
@@ -400,7 +400,7 @@ async def _query_beperkingen(
             len(adrespunten),
         )
         uitval.registreer_fout(BRK_PB, adrespunten, e)
-        return _koppel_beperkingen(adrespunten, [])
+        return []
 
 
 async def _query_adrespunten(

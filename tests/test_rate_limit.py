@@ -60,10 +60,7 @@ async def test_no_split_on_429():
         )
 
     assert calls == ["BAG verblijfsobjecten query", "BRK-PB beperkingen query"]
-    assert list(bag_uitval.mislukt[BAG]) == ["id1", "id2"]
-    assert list(brk_pb_uitval.mislukt[BRK_PB]) == ["id1", "id2"]
-    # Without an answer the adrespunt comes back without beperkingen
-    assert [(r["identificatie"], r["grondslagcode"]) for r in rijen] == [
-        ("id1", None),
-        ("id2", None),
-    ]
+    assert sorted(bag_uitval.mislukt[BAG]) == ["id1", "id2"]
+    assert sorted(brk_pb_uitval.mislukt[BRK_PB]) == ["id1", "id2"]
+    # Without an answer there are no beperkingen
+    assert rijen == []

@@ -3,14 +3,29 @@
 from __future__ import annotations
 
 import warnings
-from typing import Any, Dict, List, Optional, Union, cast
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Union, cast
 
 import aiohttp
 import numpy as np
 import pandas as pd
 
-from monumenten._bronfouten import BAG, BRK_PB, RCE, MonumentStatusOnbepaaldWarning
+from monumenten._api._provincies import PROVINCIES
+from monumenten._bronfouten import BAG, BRK_PB, RCE, VERWERKING
 from monumenten._processing import _query
+
+# Per status de bronnen waar zij van afhangt. Is een status niet gevonden en gaf een
+# van die bronnen voor het verblijfsobject geen antwoord, dan is zij pd.NA in plaats
+# van False. Het adrespunt uit de BAG is nodig voor de BRK-PB, het beschermd gezicht
+# en het provinciaal monument; het provinciaal monument wordt na alle batches uit de
+# adrespunten bepaald en hangt dus niet van de verwerking van een batch af. De tabel
+# "Geen antwoord van" in de README beschrijft hetzelfde; een test houdt ze gelijk.
+_AFHANKELIJKHEDEN: Dict[str, FrozenSet[str]] = {
+    "rijksmonument": frozenset({RCE, BAG, BRK_PB, VERWERKING}),
+    "rijksmonument_voorbescherming": frozenset({BAG, BRK_PB, VERWERKING}),
+    "rijksbeschermd_gezicht": frozenset({BAG, VERWERKING}),
+    "gemeentelijk_monument": frozenset({BAG, BRK_PB, VERWERKING}),
+    "provinciaal_monument": frozenset({BAG, *(p.naam for p in PROVINCIES)}),
+}
 
 
 def _status(aanwezig: pd.Series[bool], onbepaald: pd.Series[bool]) -> pd.Series[bool]:
@@ -95,11 +110,13 @@ class MonumentenClient:
 
         Returns:
             pd.DataFrame: DataFrame met toegevoegde monumentinformatie. De kolommen
-                ``rijksmonument``, ``rijksbeschermd_gezicht``, ``gemeentelijk_monument``
-                en ``provinciaal_monument`` zijn nullable booleans: ``pd.NA`` betekent
-                dat de status niet bepaald kon worden omdat een bron geen antwoord gaf
-                of de monumenten van de provincie niet opgehaald konden worden. In dat
-                geval volgt ook een ``MonumentStatusOnbepaaldWarning``.
+                ``rijksmonument``, ``rijksmonument_voorbescherming``,
+                ``rijksbeschermd_gezicht``, ``gemeentelijk_monument`` en
+                ``provinciaal_monument`` zijn nullable booleans: ``pd.NA`` betekent
+                dat de status niet bepaald kon worden omdat een bron geen antwoord
+                gaf, de verwerking van een batch onverwacht mislukte of de monumenten
+                van de provincie niet opgehaald konden worden. In dat geval volgt ook
+                één ``MonumentStatusOnbepaaldWarning`` met per bron de betrokken ID's.
 
         Raises:
             RuntimeError: Als de client niet als context manager wordt gebruikt
@@ -126,30 +143,13 @@ class MonumentenClient:
         valid_id_df = df.loc[~invalid_verblijf_object_ids]
         if valid_id_df.empty:
             raise ValueError("Geen enkel geldig verblijfsobject ID gevonden")
-        results, uitval, onbepaald = await _query(
+        results, uitval = await _query(
             self._session,
             valid_id_df.loc[:, verblijfsobject_id_col].drop_duplicates().tolist(),
         )
         waarschuwing = uitval.waarschuwing()
         if waarschuwing is not None:
             warnings.warn(waarschuwing, stacklevel=2)
-        onbepaalde_ids = {
-            provincie: o.verblijfsobject_ids for provincie, o in onbepaald.items()
-        }
-        if onbepaald:
-            warnings.warn(
-                MonumentStatusOnbepaaldWarning(
-                    "Provinciale monumenten niet op te halen voor "
-                    + "; ".join(
-                        f"{provincie} ({len(o.verblijfsobject_ids)} "
-                        f"verblijfsobjecten): {o.oorzaak}"
-                        for provincie, o in onbepaald.items()
-                    )
-                    + ". provinciaal_monument is voor die verblijfsobjecten pd.NA",
-                    verblijfsobject_ids=onbepaalde_ids,
-                ),
-                stacklevel=2,
-            )
         merged = pd.merge(
             valid_id_df,
             results,
@@ -161,16 +161,18 @@ class MonumentenClient:
         if "identificatie" not in df.columns:
             merged = merged.drop(columns=["identificatie"])
 
-        # Een status die niet is gevonden is onbepaald als een bron waar zij van afhangt
-        # geen antwoord gaf. Het rijksbeschermd gezicht en het provinciaal monument
-        # hangen af van het adrespunt uit de BAG; de beperkingen uit de BRK-PB hebben
-        # dat adrespunt ook nodig.
         verblijfsobject_ids = merged[verblijfsobject_id_col]
-        zonder_rce = verblijfsobject_ids.isin(list(uitval.mislukt.get(RCE, {})))
-        zonder_adrespunt = verblijfsobject_ids.isin(list(uitval.mislukt.get(BAG, {})))
-        zonder_beperkingen = zonder_adrespunt | verblijfsobject_ids.isin(
-            list(uitval.mislukt.get(BRK_PB, {}))
-        )
+
+        def onbepaald(status: str) -> pd.Series[bool]:
+            """Of een bron waar de status van afhangt geen antwoord gaf."""
+            zonder_antwoord: Set[str] = set().union(
+                *(
+                    uitval.mislukt[bron]
+                    for bron in _AFHANKELIJKHEDEN[status]
+                    if bron in uitval.mislukt
+                )
+            )
+            return verblijfsobject_ids.isin(zonder_antwoord)
 
         rijksmonument_nummer_position = merged.columns.get_loc("rijksmonument_nummer")
 
@@ -194,9 +196,7 @@ class MonumentenClient:
         merged.insert(
             rijksmonument_nummer_position,
             "rijksmonument",
-            _status(
-                merged["rijksmonument_bron"].notna(), zonder_rce | zonder_beperkingen
-            ),
+            _status(merged["rijksmonument_bron"].notna(), onbepaald("rijksmonument")),
         )
 
         # verplaats rijksmonument_bron naar rijksmonument_nummer_position + 1
@@ -207,9 +207,10 @@ class MonumentenClient:
         merged = merged[columns]
 
         # voorbescherming (Kadaster EWD): geen rijksmonument, wel apart zichtbaar
-        merged["rijksmonument_voorbescherming"] = merged[
-            "rijksmonument_voorbescherming"
-        ].eq(True)
+        merged["rijksmonument_voorbescherming"] = _status(
+            merged["rijksmonument_voorbescherming"].eq(True),
+            onbepaald("rijksmonument_voorbescherming"),
+        )
 
         rijksbeschermd_gezicht_naam_position = merged.columns.get_loc(
             "rijksbeschermd_gezicht_naam"
@@ -223,7 +224,10 @@ class MonumentenClient:
         merged.insert(
             rijksbeschermd_gezicht_naam_position,
             "rijksbeschermd_gezicht",
-            _status(merged["rijksbeschermd_gezicht_naam"].notna(), zonder_adrespunt),
+            _status(
+                merged["rijksbeschermd_gezicht_naam"].notna(),
+                onbepaald("rijksbeschermd_gezicht"),
+            ),
         )
 
         gemeentelijk_monument_position = merged.columns.get_loc(
@@ -239,7 +243,8 @@ class MonumentenClient:
             gemeentelijk_monument_position,
             "gemeentelijk_monument",
             _status(
-                merged["grondslag_gemeentelijk_monument"].notna(), zonder_beperkingen
+                merged["grondslag_gemeentelijk_monument"].notna(),
+                onbepaald("gemeentelijk_monument"),
             ),
         )
 
@@ -257,10 +262,7 @@ class MonumentenClient:
             "provinciaal_monument",
             _status(
                 merged["provinciaal_monument_omschrijving"].notna(),
-                zonder_adrespunt
-                | verblijfsobject_ids.isin(
-                    [vo_id for ids in onbepaalde_ids.values() for vo_id in ids]
-                ),
+                onbepaald("provinciaal_monument"),
             ),
         )
 

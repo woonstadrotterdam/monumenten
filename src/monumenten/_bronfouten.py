@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import logging
 import time
 from collections import Counter
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Dict, FrozenSet, Iterable, List, Optional, Set
 
 from monumenten._api._backoff import MAX_CONSECUTIVE_FAILURES, OUTAGE_PROBE_SECONDS
 
@@ -15,9 +16,14 @@ logger = logging.getLogger("monumenten.bronfouten")
 RCE = "RCE"
 BAG = "BAG"
 BRK_PB = "BRK-PB"
+# Geen externe bron: een onverwachte fout bij het verwerken van een batch. Zo'n fout
+# maakt alle statussen van de batch onbepaald in plaats van de aanroep af te breken.
+VERWERKING = "verwerking"
 
-# Verblijfsobject ID -> fout waardoor de bron, ook na retries en splitsen, geen antwoord gaf
-Mislukt = Dict[str, Exception]
+# De bronnen die per batch worden bevraagd. Gaf zo'n bron voor niets antwoord, dan
+# stopt de aanroep, en haar uitval krijgt een herkansing. Een provincie die niet op te
+# halen is, maakt alleen provinciaal_monument onbepaald.
+BATCHBRONNEN: FrozenSet[str] = frozenset({RCE, BAG, BRK_PB, VERWERKING})
 
 _MAX_IDS_IN_MELDING = 10
 
@@ -31,8 +37,8 @@ class BronFoutError(RuntimeError):
     Args:
         melding (str): Omschrijving van de fout
         verblijfsobject_ids (Optional[Dict[str, List[str]]]): Per bron zonder
-            antwoord ("RCE", "BAG" of "BRK-PB") de verblijfsobject ID's zonder
-            antwoord, ook uit batches die daarna zijn overgeslagen
+            antwoord ("RCE", "BAG" of "BRK-PB") de gesorteerde verblijfsobject ID's
+            zonder antwoord, ook uit batches die daarna zijn overgeslagen
     """
 
     def __init__(
@@ -53,8 +59,8 @@ class MonumentStatusOnbepaaldWarning(UserWarning):
     Args:
         melding (str): Omschrijving van de waarschuwing
         verblijfsobject_ids (Optional[Dict[str, List[str]]]): Per bron ("RCE",
-            "BAG" of "BRK-PB", of een provincie zoals "Noord-Holland" of "Drenthe")
-            de verblijfsobject ID's zonder antwoord
+            "BAG", "BRK-PB", "verwerking" of een provincie zoals "Noord-Holland")
+            de gesorteerde verblijfsobject ID's zonder antwoord
     """
 
     def __init__(
@@ -78,6 +84,10 @@ class Bronuitval:
     OUTAGE_PROBE_SECONDS na. Een antwoord beëindigt de storing. Raakt een bron gestoord
     voor zij één antwoord gaf, dan ligt zij plat: de aanroep kan niet meer slagen en
     er volgt geen proefrequest.
+
+    Per bron wordt alleen de laatste fout bewaard. Een fout houdt via zijn traceback
+    de frames van zijn request vast; bij een lange storing in een aanroep met
+    miljoenen verblijfsobjecten zou één fout per verblijfsobject veel geheugen kosten.
     """
 
     def __init__(self) -> None:
@@ -88,7 +98,11 @@ class Bronuitval:
         # Gestoorde bron -> tijdstip (time.monotonic) vanaf wanneer een proefrequest mag
         self._proef_vanaf: Dict[str, float] = {}
         self._plat: Set[str] = set()
-        self.mislukt: Dict[str, Mislukt] = {}
+        # Bron -> verblijfsobject ID's waarvoor zij, ook na retries en splitsen,
+        # geen antwoord gaf
+        self.mislukt: Dict[str, Set[str]] = {}
+        # Bron in mislukt -> de laatste fout waardoor zij geen antwoord gaf
+        self.laatste_fout: Dict[str, Exception] = {}
 
     def registreer_antwoord(self, bron: str, aantal: int) -> None:
         """Leg vast dat een bron voor een aantal verblijfsobjecten antwoord gaf.
@@ -139,6 +153,34 @@ class Bronuitval:
             else "De bron wordt overgeslagen; elke "
             f"{OUTAGE_PROBE_SECONDS} seconden volgt een proefrequest.",
         )
+
+    def registreer_mislukte_verwerking(
+        self, verblijfsobject_ids: Iterable[str], fout: Exception
+    ) -> None:
+        """Leg vast dat het verwerken van een batch onverwacht mislukte.
+
+        De statussen van de batch worden onbepaald en de batch krijgt een herkansing.
+        Mislukken de eerste MAX_CONSECUTIVE_FAILURES batches allemaal, dan is het
+        vrijwel zeker een programmeerfout: de verwerking ligt dan plat, de resterende
+        batches worden overgeslagen en controleer geeft de oorspronkelijke fout.
+
+        Args:
+            verblijfsobject_ids (Iterable[str]): De verblijfsobject ID's van de batch
+            fout (Exception): De onverwachte fout
+        """
+        self.registreer_fout(VERWERKING, verblijfsobject_ids, fout)
+        self._fouten_op_rij[VERWERKING] += 1
+        if (
+            not self._beantwoord[VERWERKING]
+            and self._fouten_op_rij[VERWERKING] >= MAX_CONSECUTIVE_FAILURES
+        ):
+            self._plat.add(VERWERKING)
+            self._storing[VERWERKING] = fout
+            logger.error(
+                "De verwerking van de eerste %d batches mislukte; de resterende "
+                "batches worden overgeslagen en de aanroep stopt.",
+                MAX_CONSECUTIVE_FAILURES,
+            )
 
     def is_gestoord(self, bron: str) -> bool:
         """Geef aan of een bron gestoord is; er wordt dan niet gesplitst.
@@ -204,15 +246,14 @@ class Bronuitval:
             verblijfsobject_ids (Iterable[str]): De betrokken verblijfsobject ID's
             fout (Exception): De fout die na retries en splitsen overbleef
         """
-        self.mislukt.setdefault(bron, {}).update(
-            dict.fromkeys(verblijfsobject_ids, fout)
-        )
+        self.mislukt.setdefault(bron, set()).update(verblijfsobject_ids)
+        self.laatste_fout[bron] = fout
 
     def herkansbaar(self) -> List[str]:
         """Geef de verblijfsobjecten die een herkansing verdienen.
 
-        Dat zijn de verblijfsobjecten waarvoor een bron geen antwoord gaf die op dit
-        moment niet gestoord is: een gestoorde bron opnieuw bevragen heeft geen zin.
+        Dat zijn de verblijfsobjecten waarvoor een batchbron geen antwoord gaf die op
+        dit moment niet gestoord is: een gestoorde bron opnieuw bevragen heeft geen zin.
 
         Returns:
             List[str]: De verblijfsobject ID's, elk één keer
@@ -220,9 +261,9 @@ class Bronuitval:
         return list(
             dict.fromkeys(
                 verblijfsobject_id
-                for bron, fouten in self.mislukt.items()
-                if bron not in self._storing
-                for verblijfsobject_id in fouten
+                for bron, ids in self.mislukt.items()
+                if bron in BATCHBRONNEN and bron not in self._storing
+                for verblijfsobject_id in ids
             )
         )
 
@@ -235,13 +276,12 @@ class Bronuitval:
         Args:
             verblijfsobject_ids (Iterable[str]): De verblijfsobject ID's van de batch
         """
-        ids = list(verblijfsobject_ids)
+        ids = set(verblijfsobject_ids)
         for bron in list(self.mislukt):
-            fouten = self.mislukt[bron]
-            for verblijfsobject_id in ids:
-                fouten.pop(verblijfsobject_id, None)
-            if not fouten:
+            self.mislukt[bron] -= ids
+            if not self.mislukt[bron]:
                 del self.mislukt[bron]
+                del self.laatste_fout[bron]
 
     def gestoorde_bronnen(self) -> List[str]:
         """Geef de bronnen die op dit moment gestoord zijn.
@@ -258,26 +298,33 @@ class Bronuitval:
             await asyncio.sleep(wachttijd)
 
     def controleer(self) -> None:
-        """Stop als een bron voor geen enkel bevraagd verblijfsobject antwoord gaf.
+        """Stop als een batchbron voor geen enkel bevraagd verblijfsobject antwoord gaf.
+
+        Lukte de verwerking van geen enkele batch, dan is dat geen uitval van een bron
+        maar vrijwel zeker een programmeerfout: die fout zelf bereikt de aanroeper.
 
         Raises:
             BronFoutError: Als een bron voor alle bevraagde verblijfsobjecten faalde
                 of plat ligt
+            Exception: De oorspronkelijke fout als de verwerking van geen enkele
+                batch lukte
         """
         plat = {
-            bron: fouten
-            for bron, fouten in self.mislukt.items()
-            if bron in self._plat or not self._beantwoord[bron]
+            bron: ids
+            for bron, ids in self.mislukt.items()
+            if bron in BATCHBRONNEN
+            and (bron in self._plat or not self._beantwoord[bron])
         }
         if not plat:
             return
-        laatste_fout = list(next(iter(plat.values())).values())[-1]
+        if VERWERKING in plat:
+            raise self.laatste_fout[VERWERKING]
         raise BronFoutError(
             "De monumentstatus kon niet worden bepaald: een bron gaf, ook na "
             "retries, voor geen enkel bevraagd verblijfsobject antwoord. "
-            + _beschrijf(plat),
+            + self._beschrijf(plat),
             _ids_per_bron(plat),
-        ) from laatste_fout
+        ) from self.laatste_fout[next(iter(plat))]
 
     def waarschuwing(self) -> Optional[MonumentStatusOnbepaaldWarning]:
         """Geef de waarschuwing voor de verblijfsobjecten zonder antwoord.
@@ -288,31 +335,30 @@ class Bronuitval:
         """
         if not self.mislukt:
             return None
-        aantal = len({i for fouten in self.mislukt.values() for i in fouten})
+        zonder_antwoord: Set[str] = set().union(*self.mislukt.values())
+        aantal = len(zonder_antwoord)
         return MonumentStatusOnbepaaldWarning(
             f"De monumentstatus van {aantal} verblijfsobject(en) kon niet volledig "
             "worden bepaald: een bron gaf, ook na retries, geen antwoord. De "
             "statussen die van die bron afhangen zijn pd.NA. "
-            + _beschrijf(self.mislukt),
+            + self._beschrijf(self.mislukt),
             _ids_per_bron(self.mislukt),
         )
 
+    def _beschrijf(self, mislukt: Dict[str, Set[str]]) -> str:
+        """Som per bron de laatste fout en de verblijfsobjecten zonder antwoord op."""
+        delen = []
+        for bron, ids in mislukt.items():
+            fout = self.laatste_fout[bron]
+            genoemd = ", ".join(heapq.nsmallest(_MAX_IDS_IN_MELDING, ids))
+            if len(ids) > _MAX_IDS_IN_MELDING:
+                genoemd += f" en {len(ids) - _MAX_IDS_IN_MELDING} andere"
+            delen.append(
+                f"{bron} ({len(ids)} verblijfsobject(en), "
+                f"{type(fout).__name__}: {fout}): {genoemd}"
+            )
+        return "; ".join(delen)
 
-def _ids_per_bron(mislukt: Dict[str, Mislukt]) -> Dict[str, List[str]]:
-    return {bron: list(fouten) for bron, fouten in mislukt.items()}
 
-
-def _beschrijf(mislukt: Dict[str, Mislukt]) -> str:
-    """Som per bron de laatste fout en de verblijfsobjecten zonder antwoord op."""
-    delen = []
-    for bron, fouten in mislukt.items():
-        ids = list(fouten)
-        fout = fouten[ids[-1]]
-        genoemd = ", ".join(ids[:_MAX_IDS_IN_MELDING])
-        if len(ids) > _MAX_IDS_IN_MELDING:
-            genoemd += f" en {len(ids) - _MAX_IDS_IN_MELDING} andere"
-        delen.append(
-            f"{bron} ({len(ids)} verblijfsobject(en), {type(fout).__name__}: {fout}): "
-            f"{genoemd}"
-        )
-    return "; ".join(delen)
+def _ids_per_bron(mislukt: Dict[str, Set[str]]) -> Dict[str, List[str]]:
+    return {bron: sorted(ids) for bron, ids in mislukt.items()}
