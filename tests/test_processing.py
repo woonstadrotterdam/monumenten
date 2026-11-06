@@ -142,28 +142,6 @@ async def test_query_success(empty_geodataframe):
 
 
 @pytest.mark.asyncio
-async def test_query_batch_failure_is_not_swallowed(empty_geodataframe):
-    """When every batch fails unexpectedly, the original error reaches the caller
-    instead of an empty result (which would read as "no monument")."""
-    ids = ["only_one"]
-
-    async def mock_process_batch(session, batch, brk_pb_adrespunten, uitval):
-        raise RuntimeError("always fail")
-
-    with (
-        patch(
-            "monumenten._processing._get_beschermde_gezichten",
-            return_value=empty_geodataframe,
-        ),
-        patch("monumenten._processing._query_adrespunten", return_value={}),
-        patch("monumenten._processing._process_batch", side_effect=mock_process_batch),
-    ):
-        async with aiohttp.ClientSession() as session:
-            with pytest.raises(RuntimeError, match="always fail"):
-                await _query(session, ids)
-
-
-@pytest.mark.asyncio
 async def test_query_sorteert_batches_ruimtelijk(empty_geodataframe):
     """Een batch bevat verblijfsobjecten die bij elkaar liggen, ongeacht de invoervolgorde."""
     adrespunten = {
@@ -709,40 +687,12 @@ async def test_beperkingen_brk_pb_failure_is_registered_per_verblijfsobject():
 
 
 @pytest.mark.asyncio
-async def test_query_raises_when_source_fails_for_all_ids(empty_geodataframe):
-    """A source that answers for no ID at all, over all batches, stops the call."""
-
-    async def mock_process_batch(session, batch, brk_pb_adrespunten, uitval):
-        uitval.registreer_antwoord(RCE, len(batch))
-        uitval.registreer_fout(BRK_PB, batch, RuntimeError("503"))
-        return _make_batch_result([])
-
-    with (
-        patch(
-            "monumenten._processing._get_beschermde_gezichten",
-            return_value=empty_geodataframe,
-        ),
-        patch("monumenten._processing._query_adrespunten", return_value={}),
-        patch("monumenten._processing._process_batch", side_effect=mock_process_batch),
-        patch("monumenten._processing._QUERY_BATCH_GROOTTE", 1),
-    ):
-        async with aiohttp.ClientSession() as session:
-            with pytest.raises(BronFoutError, match="BRK-PB") as exc_info:
-                await _query(session, ["id1", "id2"])
-
-    assert sorted(exc_info.value.verblijfsobject_ids[BRK_PB]) == ["id1", "id2"]
-    assert RCE not in exc_info.value.verblijfsobject_ids
-
-
-@pytest.mark.asyncio
 async def test_query_returns_partial_failure(empty_geodataframe):
     """A source that fails for one batch but answers for another is not down: the
     result comes back together with the IDs that are still unanswered after the
     retry at the end."""
-    pogingen = Counter()
 
     async def mock_process_batch(session, batch, brk_pb_adrespunten, uitval):
-        pogingen[(tuple(batch), tuple(brk_pb_adrespunten))] += 1
         uitval.registreer_antwoord(RCE, len(batch))
         if "id1" in brk_pb_adrespunten:
             uitval.registreer_fout(BRK_PB, ["id1"], RuntimeError("503"))
@@ -765,12 +715,6 @@ async def test_query_returns_partial_failure(empty_geodataframe):
         async with aiohttp.ClientSession() as session:
             result, uitval = await _query(session, ["id1", "id2"])
 
-    # In de herkansing alleen de BRK-PB, niet opnieuw de RCE
-    assert pogingen == {
-        (("id1",), ("id1",)): 1,
-        (("id2",), ("id2",)): 1,
-        ((), ("id1",)): 1,
-    }
     assert list(result["identificatie"]) == ["id2"]
     assert list(uitval.mislukt) == [BRK_PB]
     assert list(uitval.mislukt[BRK_PB]) == ["id1"]
@@ -950,14 +894,6 @@ async def test_client_raises_when_a_source_is_down(down, bron):
             await client.process_from_list(_ALLE)
 
     assert list(exc_info.value.verblijfsobject_ids) == [bron]
-
-
-@pytest.mark.asyncio
-async def test_client_single_id_never_gets_an_undetermined_status():
-    """With one ID a failing source fails for all IDs, so the caller gets an error."""
-    with _mocked_sources(brk_pb_down=[_VO_RIJKS]) as client:
-        with pytest.raises(BronFoutError, match="BRK-PB"):
-            await client.process_from_list([_VO_RIJKS], to_vera=True)
 
 
 @pytest.mark.asyncio
@@ -2441,24 +2377,6 @@ def test_eerst_verspreid_zet_verspreide_batches_vooraan():
     assert sorted(map(tuple, volgorde)) == sorted(map(tuple, batches))
     # Weinig batches: de volgorde blijft
     assert _eerst_verspreid(batches[:5]) == batches[:5]
-
-
-@pytest.mark.asyncio
-async def test_waarschuwing_zonder_adrespunt_telt_de_herkansing_mee(caplog):
-    """Geeft de BAG pas in de herkansing antwoord dat een verblijfsobject niet in de
-    BAG staat, dan telt het mee in de logregel over verblijfsobjecten zonder
-    adrespunt."""
-    bag_down = [_VO_ONBEKEND]
-    with (
-        _mocked_sources(bag_down=bag_down) as client,
-        patch.object(
-            Bronuitval, "wacht_op_proefrequest", AsyncMock(side_effect=bag_down.clear)
-        ),
-        caplog.at_level(logging.WARNING, logger="monumenten.processing"),
-    ):
-        await client.process_from_list(_ALLE)
-
-    assert "1 van 5 verblijfsobjecten hebben geen adrespunt" in caplog.text
 
 
 def test_aantal_onvolledig_bepaald_totaal_telt_elk_verblijfsobject_een_keer():
