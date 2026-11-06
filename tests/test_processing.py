@@ -58,10 +58,9 @@ from monumenten.client import MonumentenClient
 _RD = "EPSG:28992"
 
 
-def _make_batch_result(identificaties, count=None):
-    """Minimal valid (rm, beschermd_gezicht, gemeentelijk) frames + count."""
-    n = count if count is not None else len(identificaties)
-    ids_df = pd.DataFrame({"identificatie": list(identificaties)[:n]})
+def _make_batch_result(identificaties):
+    """Minimal valid (rm, beschermd_gezicht, gemeentelijk) frames."""
+    ids_df = pd.DataFrame({"identificatie": list(identificaties)})
     rm = ids_df.assign(
         rijksmonument_nummer="",
         rijksmonument_bron=None,
@@ -69,7 +68,7 @@ def _make_batch_result(identificaties, count=None):
     )
     bg = ids_df.assign(rijksbeschermd_gezicht_naam=pd.NA)
     gm = ids_df.assign(grondslag_gemeentelijk_monument=pd.NA)
-    return (rm, bg, gm, n)
+    return (rm, bg, gm)
 
 
 @pytest.fixture
@@ -142,8 +141,8 @@ async def test_query_success(empty_geodataframe):
 
 @pytest.mark.asyncio
 async def test_query_batch_failure_is_not_swallowed(empty_geodataframe):
-    """When _process_batch raises, the error reaches the caller instead of an empty
-    result (which would read as "no monument"), unwrapped from the TaskGroup."""
+    """When every batch fails unexpectedly, the original error reaches the caller
+    instead of an empty result (which would read as "no monument")."""
     ids = ["only_one"]
 
     async def mock_process_batch(session, batch, bg_df, adrespunten, uitval):
@@ -476,7 +475,7 @@ async def test_process_batch_zonder_adrespunten_houdt_rce_rijksmonumenten():
         ),
         patch("monumenten._processing._query_beperkingen", return_value=[]),
     ):
-        rijksmonumenten, gezichten, gemeentelijk, aantal = await _process_batch(
+        rijksmonumenten, gezichten, gemeentelijk = await _process_batch(
             AsyncMock(),
             ["ligplaats", "onbekend"],
             _beschermde_gezichten("Gezicht", 0, 0, 10, 10),
@@ -484,7 +483,6 @@ async def test_process_batch_zonder_adrespunten_houdt_rce_rijksmonumenten():
             Bronuitval(),
         )
 
-    assert aantal == 2
     assert rijksmonumenten.to_dict("records") == [
         {
             "identificatie": "ligplaats",
@@ -504,7 +502,7 @@ async def test_process_batch_beschermd_gezicht_zonder_brk_pb():
         patch("monumenten._processing._query_rijksmonumenten", return_value=[]),
         patch("monumenten._processing._query_beperkingen", return_value=[]),
     ):
-        _, gezichten, _, _ = await _process_batch(
+        _, gezichten, _ = await _process_batch(
             AsyncMock(),
             ["binnen", "buiten"],
             _beschermde_gezichten("Gezicht", 0, 0, 10, 10),
@@ -1936,13 +1934,12 @@ def _rij(rm_df, identificatie):
 @pytest.mark.asyncio
 async def test_process_batch_ewd_is_geen_rijksmonument(empty_geodataframe):
     """EWD (voorbescherming) zet alleen rijksmonument_voorbescherming, geen bron."""
-    rm_df, _, gm_df, n = await _run_process_batch(
+    rm_df, _, gm_df = await _run_process_batch(
         rijksmonumenten=[],
         beperkingen=[_beperking("vo_ewd", "EWD", _EWD_GRONDSLAG)],
         beschermde_gezichten_df=empty_geodataframe,
     )
 
-    assert n == 1
     assert list(rm_df.columns) == [
         "identificatie",
         "rijksmonument_nummer",
@@ -1961,7 +1958,7 @@ async def test_process_batch_ewd_is_geen_rijksmonument(empty_geodataframe):
 async def test_process_batch_ewe_is_rijksmonument_zonder_voorbescherming(
     empty_geodataframe,
 ):
-    rm_df, _, _, _ = await _run_process_batch(
+    rm_df, _, _ = await _run_process_batch(
         rijksmonumenten=[],
         beperkingen=[_beperking("vo_ewe", "EWE", _EWE_GRONDSLAG)],
         beschermde_gezichten_df=empty_geodataframe,
@@ -1975,7 +1972,7 @@ async def test_process_batch_ewe_is_rijksmonument_zonder_voorbescherming(
 @pytest.mark.asyncio
 async def test_process_batch_ewe_en_ewd_op_zelfde_verblijfsobject(empty_geodataframe):
     """EWE + EWD: één rij, bron Kadaster én voorbescherming True."""
-    rm_df, _, _, _ = await _run_process_batch(
+    rm_df, _, _ = await _run_process_batch(
         rijksmonumenten=[],
         beperkingen=[
             _beperking("vo_beide", "EWE", _EWE_GRONDSLAG),
@@ -1992,7 +1989,7 @@ async def test_process_batch_ewe_en_ewd_op_zelfde_verblijfsobject(empty_geodataf
 @pytest.mark.asyncio
 async def test_process_batch_rce_en_ewd(empty_geodataframe):
     """RCE-nummer + EWD: bron is alleen RCE (EWD telt niet als Kadaster-bron)."""
-    rm_df, _, _, _ = await _run_process_batch(
+    rm_df, _, _ = await _run_process_batch(
         rijksmonumenten=[{"identificatie": "vo_rce", "rijksmonument_nummer": "12345"}],
         beperkingen=[_beperking("vo_rce", "EWD", _EWD_GRONDSLAG)],
         beschermde_gezichten_df=empty_geodataframe,
@@ -2006,7 +2003,7 @@ async def test_process_batch_rce_en_ewd(empty_geodataframe):
 
 @pytest.mark.asyncio
 async def test_process_batch_rce_en_ewe(empty_geodataframe):
-    rm_df, _, _, _ = await _run_process_batch(
+    rm_df, _, _ = await _run_process_batch(
         rijksmonumenten=[{"identificatie": "vo_rce", "rijksmonument_nummer": "12345"}],
         beperkingen=[_beperking("vo_rce", "EWE", _EWE_GRONDSLAG)],
         beschermde_gezichten_df=empty_geodataframe,
@@ -2020,7 +2017,7 @@ async def test_process_batch_rce_en_ewe(empty_geodataframe):
 @pytest.mark.asyncio
 async def test_process_batch_zonder_beperking(empty_geodataframe):
     """Verblijfsobject zonder beperking komt niet in rijksmonumenten_df."""
-    rm_df, _, gm_df, _ = await _run_process_batch(
+    rm_df, _, gm_df = await _run_process_batch(
         rijksmonumenten=[],
         beperkingen=[_beperking("vo_leeg")],
         beschermde_gezichten_df=empty_geodataframe,
@@ -2037,7 +2034,7 @@ async def test_process_batch_geen_bron_is_none(empty_geodataframe):
     De client leidt rijksmonument af uit een gevulde bron (notna), dus een lege
     string zou zo'n rij ten onrechte als rijksmonument laten tellen.
     """
-    rm_df, _, _, _ = await _run_process_batch(
+    rm_df, _, _ = await _run_process_batch(
         rijksmonumenten=[{"identificatie": "vo_rce", "rijksmonument_nummer": None}],
         beperkingen=[_beperking("vo_rce")],
         beschermde_gezichten_df=empty_geodataframe,
@@ -2309,6 +2306,8 @@ async def test_process_batch_annuleert_andere_query_bij_onverwachte_fout(
 class _Balk:
     """Neemt de plaats in van tqdm en onthoudt de voortgang per fase."""
 
+    alle: list = []
+
     def __init__(self, total, desc, disable):
         self.total, self.desc, self.n, self.postfix = total, desc, 0, {}
         self.alle.append(self)
@@ -2326,21 +2325,44 @@ class _Balk:
         self.postfix = postfix
 
 
-@pytest.mark.asyncio
-async def test_voortgang_loopt_vol_en_telt_onvolledige_verblijfsobjecten():
-    """Ook een mislukte batch is afgehandeld: elke balk loopt vol, en ernaast staat
-    hoeveel verblijfsobjecten een onvolledig resultaat hebben."""
-    _Balk.alle = []
+@pytest.fixture
+def balken():
+    """Vervang tqdm door _Balk; geeft de balken die de aanroep maakt."""
     with (
-        _mocked_sources() as client,
-        _batch_faalt({_VO_GEMEENTE}),
+        patch.object(_Balk, "alle", []),
         patch("monumenten._processing.tqdm_asyncio", _Balk),
     ):
+        yield _Balk.alle
+
+
+@pytest.mark.asyncio
+async def test_voortgang_loopt_vol_en_telt_onvolledige_verblijfsobjecten(balken):
+    """Ook een mislukte batch is afgehandeld: elke balk loopt vol, en ernaast staat
+    hoeveel verblijfsobjecten onvolledig zijn."""
+    with _mocked_sources() as client, _batch_faalt({_VO_GEMEENTE}):
         with pytest.warns(MonumentStatusOnbepaaldWarning):
             await client.process_from_list(_ALLE)
 
-    assert [(b.desc, b.n, b.total, b.postfix) for b in _Balk.alle] == [
+    assert [(b.desc, b.n, b.total, b.postfix) for b in balken] == [
         ("Adrespunten (BAG)", len(_ALLE), len(_ALLE), {}),
         ("Monumentstatus", len(_ALLE), len(_ALLE), {"onvolledig": 1}),
         ("Herkansing", 1, 1, {"onvolledig": 1}),
     ]
+
+
+def test_overgeslagen_batch_bij_kansloze_verwerking_wordt_vastgelegd():
+    """Slaagt na de kansloze start toch nog een batch die al liep, dan is de
+    verwerking niet meer kansloos en volgt er geen fout. De batches die intussen zijn
+    overgeslagen moeten daarom als onvolledig vastliggen, en niet stil False geven."""
+    uitval = Bronuitval()
+    for nummer in range(MAX_CONSECUTIVE_FAILURES):
+        uitval.registreer_mislukte_verwerking([f"id{nummer}"], ValueError("data"))
+
+    assert uitval.sla_over_als_verwerking_kansloos(["overgeslagen"])
+    uitval.registreer_antwoord(VERWERKING, 1)  # de batch die al liep
+
+    assert not uitval.sla_over_als_verwerking_kansloos(["volgende"])
+    uitval.controleer()
+    assert "overgeslagen" in uitval.mislukt[VERWERKING]
+    assert "overgeslagen" in uitval.herkansbaar()
+    assert "volgende" not in uitval.mislukt[VERWERKING]

@@ -62,7 +62,6 @@ _GRENS_BUFFER_METER = 100
 
 
 _BatchFrames = Tuple[DataFrame, DataFrame, DataFrame]
-_BatchResult = Tuple[DataFrame, DataFrame, DataFrame, int]
 
 _RESULTAAT_KOLOMMEN = [
     "identificatie",
@@ -102,7 +101,7 @@ async def _process_batch(
     beschermde_gezichten_df: gpd.GeoDataFrame,
     adrespunten: _Adrespunten,
     uitval: Bronuitval,
-) -> _BatchResult:
+) -> _BatchFrames:
     """Verwerk een batch verblijfsobjecten.
 
     Args:
@@ -114,9 +113,9 @@ async def _process_batch(
             verblijfsobjecten zij wel en geen antwoord gaven
 
     Returns:
-        _BatchResult: Tuple met rijksmonumenten, beschermde gezichten,
-            gemeentelijke monumenten en aantal verwerkte objecten. De provinciale
-            monumenten worden na alle batches bepaald, uit alle adrespunten.
+        _BatchFrames: Tuple met rijksmonumenten, beschermde gezichten en
+            gemeentelijke monumenten. De provinciale monumenten worden na alle
+            batches bepaald, uit alle adrespunten.
     """
     batch_adrespunten = {i: adrespunten[i] for i in batch if i in adrespunten}
 
@@ -225,7 +224,6 @@ async def _process_batch(
         rijksmonumenten_df,
         verblijfsobjecten_in_beschermde_gezichten_df,
         gemeentelijke_monumenten_df,
-        len(batch),
     )
 
 
@@ -479,9 +477,9 @@ def _sorteer_ruimtelijk(
     )
 
 
-def _zonder(result: _BatchResult, verblijfsobject_ids: Set[str]) -> _BatchResult:
+def _zonder(result: _BatchFrames, verblijfsobject_ids: Set[str]) -> _BatchFrames:
     """Laat uit een batchresultaat de rijen van de gegeven verblijfsobjecten weg."""
-    rijksmonumenten, beschermde_gezichten, gemeentelijke_monumenten, aantal = result
+    rijksmonumenten, beschermde_gezichten, gemeentelijke_monumenten = result
     return (
         rijksmonumenten[~rijksmonumenten["identificatie"].isin(verblijfsobject_ids)],
         beschermde_gezichten[
@@ -490,7 +488,6 @@ def _zonder(result: _BatchResult, verblijfsobject_ids: Set[str]) -> _BatchResult
         gemeentelijke_monumenten[
             ~gemeentelijke_monumenten["identificatie"].isin(verblijfsobject_ids)
         ],
-        aantal,
     )
 
 
@@ -555,11 +552,13 @@ async def _query(
     # elke batch opnieuw
     gelogde_fouttypes: Set[type] = set()
 
-    async def _verwerk_batch(batch: List[str]) -> Optional[_BatchResult]:
+    async def _verwerk_batch(batch: List[str]) -> Optional[_BatchFrames]:
         # Ligt een bron plat, dan kan de aanroep niet meer slagen: bevraag ook de
         # andere bronnen niet meer. Hetzelfde geldt als de verwerking kansloos is.
         # uitval.controleer() geeft daarna de fout.
-        if uitval.sla_over_als_bron_plat_ligt(batch) or uitval.verwerking_kansloos():
+        if uitval.sla_over_als_bron_plat_ligt(
+            batch
+        ) or uitval.sla_over_als_verwerking_kansloos(batch):
             return None
         try:
             result = await _process_batch(
@@ -582,8 +581,8 @@ async def _query(
         uitval.registreer_antwoord(VERWERKING, len(batch))
         return result
 
-    async def _verwerk(batches: List[List[str]], fase: str) -> List[_BatchResult]:
-        resultaten: List[_BatchResult] = []
+    async def _verwerk(batches: List[List[str]], fase: str) -> List[_BatchFrames]:
+        resultaten: List[_BatchFrames] = []
         onvolledig = 0
 
         async def _run_batch(batch: List[str]) -> None:
@@ -594,7 +593,7 @@ async def _query(
                 resultaten.append(result)
             # Ook een mislukte of overgeslagen batch is afgehandeld: de balk loopt vol,
             # en ernaast staat hoeveel verblijfsobjecten een onvolledig resultaat hebben
-            onvolledig += uitval.aantal_zonder_antwoord(batch)
+            onvolledig += uitval.aantal_onvolledig(batch)
             voortgang.update(len(batch))
             voortgang.set_postfix(onvolledig=onvolledig, refresh=False)
 

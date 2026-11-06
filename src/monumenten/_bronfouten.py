@@ -198,14 +198,38 @@ class Bronuitval:
             and self._fouten_op_rij[VERWERKING] >= MAX_CONSECUTIVE_FAILURES
         )
 
-    def aantal_zonder_antwoord(self, verblijfsobject_ids: Iterable[str]) -> int:
-        """Tel de verblijfsobjecten waarvoor een bron tot nu toe geen antwoord gaf.
+    def sla_over_als_verwerking_kansloos(
+        self, verblijfsobject_ids: Iterable[str]
+    ) -> bool:
+        """Registreer een batch direct als mislukt als de verwerking kansloos is.
+
+        De batch wordt vastgelegd met de laatste verwerkingsfout. Dat moet: slaagt
+        daarna toch nog een batch die al liep, dan is de verwerking niet meer
+        kansloos, geeft controleer geen fout, en zou een niet vastgelegde batch
+        voor al zijn verblijfsobjecten stil False opleveren.
+
+        Args:
+            verblijfsobject_ids (Iterable[str]): De verblijfsobject ID's van de batch
+
+        Returns:
+            bool: Of de verwerking kansloos is; de batch moet dan worden overgeslagen
+        """
+        if not self.verwerking_kansloos():
+            return False
+        self.registreer_fout(
+            VERWERKING, verblijfsobject_ids, self.laatste_fout[VERWERKING]
+        )
+        return True
+
+    def aantal_onvolledig(self, verblijfsobject_ids: Iterable[str]) -> int:
+        """Tel de onvolledige verblijfsobjecten: een bron gaf tot nu toe geen
+        antwoord, of hun verwerking mislukte.
 
         Args:
             verblijfsobject_ids (Iterable[str]): De verblijfsobject ID's
 
         Returns:
-            int: Hoeveel daarvan een onvolledig resultaat hebben
+            int: Hoeveel daarvan onvolledig zijn
         """
         return sum(
             1

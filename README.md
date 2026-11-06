@@ -247,7 +247,7 @@ De BRK-PB WFS doorzoekt per verzoek de omhullende rechthoek van alle opgevraagde
 
 Een bezit dat in één regio ligt gaat daardoor het snelst. Adressen verspreid over heel Nederland kosten meer en tragere verzoeken.
 
-Bij een grote aanroep toont de package een voortgangsbalk voor elke fase: het ophalen van de adrespunten (vanaf 10.000 verblijfsobjecten), het verwerken van de batches en de herkansing (vanaf twee batches). Een aanroep voor één verblijfsobject toont er geen. De balk loopt altijd vol, ook als een bron geen antwoord gaf; ernaast staat hoeveel verblijfsobjecten tot dan toe onvolledig zijn (`onvolledig=…`): voor hen gaf een bron geen antwoord of mislukte de verwerking. Na de herkansing is dat het aantal uit de waarschuwing, op de provincies na.
+Bij een grote aanroep toont de package een voortgangsbalk voor elke fase: het ophalen van de adrespunten (vanaf 10.000 verblijfsobjecten), het verwerken van de batches en de herkansing (vanaf twee batches). Een aanroep voor één verblijfsobject toont er geen. De balk loopt altijd vol, ook als een bron geen antwoord gaf; ernaast staat hoeveel verblijfsobjecten tot dan toe onvolledig zijn (`onvolledig=…`): voor hen gaf een bron geen antwoord of mislukte de verwerking. De herkansingsbalk telt alleen de verblijfsobjecten die opnieuw zijn verwerkt; wie bij een nog gestoorde bron geen herkansing kreeg, staat er niet in. Het totaal staat in de waarschuwing.
 
 De provinciale services staan hieronder bij [Provinciale monumenten](#provinciale-monumenten). De provinciegrenzen komen van PDOK Bestuurlijke Gebieden (`https://service.pdok.nl/kadaster/bestuurlijkegebieden/wfs/v1_0`, laag `Provinciegebied`, licentie CC BY 4.0).
 
