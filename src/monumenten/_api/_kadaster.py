@@ -8,6 +8,7 @@ import geopandas as gpd
 
 from monumenten._api._backoff import (
     MAX_ATTEMPTS,
+    AfgekaptAntwoordError,
     MAX_SPLIT_DEPTH,
     MIN_BATCH_SIZE,
     RATE_LIMIT_SLEEP_SECONDS,
@@ -396,15 +397,15 @@ async def _vraag_beperkingen(
                 len(beperkingen),
                 len(adrespunten),
             )
-            raise RuntimeError("BRK-PB response is afgekapt")
+            raise AfgekaptAntwoordError("BRK-PB response is afgekapt")
     except Exception as e:
-        uitval.registreer_mislukte_request(BRK_PB, e)
-        if (
-            not uitval.is_gestoord(BRK_PB)
-            and not _is_rate_limited(e)
+        kan_kleiner = (
+            not _is_rate_limited(e)
             and len(adrespunten) > MIN_BATCH_SIZE
             and _depth < MAX_SPLIT_DEPTH
-        ):
+        )
+        uitval.registreer_mislukte_request(BRK_PB, e, kan_kleiner=kan_kleiner)
+        if kan_kleiner and not uitval.is_gestoord(BRK_PB):
             mid = len(punten) // 2
             logger.info(
                 "BRK-PB query mislukt, splitsen in 2 batches van %d en %d adrespunten (depth %d)",
@@ -519,13 +520,13 @@ async def _vraag_adrespunten(
             x, y = verblijfsobject["geometry"]["coordinates"][:2]
             adrespunten[verblijfsobject["properties"]["identificatie"]] = (x, y)
     except Exception as e:
-        uitval.registreer_mislukte_request(BAG, e)
-        if (
-            not uitval.is_gestoord(BAG)
-            and not _is_rate_limited(e)
+        kan_kleiner = (
+            not _is_rate_limited(e)
             and len(identificaties) > MIN_BATCH_SIZE
             and _depth < MAX_SPLIT_DEPTH
-        ):
+        )
+        uitval.registreer_mislukte_request(BAG, e, kan_kleiner=kan_kleiner)
+        if kan_kleiner and not uitval.is_gestoord(BAG):
             mid = len(identificaties) // 2
             logger.info(
                 "BAG verblijfsobjecten query mislukt, splitsen in 2 batches van %d en %d IDs (depth %d)",

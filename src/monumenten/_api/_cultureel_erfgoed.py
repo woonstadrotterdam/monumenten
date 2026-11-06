@@ -171,12 +171,9 @@ async def _query_rijksmonumenten(
             # Geen fout maar ook geen lijst: dat is geen antwoord, dus geen leeg resultaat
             raise RuntimeError("Onverwacht response formaat van de RCE")
     except Exception as e:
-        uitval.registreer_mislukte_request(RCE, e)
-        if (
-            not uitval.is_gestoord(RCE)
-            and len(identificaties) > MIN_BATCH_SIZE
-            and _depth < MAX_SPLIT_DEPTH
-        ):
+        kan_kleiner = len(identificaties) > MIN_BATCH_SIZE and _depth < MAX_SPLIT_DEPTH
+        uitval.registreer_mislukte_request(RCE, e, kan_kleiner=kan_kleiner)
+        if kan_kleiner and not uitval.is_gestoord(RCE):
             mid = len(identificaties) // 2
             logger.info(
                 "Rijksmonumenten query mislukt, splitsen in 2 batches van %d en %d IDs (depth %d)",

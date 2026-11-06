@@ -257,6 +257,8 @@ Aanroepen naar Kadaster (BAG, BRK-PB) en RCE gebruiken een gedeelde retry-logica
 
 Ligt een bron plat, dan stopt de package na 10 mislukte requests op rij met splitsen en slaat die bron over, met elke 10 seconden een proefrequest om te zien of zij weer antwoord geeft. Aan het einde van de aanroep krijgen de verblijfsobjecten waarvoor een bron geen antwoord gaf één herkansing bij die bron. Een korte storing kost daardoor meestal geen verblijfsobjecten.
 
+Gaf een bron nog geen enkel antwoord, dan krijgt zij 30 seconden proefrequests voordat de aanroep stopt. Een korte hapering aan het begin van een aanroep, waarin de requests die tegelijk onderweg zijn samen falen, stopt de aanroep zo niet. Een fout die bij de request hoort en niet bij de bron (een 4xx of een afgekapt antwoord) telt pas mee als splitsen niet meer kan: één verblijfsobject dat altijd faalt, maakt dan alleen dat verblijfsobject onbepaald.
+
 ### Als een bron geen antwoord geeft
 
 Een status die niet bepaald kon worden, is iets anders dan geen monumentstatus. De package geeft daarom nooit `False` voor een status die een bron niet heeft kunnen bevestigen of ontkennen:

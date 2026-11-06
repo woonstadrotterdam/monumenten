@@ -19,6 +19,7 @@ from monumenten._api._backoff import (
     MAX_CONSECUTIVE_FAILURES,
     MAX_SPLIT_DEPTH,
     MIN_BATCH_SIZE,
+    OUTAGE_GIVE_UP_SECONDS,
     OUTAGE_PROBE_SECONDS,
 )
 from monumenten._api._cultureel_erfgoed import _query_rijksmonumenten
@@ -60,6 +61,8 @@ from monumenten._processing import (
 )
 from monumenten.client import MonumentenClient
 
+pytestmark = pytest.mark.usefixtures("klok")
+
 _RD = "EPSG:28992"
 
 
@@ -80,32 +83,6 @@ def empty_geodataframe():
         geometry="geometry",
         crs=_RD,
     )
-
-
-class _Klok:
-    """Stands in for the time and asyncio modules in _bronfouten: time only passes
-    when a test says so, or when the code under test sleeps."""
-
-    def __init__(self):
-        self.nu = 1000.0
-
-    def monotonic(self):
-        return self.nu
-
-    async def sleep(self, seconden):
-        self.nu += seconden
-
-
-@pytest.fixture(autouse=True)
-def klok():
-    """Freeze the clock that decides when a source that is down gets a probe request,
-    so that no test depends on how fast it runs or really waits."""
-    klok = _Klok()
-    with (
-        patch("monumenten._bronfouten.time", klok),
-        patch("monumenten._bronfouten.asyncio", klok),
-    ):
-        yield klok
 
 
 @pytest.mark.asyncio
@@ -1035,115 +1012,6 @@ def _ids_in(query):
     return re.findall(r"vo\d{4}", query)
 
 
-def test_source_is_down_after_consecutive_failed_requests():
-    """MAX_CONSECUTIVE_FAILURES failed requests in a row mark a source as down. An
-    answer in between resets the count."""
-    uitval = Bronuitval()
-    fout = RuntimeError("503")
-
-    for _ in range(MAX_CONSECUTIVE_FAILURES - 1):
-        uitval.registreer_mislukte_request(BRK_PB, fout)
-    uitval.registreer_antwoord(BRK_PB, 1)
-    for _ in range(MAX_CONSECUTIVE_FAILURES - 1):
-        uitval.registreer_mislukte_request(BRK_PB, fout)
-    assert not uitval.is_gestoord(BRK_PB)
-    assert not uitval.sla_over_bij_storing(BRK_PB, ["id1"])
-    assert uitval.mislukt == {}
-
-    uitval.registreer_mislukte_request(BRK_PB, fout)
-    assert uitval.is_gestoord(BRK_PB)
-    assert not uitval.is_gestoord(RCE)
-
-    # BRK-PB answered before it went down, so the call itself can still succeed
-    assert uitval.sla_over_bij_storing(BRK_PB, ["id1"])
-    assert uitval.mislukt == {BRK_PB: {"id1"}}
-    assert uitval.laatste_fout[BRK_PB] is fout
-    assert not uitval.sla_over_als_bron_plat_ligt(["id2"])
-    uitval.controleer()
-
-
-def test_source_that_went_down_halfway_is_probed_until_it_answers(klok):
-    """A source that answered before it went down gets one probe request per
-    OUTAGE_PROBE_SECONDS. Every other request is skipped until one is answered."""
-    uitval = Bronuitval()
-    fout, proef_fout = RuntimeError("503"), RuntimeError("still 503")
-    uitval.registreer_antwoord(BRK_PB, 1)
-    for _ in range(MAX_CONSECUTIVE_FAILURES):
-        uitval.registreer_mislukte_request(BRK_PB, fout)
-
-    assert uitval.sla_over_bij_storing(BRK_PB, ["id1"])
-    klok.nu += OUTAGE_PROBE_SECONDS
-    assert not uitval.sla_over_bij_storing(BRK_PB, ["proef1"])  # the probe request
-    assert uitval.sla_over_bij_storing(BRK_PB, ["id2"])
-
-    # The probe fails: still down, and the pause starts again
-    uitval.registreer_mislukte_request(BRK_PB, proef_fout)
-    assert uitval.is_gestoord(BRK_PB)
-    klok.nu += OUTAGE_PROBE_SECONDS - 1
-    assert uitval.sla_over_bij_storing(BRK_PB, ["id3"])
-    klok.nu += 1
-    assert not uitval.sla_over_bij_storing(BRK_PB, ["proef2"])
-
-    # The probe is answered: the source is asked again
-    uitval.registreer_antwoord(BRK_PB, 1)
-    assert not uitval.is_gestoord(BRK_PB)
-    assert not uitval.sla_over_bij_storing(BRK_PB, ["id4"])
-    assert uitval.mislukt == {BRK_PB: {"id1", "id2", "id3"}}
-    assert uitval.laatste_fout[BRK_PB] is proef_fout
-
-    # It is back for real: going down again takes a full run of failed requests
-    for _ in range(MAX_CONSECUTIVE_FAILURES - 1):
-        uitval.registreer_mislukte_request(BRK_PB, fout)
-    assert not uitval.is_gestoord(BRK_PB)
-
-
-def test_source_down_before_its_first_answer_is_not_probed(klok):
-    """Without a single answer the call fails, so there is nothing to recover."""
-    uitval = Bronuitval()
-    for _ in range(MAX_CONSECUTIVE_FAILURES):
-        uitval.registreer_mislukte_request(RCE, RuntimeError("503"))
-
-    klok.nu += OUTAGE_PROBE_SECONDS
-    assert uitval.sla_over_bij_storing(RCE, ["id1"])
-    assert uitval.sla_over_als_bron_plat_ligt(["id2"])
-
-
-def test_source_down_before_its_first_answer_fails_the_call():
-    """A source that goes down before it answered once fails the call, also when a
-    request that was still under way answers after all: batches have been skipped."""
-    uitval = Bronuitval()
-    fout = RuntimeError("503")
-    for _ in range(MAX_CONSECUTIVE_FAILURES):
-        uitval.registreer_mislukte_request(RCE, fout)
-
-    assert uitval.sla_over_als_bron_plat_ligt(["id1", "id2"])
-    uitval.registreer_antwoord(RCE, 1)
-
-    with pytest.raises(BronFoutError, match="RCE") as exc_info:
-        uitval.controleer()
-    assert exc_info.value.verblijfsobject_ids == {RCE: ["id1", "id2"]}
-    assert exc_info.value.__cause__ is fout
-
-
-def test_retry_is_only_for_sources_that_are_not_down():
-    """An ID gets a retry when a source that is up again gave no answer for it. Asking
-    a source that is still down has no use."""
-    uitval = Bronuitval()
-    fout = RuntimeError("503")
-    uitval.registreer_antwoord(BRK_PB, 1)
-    for _ in range(MAX_CONSECUTIVE_FAILURES):
-        uitval.registreer_mislukte_request(BRK_PB, fout)
-    uitval.registreer_fout(BRK_PB, ["id1", "id2"], fout)
-    uitval.registreer_fout(RCE, ["id2", "id3"], fout)
-
-    assert uitval.gestoorde_bronnen() == [BRK_PB]
-    assert uitval.herkansbaar() == {RCE: {"id2", "id3"}}
-
-    uitval.vergeet(RCE, ["id2", "id3"])
-    assert uitval.mislukt == {BRK_PB: {"id1", "id2"}}
-    assert uitval.laatste_fout[BRK_PB] is fout
-
-
 @pytest.mark.asyncio
 async def test_rijksmonumenten_stops_splitting_when_rce_is_down():
     """Splitting a full batch down to single IDs would cost 999 failed requests."""
@@ -1240,23 +1108,30 @@ async def test_full_batch_can_split_down_to_single_ids_without_being_down():
 
 
 @contextlib.contextmanager
-def _counting_sources(fails, batch_grootte, kadaster_wacht=False):
+def _counting_sources(fails, batch_grootte, kadaster_wacht=False, klok=None):
     """Yield a session and a request count per source, for sources that know any ID.
 
     ``fails(bron, nummer)`` tells whether the request with that number (per source,
     counted from 1) fails. With ``kadaster_wacht`` a Kadaster request gives way to
-    other requests before it is answered, as a real request does. The batches keep
-    the order of the input, so that a test can tell which IDs were in which batch.
+    other requests before it is answered, as a real request does. With ``klok`` every
+    request takes a second. The batches keep the order of the input, so that a test
+    can tell which IDs were in which batch.
     """
     requests = Counter()
 
+    def tik():
+        if klok is not None:
+            klok.nu += 1
+
     def rce_post(*args, **kwargs):
         requests[RCE] += 1
+        tik()
         return _make_cm_response(fail=fails(RCE, requests[RCE]))
 
     async def kadaster_post(session, endpoint, query, context):
         bron = BAG if "BAG" in context else BRK_PB
         requests[bron] += 1
+        tik()
         mislukt = fails(bron, requests[bron])
         if kadaster_wacht:
             await asyncio.sleep(0)
@@ -1290,22 +1165,29 @@ def _counting_sources(fails, batch_grootte, kadaster_wacht=False):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bron", [RCE, BAG, BRK_PB])
-async def test_query_stops_early_when_a_source_is_down_from_the_start(bron):
-    """20 batches and one source that never answers. That source gets
-    MAX_CONSECUTIVE_FAILURES requests instead of one per ID and split, and the other
-    sources are only asked for what had already started."""
-    ids = _ids(20 * 16)
+async def test_query_stops_early_when_a_source_is_down_from_the_start(bron, klok):
+    """100 batches, every request takes a second, and one source never answers. That
+    source gets MAX_CONSECUTIVE_FAILURES requests instead of one per ID and split,
+    then a probe request every OUTAGE_PROBE_SECONDS. Once it has been down for
+    OUTAGE_GIVE_UP_SECONDS the call stops, before the other sources were asked for
+    every batch."""
+    aantal_batches = 100
+    ids = _ids(aantal_batches * 16)
 
-    with _counting_sources(lambda b, nummer: b == bron, batch_grootte=16) as (
-        session,
-        requests,
-    ):
+    with _counting_sources(
+        lambda b, nummer: b == bron, batch_grootte=16, klok=klok
+    ) as (session, requests):
         with pytest.raises(BronFoutError, match=bron) as exc_info:
             await _query(session, ids)
 
-    assert requests[bron] == MAX_CONSECUTIVE_FAILURES
-    for andere_bron in {RCE, BAG, BRK_PB} - {bron}:
-        assert requests[andere_bron] <= _BATCH_CONCURRENCY
+    proefrequests = OUTAGE_GIVE_UP_SECONDS // OUTAGE_PROBE_SECONDS
+    assert (
+        MAX_CONSECUTIVE_FAILURES
+        < requests[bron]
+        <= MAX_CONSECUTIVE_FAILURES + proefrequests + 1
+    )
+    for andere_bron in {RCE, BRK_PB} - {bron}:
+        assert requests[andere_bron] < aantal_batches / 2
     assert list(exc_info.value.verblijfsobject_ids) == [bron]
     assert sorted(exc_info.value.verblijfsobject_ids[bron]) == ids
     assert str(exc_info.value.__cause__) in {"transient fail", f"{bron} 503"}
@@ -1313,7 +1195,9 @@ async def test_query_stops_early_when_a_source_is_down_from_the_start(bron):
 
 @pytest.mark.asyncio
 async def test_query_stops_before_the_other_sources_when_bag_is_down():
-    """Without the BAG there is no adrespunt, so nothing else is asked at all."""
+    """Without the BAG there is no adrespunt, so nothing else is asked at all. The
+    call waits for the probe requests until the BAG has been down for
+    OUTAGE_GIVE_UP_SECONDS, and then stops."""
     with _counting_sources(lambda b, nummer: b == BAG, batch_grootte=16) as (
         session,
         requests,
@@ -1321,7 +1205,9 @@ async def test_query_stops_before_the_other_sources_when_bag_is_down():
         with pytest.raises(BronFoutError, match="BAG"):
             await _query(session, _ids(20 * 16))
 
-    assert requests == {BAG: MAX_CONSECUTIVE_FAILURES}
+    assert requests == {
+        BAG: MAX_CONSECUTIVE_FAILURES + OUTAGE_GIVE_UP_SECONDS // OUTAGE_PROBE_SECONDS
+    }
 
 
 @pytest.mark.asyncio
@@ -2156,41 +2042,6 @@ async def test_query_adrespunten_meldt_elk_id_precies_een_keer_aan_voortgang():
     assert sorted(adrespunten) == [i for i in ids if i != "vo0007"]
 
 
-def test_controleer_bron_die_plat_ligt_gaat_voor_verwerkingsfout():
-    """Faalde een batch onverwacht en ligt daarna een bron plat, dan is de bron de
-    reden dat geen batch slaagde: de aanroeper krijgt de BronFoutError."""
-    uitval = Bronuitval()
-    uitval.registreer_mislukte_verwerking(["id1"], ValueError("onverwacht"))
-    for _ in range(MAX_CONSECUTIVE_FAILURES):
-        uitval.registreer_mislukte_request(RCE, RuntimeError("RCE 503"))
-    assert uitval.sla_over_als_bron_plat_ligt(["id2"])
-
-    with pytest.raises(BronFoutError, match="RCE"):
-        uitval.controleer()
-
-
-def test_verwerking_kansloos_is_geen_storing():
-    """Een mislukte verwerking krijgt geen proefrequest en telt niet als gestoorde
-    bron; na MAX_CONSECUTIVE_FAILURES mislukte batches zonder succes is zij kansloos."""
-    uitval = Bronuitval()
-    for nummer in range(MAX_CONSECUTIVE_FAILURES):
-        assert not uitval.verwerking_kansloos()
-        uitval.registreer_mislukte_verwerking([f"id{nummer}"], ValueError("bug"))
-
-    assert uitval.verwerking_kansloos()
-    assert uitval.gestoorde_bronnen() == []
-    with pytest.raises(ValueError, match="bug"):
-        uitval.controleer()
-
-    # Lukte eerder wel een batch, dan is het geen programmeerfout maar data
-    uitval = Bronuitval()
-    uitval.registreer_antwoord(VERWERKING, 1)
-    for nummer in range(MAX_CONSECUTIVE_FAILURES):
-        uitval.registreer_mislukte_verwerking([f"id{nummer}"], ValueError("data"))
-    assert not uitval.verwerking_kansloos()
-    uitval.controleer()
-
-
 @pytest.mark.asyncio
 async def test_process_batch_annuleert_andere_query_bij_onverwachte_fout(
     empty_geodataframe,
@@ -2269,24 +2120,6 @@ async def test_voortgang_loopt_vol_en_telt_onvolledig_bepaalde_verblijfsobjecten
         ("Monumentstatus", len(_ALLE), len(_ALLE), {"onvolledig_bepaald": 1}),
         ("Herkansing", 1, 1, {"onvolledig_bepaald": 1}),
     ]
-
-
-def test_overgeslagen_batch_bij_kansloze_verwerking_wordt_vastgelegd():
-    """Slaagt na de kansloze start toch nog een batch die al liep, dan is de
-    verwerking niet meer kansloos en volgt er geen fout. De batches die intussen zijn
-    overgeslagen moeten daarom als onvolledig bepaald vastliggen, en niet stil False geven."""
-    uitval = Bronuitval()
-    for nummer in range(MAX_CONSECUTIVE_FAILURES):
-        uitval.registreer_mislukte_verwerking([f"id{nummer}"], ValueError("data"))
-
-    assert uitval.sla_over_als_verwerking_kansloos(["overgeslagen"])
-    uitval.registreer_antwoord(VERWERKING, 1)  # de batch die al liep
-
-    assert not uitval.sla_over_als_verwerking_kansloos(["volgende"])
-    uitval.controleer()
-    assert "overgeslagen" in uitval.mislukt[VERWERKING]
-    assert "overgeslagen" in uitval.herkansbaar()[VERWERKING]
-    assert "volgende" not in uitval.mislukt[VERWERKING]
 
 
 @pytest.mark.asyncio
@@ -2379,12 +2212,106 @@ def test_eerst_verspreid_zet_verspreide_batches_vooraan():
     assert _eerst_verspreid(batches[:5]) == batches[:5]
 
 
-def test_aantal_onvolledig_bepaald_totaal_telt_elk_verblijfsobject_een_keer():
-    uitval = Bronuitval()
-    fout = RuntimeError("503")
-    uitval.registreer_fout(RCE, ["id1", "id2", "id3"], fout)
-    uitval.registreer_fout(BRK_PB, ["id2", "id4"], fout)
-    uitval.registreer_fout(VERWERKING, ["id4"], fout)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bron", [RCE, BAG, BRK_PB])
+async def test_query_overleeft_parallelle_fouten_aan_het_begin(bron, klok):
+    """Aan het begin van een aanroep faalt elke request aan een bron, ook de requests
+    die tegelijk onderweg zijn: samen minstens MAX_CONSECUTIVE_FAILURES. Na korter dan
+    OUTAGE_GIVE_UP_SECONDS geeft de bron weer antwoord. Dat is een hapering en geen
+    bron die plat ligt: de proefrequest en de herkansing redden de aanroep, en geen
+    verblijfsobject blijft onbepaald."""
+    ids = _ids(20 * 16)
+    start = klok.nu
+    mislukt = Counter()
 
-    assert uitval.aantal_onvolledig_bepaald_totaal() == 4
-    assert "van 4 verblijfsobject(en)" in str(uitval.waarschuwing())
+    def fails(b, nummer):
+        # Tot de wachttijd voor de proefrequest de klok verzet
+        if b == bron and klok.nu == start:
+            mislukt[b] += 1
+            return True
+        return False
+
+    with _counting_sources(fails, batch_grootte=16, kadaster_wacht=True) as (
+        session,
+        _,
+    ):
+        result, uitval = await _query(session, ids)
+
+    assert mislukt[bron] >= MAX_CONSECUTIVE_FAILURES
+    assert uitval.mislukt == {}
+    assert uitval.waarschuwing() is None
+    assert result.empty
+
+
+def _fout_400():
+    return aiohttp.ClientResponseError(
+        request_info=MagicMock(), history=(), status=400, message="Bad Request"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fout", ["400", "afgekapt"])
+async def test_beperkingen_adrespunten_die_altijd_falen_leggen_brk_pb_niet_plat(fout):
+    """Twee adrespunten vooraan in een batch van 500 laten elke request waar een van
+    beide in zit falen, ook na splitsen: 500, 250, ..., 3, 1 en 2 zijn
+    MAX_CONSECUTIVE_FAILURES mislukte requests op rij, zonder één antwoord ertussen.
+    Die fout hoort bij de request en niet bij de bron: alleen die twee
+    verblijfsobjecten blijven zonder antwoord."""
+    ids = _ids(_QUERY_BATCH_GROOTTE)
+    adrespunten = {vo_id: (float(nummer), 0.0) for nummer, vo_id in enumerate(ids)}
+    slecht = ("<gml:pos>0.0 0.0</gml:pos>", "<gml:pos>1.0 0.0</gml:pos>")
+
+    async def post(session, endpoint, query, context):
+        if not any(pos in query for pos in slecht):
+            return {"features": []}
+        if fout == "400":
+            raise _fout_400()
+        return {"features": [{}] * _WFS_MAX_FEATURES}
+
+    with patch("monumenten._api._kadaster._post_wfs_json", side_effect=post):
+        uitval = Bronuitval()
+        await _query_beperkingen(AsyncMock(), adrespunten, uitval)
+
+    assert uitval.mislukt == {BRK_PB: {ids[0], ids[1]}}
+    assert not uitval.is_gestoord(BRK_PB)
+    uitval.controleer()
+
+
+@pytest.mark.asyncio
+async def test_rijksmonumenten_ids_die_altijd_400_geven_leggen_rce_niet_plat():
+    """Hetzelfde voor de RCE: een 400 voor twee ID's maakt alleen die ID's onbepaald."""
+    ids = _ids(_QUERY_BATCH_GROOTTE)
+
+    def post(*args, **kwargs):
+        resp = _make_cm_response()
+        if any(f'"{i}"' in kwargs["data"]["query"] for i in ids[:2]):
+            resp.raise_for_status = MagicMock(side_effect=_fout_400())
+        return resp
+
+    session = MagicMock()
+    session.post = MagicMock(side_effect=post)
+    uitval = Bronuitval()
+    await _query_rijksmonumenten(session, ids, uitval)
+
+    assert uitval.mislukt == {RCE: {ids[0], ids[1]}}
+    assert not uitval.is_gestoord(RCE)
+    uitval.controleer()
+
+
+@pytest.mark.asyncio
+async def test_rijksmonumenten_een_400_voor_elke_request_legt_rce_wel_stil():
+    """Faalt elke request met een 400, bijvoorbeeld omdat de API veranderde, dan
+    raakt de bron toch gestoord: elk verblijfsobject waar splitsen niet meer helpt
+    telt mee. Zonder die grens zou elke batch tot op elk los ID worden gesplitst."""
+    ids = _ids(_QUERY_BATCH_GROOTTE)
+    response = _make_cm_response()
+    response.raise_for_status = MagicMock(side_effect=_fout_400())
+    session = MagicMock()
+    session.post = MagicMock(return_value=response)
+
+    uitval = Bronuitval()
+    await _query_rijksmonumenten(session, ids, uitval)
+
+    assert uitval.is_gestoord(RCE)
+    assert session.post.call_count < 3 * MAX_CONSECUTIVE_FAILURES
+    assert sorted(uitval.mislukt[RCE]) == ids

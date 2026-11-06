@@ -9,7 +9,12 @@ import time
 from collections import Counter
 from typing import Dict, FrozenSet, Iterable, List, NoReturn, Optional, Set
 
-from monumenten._api._backoff import MAX_CONSECUTIVE_FAILURES, OUTAGE_PROBE_SECONDS
+from monumenten._api._backoff import (
+    MAX_CONSECUTIVE_FAILURES,
+    OUTAGE_GIVE_UP_SECONDS,
+    OUTAGE_PROBE_SECONDS,
+    is_fout_van_de_request,
+)
 
 logger = logging.getLogger("monumenten.bronfouten")
 
@@ -80,9 +85,12 @@ class Bronuitval:
     Splitsen helpt alleen als een kleinere query wel lukt. Een bron waarvan
     MAX_CONSECUTIVE_FAILURES requests achter elkaar mislukken is daarom gestoord: er
     wordt niet meer gesplitst en zij wordt overgeslagen, op één proefrequest per
-    OUTAGE_PROBE_SECONDS na. Een antwoord beëindigt de storing. Raakt een bron gestoord
-    voor zij één antwoord gaf, dan ligt zij plat: de aanroep kan niet meer slagen en
-    er volgt geen proefrequest.
+    OUTAGE_PROBE_SECONDS na. Een antwoord beëindigt de storing. Is een bron die nog
+    nooit antwoord gaf na OUTAGE_GIVE_UP_SECONDS nog steeds gestoord, dan ligt zij
+    plat: de aanroep kan niet meer slagen en er volgt geen proefrequest meer. Tot dan
+    kan een proefrequest haar redden; een korte hapering aan het begin van een
+    aanroep, waarin de requests die tegelijk onderweg zijn samen falen, legt de bron
+    zo niet plat.
 
     Per bron wordt alleen de laatste fout bewaard. Een fout houdt via zijn traceback
     de frames van zijn request vast; bij een lange storing in een aanroep met
@@ -96,6 +104,8 @@ class Bronuitval:
         self._storing: Dict[str, Exception] = {}
         # Gestoorde bron -> tijdstip (time.monotonic) vanaf wanneer een proefrequest mag
         self._proef_vanaf: Dict[str, float] = {}
+        # Gestoorde bron -> tijdstip (time.monotonic) waarop de storing begon
+        self._gestoord_sinds: Dict[str, float] = {}
         self._plat: Set[str] = set()
         # Bron -> verblijfsobject ID's waarvoor zij, ook na retries en splitsen,
         # geen antwoord gaf
@@ -118,40 +128,64 @@ class Bronuitval:
         if bron in self._storing and bron not in self._plat:
             del self._storing[bron]
             del self._proef_vanaf[bron]
+            del self._gestoord_sinds[bron]
             logger.info("%s geeft weer antwoord en wordt weer bevraagd.", bron)
 
-    def registreer_mislukte_request(self, bron: str, fout: Exception) -> None:
+    def registreer_mislukte_request(
+        self, bron: str, fout: Exception, *, kan_kleiner: bool = False
+    ) -> None:
         """Tel een request die na retries mislukte.
+
+        Een fout die bij de request hoort, zoals een 4xx of een afgekapt antwoord,
+        telt niet zolang de request nog kleiner kan: splitsen zoekt dan het
+        verblijfsobject waar het aan ligt. Anders zou één verblijfsobject dat altijd
+        faalt, op weg naar beneden, de hele bron als gestoord laten gelden.
 
         Na MAX_CONSECUTIVE_FAILURES mislukte requests achter elkaar, zonder één
         antwoord ertussen, is de bron gestoord. Mislukt daarna ook een proefrequest,
-        dan begint de pauze tot de volgende proefrequest opnieuw.
+        dan begint de pauze tot de volgende proefrequest opnieuw. Gaf de bron nog nooit
+        antwoord en duurt de storing dan al OUTAGE_GIVE_UP_SECONDS, dan ligt zij plat.
 
         Args:
             bron (str): De bron die geen antwoord gaf
             fout (Exception): De fout die na retries overbleef
+            kan_kleiner (bool): Of de request bij een fout nog gesplitst kan worden
         """
+        if kan_kleiner and is_fout_van_de_request(fout):
+            return
         self._fouten_op_rij[bron] += 1
         was_gestoord = bron in self._storing
         if not was_gestoord and self._fouten_op_rij[bron] < MAX_CONSECUTIVE_FAILURES:
             return
+        nu = time.monotonic()
         self._storing[bron] = fout
-        self._proef_vanaf[bron] = time.monotonic() + OUTAGE_PROBE_SECONDS
-        if was_gestoord:
+        self._proef_vanaf[bron] = nu + OUTAGE_PROBE_SECONDS
+        if not was_gestoord:
+            self._gestoord_sinds[bron] = nu
+            logger.warning(
+                "%s is gestoord: %d requests achter elkaar mislukt (%s: %s). De bron "
+                "wordt overgeslagen; elke %d seconden volgt een proefrequest.",
+                bron,
+                MAX_CONSECUTIVE_FAILURES,
+                type(fout).__name__,
+                fout,
+                OUTAGE_PROBE_SECONDS,
+            )
             return
-        if not self._beantwoord[bron]:
+        if (
+            bron not in self._plat
+            and not self._beantwoord[bron]
+            and nu - self._gestoord_sinds[bron] >= OUTAGE_GIVE_UP_SECONDS
+        ):
             self._plat.add(bron)
-        logger.warning(
-            "%s is gestoord: %d requests achter elkaar mislukt (%s: %s). %s",
-            bron,
-            MAX_CONSECUTIVE_FAILURES,
-            type(fout).__name__,
-            fout,
-            "De bron gaf nog geen enkel antwoord, dus de aanroep stopt."
-            if bron in self._plat
-            else "De bron wordt overgeslagen; elke "
-            f"{OUTAGE_PROBE_SECONDS} seconden volgt een proefrequest.",
-        )
+            logger.warning(
+                "%s gaf nog geen enkel antwoord en is al %d seconden gestoord (%s: %s); "
+                "de aanroep stopt.",
+                bron,
+                OUTAGE_GIVE_UP_SECONDS,
+                type(fout).__name__,
+                fout,
+            )
 
     def registreer_mislukte_verwerking(
         self, verblijfsobject_ids: Iterable[str], fout: Exception
@@ -247,6 +281,22 @@ class Bronuitval:
         return sum(
             sum(1 for i in ids if not any(i in eerder for eerder in sets[:nummer]))
             for nummer, ids in enumerate(sets)
+        )
+
+    def gestoord_zonder_antwoord(self, bron: str) -> bool:
+        """Geef aan of een bron gestoord is voor zij één antwoord gaf, maar nog niet
+        plat ligt: alleen een proefrequest kan haar nog redden.
+
+        Args:
+            bron (str): De bron
+
+        Returns:
+            bool: Of de bron gestoord is zonder ooit antwoord te hebben gegeven
+        """
+        return (
+            bron in self._storing
+            and not self._beantwoord[bron]
+            and bron not in self._plat
         )
 
     def is_gestoord(self, bron: str) -> bool:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Dict, List, Optional, Set, Tuple
 
 import aiohttp
 import geopandas as gpd
@@ -523,8 +523,9 @@ async def _query(
     """Voer queries uit voor een lijst verblijfsobjecten.
 
     Batches worden parallel verwerkt. Retry en split-on-failure gebeuren per API
-    (cultureel erfgoed en kadaster) in hun eigen modules. Raakt een bron gestoord
-    voor zij één antwoord gaf, dan worden de resterende batches overgeslagen.
+    (cultureel erfgoed en kadaster) in hun eigen modules. Is een bron die nog geen
+    antwoord gaf na OUTAGE_GIVE_UP_SECONDS nog gestoord, dan ligt zij plat en worden
+    de resterende batches overgeslagen.
     Mislukt de verwerking van een batch onverwacht, dan worden zijn statussen
     onbepaald, zodat één fout niet het werk van een hele aanroep weggooit.
     Verblijfsobjecten waarvoor een bron geen antwoord gaf krijgen aan het einde één
@@ -548,6 +549,44 @@ async def _query(
     """
     beschermde_gezichten_df = await _get_beschermde_gezichten(session)
     uitval = Bronuitval()
+    adrespunten: Dict[str, Tuple[float, float]] = {}
+
+    async def _proefrequest(bron: str, verblijfsobject_id: str) -> None:
+        """Eén request voor één verblijfsobject aan een gestoorde bron."""
+        # Buiten de try: een bron zonder proefrequest is een programmeerfout, en die
+        # mag niet als mislukte proefrequest in de log verdwijnen
+        proef: Awaitable[object]
+        if bron == RCE:
+            proef = _query_rijksmonumenten(session, [verblijfsobject_id], uitval)
+        elif bron == BAG:
+            proef = _query_adrespunten(session, [verblijfsobject_id], uitval)
+        elif bron == BRK_PB:
+            proef = _query_beperkingen(
+                session, {verblijfsobject_id: adrespunten[verblijfsobject_id]}, uitval
+            )
+        else:
+            raise AssertionError(f"Geen proefrequest voor de bron {bron}")
+        try:
+            await proef
+        except Exception as fout:
+            # Bijvoorbeeld een fout bij het koppelen van de beperkingen. De bron gaf
+            # dan wel antwoord; het verblijfsobject blijft onbeantwoord en krijgt de
+            # herkansing.
+            logger.warning(
+                "Proefrequest voor %s mislukt (%s: %s)", bron, type(fout).__name__, fout
+            )
+
+    async def _red_of_leg_plat(bron: str) -> None:
+        """Geef een bron die gestoord raakte voor haar eerste antwoord proefrequests,
+        tot zij antwoord geeft of plat ligt.
+
+        Zonder antwoord van de BAG valt er voor de andere bronnen weinig te vragen: na
+        de BAG-fase wordt daarom hier beslist, en niet pas als alle batches de andere
+        bronnen al hebben bevraagd.
+        """
+        while uitval.gestoord_zonder_antwoord(bron):
+            await uitval.wacht_op_proefrequest()
+            await _proefrequest(bron, next(iter(uitval.mislukt[bron])))
 
     # Eerst alle adrespunten ophalen: de BRK-PB heeft ze nodig, en de batches worden
     # erop gesorteerd. Ligt de BAG plat, dan valt er verder niets te bepalen.
@@ -556,9 +595,12 @@ async def _query(
         desc="Adrespunten (BAG)",
         disable=len(verblijfsobject_ids) < _BAG_VOORTGANG_VANAF,
     ) as bag_voortgang:
-        adrespunten = await _query_adrespunten(
-            session, verblijfsobject_ids, uitval, voortgang=bag_voortgang.update
+        adrespunten.update(
+            await _query_adrespunten(
+                session, verblijfsobject_ids, uitval, voortgang=bag_voortgang.update
+            )
         )
+    await _red_of_leg_plat(BAG)
     uitval.controleer_tussentijds()
 
     batch_semaphore = asyncio.Semaphore(_BATCH_CONCURRENCY)
@@ -637,26 +679,6 @@ async def _query(
                     tg.create_task(_run_batch(batch))
         return resultaten
 
-    async def _proefrequest(bron: str, verblijfsobject_id: str) -> None:
-        try:
-            if bron == RCE:
-                await _query_rijksmonumenten(session, [verblijfsobject_id], uitval)
-            elif bron == BAG:
-                await _query_adrespunten(session, [verblijfsobject_id], uitval)
-            else:
-                await _query_beperkingen(
-                    session,
-                    {verblijfsobject_id: adrespunten[verblijfsobject_id]},
-                    uitval,
-                )
-        except Exception as fout:
-            # Bijvoorbeeld een fout bij het koppelen van de beperkingen. De bron gaf
-            # dan wel antwoord; het verblijfsobject blijft onbeantwoord en krijgt de
-            # herkansing.
-            logger.warning(
-                "Proefrequest voor %s mislukt (%s: %s)", bron, type(fout).__name__, fout
-            )
-
     antwoorden = await _verwerk(
         _eerst_verspreid(
             _in_batches(_sorteer_ruimtelijk(verblijfsobject_ids, adrespunten))
@@ -675,6 +697,9 @@ async def _query(
         await uitval.wacht_op_proefrequest()
         for bron in uitval.gestoorde_bronnen():
             await _proefrequest(bron, next(iter(uitval.mislukt[bron])))
+            # Zonder één antwoord van deze bron kan de aanroep niet slagen: zij krijgt
+            # proefrequests tot zij antwoord geeft of plat ligt
+            await _red_of_leg_plat(bron)
         herkansing = uitval.herkansbaar()
         verwerking = herkansing.get(VERWERKING, set())
         bag = herkansing.get(BAG, set())
