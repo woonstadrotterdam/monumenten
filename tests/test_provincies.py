@@ -222,7 +222,7 @@ async def test_query_provinciale_monumenten_retry_dan_fout():
         request_info=MagicMock(), history=(), status=503, message="Service Unavailable"
     )
     session, aanroepen = _sessie([fout, fout])
-    with patch("monumenten._api._provincies.asyncio.sleep", new=AsyncMock()):
+    with patch("monumenten._api._backoff.asyncio.sleep", new=AsyncMock()):
         with pytest.raises(ProvincialeMonumentenError, match="HTTP 503"):
             await _query_provinciale_monumenten(session, NOORD_HOLLAND)
     assert len(aanroepen) == 2
@@ -252,7 +252,7 @@ async def test_query_provinciale_monumenten_geen_json_herhaald_dan_fout():
     """Een onderhouds- of proxypagina met HTTP 200 geeft een nette fout."""
     geen_json = _JsonFout(json.JSONDecodeError("Expecting value", "<html>", 0))
     session, aanroepen = _sessie([geen_json, geen_json])
-    with patch("monumenten._api._provincies.asyncio.sleep", new=AsyncMock()):
+    with patch("monumenten._api._backoff.asyncio.sleep", new=AsyncMock()):
         with pytest.raises(ProvincialeMonumentenError, match="geen JSON"):
             await _query_provinciale_monumenten(session, DRENTHE)
     assert len(aanroepen) == 2
@@ -270,7 +270,7 @@ async def test_query_provinciale_monumenten_afgebroken_overdracht_herhaald(fout)
     """Een afgebroken overdracht of verbroken verbinding wordt opnieuw geprobeerd."""
     pagina = {"type": "FeatureCollection", "features": [_drents_vlak("PM1-0001")]}
     session, aanroepen = _sessie([_JsonFout(fout), pagina])
-    with patch("monumenten._api._provincies.asyncio.sleep", new=AsyncMock()):
+    with patch("monumenten._api._backoff.asyncio.sleep", new=AsyncMock()):
         features = await _query_provinciale_monumenten(session, DRENTHE)
     assert len(aanroepen) == 2
     assert len(features) == 1

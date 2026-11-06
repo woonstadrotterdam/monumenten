@@ -7,14 +7,11 @@ import aiohttp
 import geopandas as gpd
 
 from monumenten._api._backoff import (
-    MAX_ATTEMPTS,
-    AfgekaptAntwoordError,
     MAX_SPLIT_DEPTH,
     MIN_BATCH_SIZE,
-    RATE_LIMIT_SLEEP_SECONDS,
-    RETRYABLE_NETWORK_EXCEPTIONS,
-    RETRYABLE_STATUS_CODES,
-    RETRY_SLEEP_SECONDS,
+    AfgekaptAntwoordError,
+    is_rate_limited,
+    met_retries,
 )
 from monumenten._bronfouten import BAG, BRK_PB, Bronuitval
 
@@ -122,102 +119,22 @@ _Adrespunten = Dict[str, Tuple[float, float]]
 # Verschuiving van het hulppunt dat een lijnvormige puntenset een rechthoek maakt
 _HULPPUNT_VERSCHUIVING_M = 0.01
 
-_kadaster_semaphore: Optional[asyncio.Semaphore] = None
-
-# Create a module-level logger
 logger = logging.getLogger("monumenten.api.kadaster")
-
-
-def _get_semaphore(loop: asyncio.AbstractEventLoop) -> asyncio.Semaphore:
-    global _kadaster_semaphore
-    if _kadaster_semaphore is None:
-        _kadaster_semaphore = asyncio.Semaphore(4)
-    return _kadaster_semaphore
-
-
-def _is_rate_limited(error: BaseException) -> bool:
-    return isinstance(error, aiohttp.ClientResponseError) and error.status == 429
 
 
 async def _post_wfs_json(
     session: aiohttp.ClientSession, endpoint: str, query: str, context: str
 ) -> Any:
-    """Generic helper to POST a WFS GetFeature query and return JSON with exponential backoff retries."""
-    last_error: Optional[BaseException] = None
-    for poging in range(MAX_ATTEMPTS):
-        try:
-            async with session.post(
-                endpoint,
-                data=query,
-                headers={"Content-Type": "application/xml"},
-            ) as response:
-                response.raise_for_status()
-                if poging >= 1:
-                    logger.info(
-                        "Poging %d/%d voor %s geslaagd na eerdere mislukking",
-                        poging + 1,
-                        MAX_ATTEMPTS,
-                        context,
-                    )
-                return await response.json()
-        except aiohttp.ClientResponseError as e:
-            last_error = e
-            if e.status not in RETRYABLE_STATUS_CODES:
-                logger.error(
-                    "Niet-herhaalbare HTTP-fout voor %s: %s (status %s)",
-                    context,
-                    str(e),
-                    e.status,
-                )
-                raise
-            if poging == MAX_ATTEMPTS - 1:
-                logger.error(
-                    "Alle %d pogingen voor %s mislukt tegen %s: %s",
-                    MAX_ATTEMPTS,
-                    context,
-                    endpoint,
-                    str(e),
-                )
-                raise
-            wacht = RETRY_SLEEP_SECONDS
-            if e.status == 429:
-                retry_after = e.headers.get("Retry-After", "") if e.headers else ""
-                wacht = (
-                    int(retry_after)
-                    if retry_after.isdigit()
-                    else RATE_LIMIT_SLEEP_SECONDS
-                )
-            logger.warning(
-                "Poging %d/%d voor %s mislukt: %s. Opnieuw proberen over %ds...",
-                poging + 1,
-                MAX_ATTEMPTS,
-                context,
-                str(e),
-                wacht,
-            )
-            await asyncio.sleep(wacht)
-        except RETRYABLE_NETWORK_EXCEPTIONS as e:
-            last_error = e
-            if poging == MAX_ATTEMPTS - 1:
-                logger.error(
-                    "Alle %d pogingen voor %s mislukt (netwerk/verbinding): %s",
-                    MAX_ATTEMPTS,
-                    context,
-                    str(e),
-                )
-                raise
-            logger.warning(
-                "Poging %d/%d voor %s mislukt (netwerk): %s. Opnieuw proberen over %ds...",
-                poging + 1,
-                MAX_ATTEMPTS,
-                context,
-                str(e),
-                RETRY_SLEEP_SECONDS,
-            )
-            await asyncio.sleep(RETRY_SLEEP_SECONDS)
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError("Geen response ontvangen")
+    """POST een WFS GetFeature-query en geef de JSON, met retries (zie _backoff)."""
+
+    async def post() -> Any:
+        async with session.post(
+            endpoint, data=query, headers={"Content-Type": "application/xml"}
+        ) as response:
+            response.raise_for_status()
+            return await response.json()
+
+    return await met_retries(post, context)
 
 
 def _punten_voor_query(adrespunten: _Adrespunten) -> List[Tuple[float, float]]:
@@ -374,7 +291,7 @@ async def _vraag_beperkingen(
         return left + right
 
     try:
-        async with _get_semaphore(asyncio.get_running_loop()):
+        async with uitval.semaphore(BRK_PB):
             if uitval.sla_over_bij_storing(BRK_PB, adrespunten):
                 return []
             brk_pb_query = _BRK_PB_BEPERKINGEN_QUERY_TEMPLATE.format(
@@ -400,7 +317,7 @@ async def _vraag_beperkingen(
             raise AfgekaptAntwoordError("BRK-PB response is afgekapt")
     except Exception as e:
         kan_kleiner = (
-            not _is_rate_limited(e)
+            not is_rate_limited(e)
             and len(adrespunten) > MIN_BATCH_SIZE
             and _depth < MAX_SPLIT_DEPTH
         )
@@ -498,7 +415,7 @@ async def _vraag_adrespunten(
 ) -> _Adrespunten:
     """Eén BAG-request voor hooguit _MAX_PER_BAG_REQUEST ID's, gesplitst bij falen."""
     try:
-        async with _get_semaphore(asyncio.get_running_loop()):
+        async with uitval.semaphore(BAG):
             if uitval.sla_over_bij_storing(BAG, identificaties):
                 return {}
             filters = [
@@ -521,7 +438,7 @@ async def _vraag_adrespunten(
             adrespunten[verblijfsobject["properties"]["identificatie"]] = (x, y)
     except Exception as e:
         kan_kleiner = (
-            not _is_rate_limited(e)
+            not is_rate_limited(e)
             and len(identificaties) > MIN_BATCH_SIZE
             and _depth < MAX_SPLIT_DEPTH
         )

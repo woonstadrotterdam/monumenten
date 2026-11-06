@@ -6,11 +6,13 @@ import asyncio
 import heapq
 import logging
 import time
+from asyncio import Semaphore
 from collections import Counter
 from typing import Dict, FrozenSet, Iterable, List, Optional, Set
 
 from monumenten._api._backoff import (
     MAX_CONSECUTIVE_FAILURES,
+    MAX_PARALLELLE_REQUESTS,
     OUTAGE_PROBE_SECONDS,
     is_fout_van_de_request,
 )
@@ -106,6 +108,24 @@ class Bronuitval:
         self.mislukt: Dict[str, Set[str]] = {}
         # Bron in mislukt -> de laatste fout waardoor zij geen antwoord gaf
         self.laatste_fout: Dict[str, Exception] = {}
+        self._semaphores: Dict[str, Semaphore] = {}
+
+    def semaphore(self, bron: str) -> Semaphore:
+        """Geef de semaphore die het aantal gelijktijdige requests aan een bron beperkt.
+
+        Per aanroep en niet per proces: een semaphore bindt zich aan de event loop
+        waarin zij voor het eerst moet wachten, en een tweede ``asyncio.run`` in
+        hetzelfde proces zou op een gedeelde semaphore een RuntimeError krijgen.
+
+        Args:
+            bron (str): De bron
+
+        Returns:
+            Semaphore: De semaphore van de bron, met MAX_PARALLELLE_REQUESTS plaatsen
+        """
+        if bron not in self._semaphores:
+            self._semaphores[bron] = Semaphore(MAX_PARALLELLE_REQUESTS)
+        return self._semaphores[bron]
 
     def registreer_antwoord(self, bron: str, aantal: int) -> None:
         """Leg vast dat een bron voor een aantal verblijfsobjecten antwoord gaf.

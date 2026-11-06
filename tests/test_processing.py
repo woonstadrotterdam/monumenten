@@ -180,19 +180,11 @@ async def test_rijksmonumenten_splits_on_failure():
             return _make_cm_response(["id1"])
         return _make_cm_response(["id2"])
 
-    noop_semaphore = MagicMock()
-    noop_semaphore.__aenter__ = AsyncMock(return_value=None)
-    noop_semaphore.__aexit__ = AsyncMock(return_value=None)
-
     session = MagicMock()
     session.post = MagicMock(side_effect=mock_post_side_effect)
 
-    with patch(
-        "monumenten._api._cultureel_erfgoed._get_semaphore",
-        return_value=noop_semaphore,
-    ):
-        uitval = Bronuitval()
-        result = await _query_rijksmonumenten(session, ["id1", "id2"], uitval)
+    uitval = Bronuitval()
+    result = await _query_rijksmonumenten(session, ["id1", "id2"], uitval)
 
     assert uitval.mislukt == {}
     assert len(post_calls) == 3
@@ -390,19 +382,11 @@ def test_koppel_beperkingen_alleen_binnen_beperkingsgebied():
 async def test_rijksmonumenten_single_id_failure_is_registered():
     """A batch of size 1 that fails cannot split: no rows, and the ID is registered as
     unanswered so it is not mistaken for "no rijksmonument"."""
-    noop_semaphore = MagicMock()
-    noop_semaphore.__aenter__ = AsyncMock(return_value=None)
-    noop_semaphore.__aexit__ = AsyncMock(return_value=None)
-
     session = MagicMock()
     session.post = MagicMock(return_value=_make_cm_response(fail=True))
 
-    with patch(
-        "monumenten._api._cultureel_erfgoed._get_semaphore",
-        return_value=noop_semaphore,
-    ):
-        uitval = Bronuitval()
-        result = await _query_rijksmonumenten(session, ["only_one"], uitval)
+    uitval = Bronuitval()
+    result = await _query_rijksmonumenten(session, ["only_one"], uitval)
 
     assert result == []
     assert list(uitval.mislukt) == [RCE]

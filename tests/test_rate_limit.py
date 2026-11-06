@@ -38,7 +38,7 @@ async def test_429_waits_for_retry_after_or_default(headers, expected_sleep):
     session.post = MagicMock(side_effect=[_response(_error(429, headers)), _response()])
     sleep = AsyncMock()
 
-    with patch("monumenten._api._kadaster.asyncio.sleep", sleep):
+    with patch("monumenten._api._backoff.asyncio.sleep", sleep):
         assert await _post_wfs_json(session, _BAG_ENDPOINT, "q", "test") == []
 
     sleep.assert_awaited_once_with(expected_sleep)
