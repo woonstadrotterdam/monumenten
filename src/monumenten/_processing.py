@@ -33,7 +33,6 @@ from monumenten._api._provincies import (
     _query_provinciale_monumenten,
     _query_provinciegrenzen,
 )
-from monumenten._api._backoff import MAX_CONSECUTIVE_FAILURES
 from monumenten._bronfouten import BAG, BRK_PB, RCE, VERWERKING, Bronuitval
 
 logger = logging.getLogger("monumenten.processing")
@@ -498,34 +497,13 @@ def _sorteer_ruimtelijk(
     )
 
 
-def _eerst_verspreid(batches: List[List[str]]) -> List[List[str]]:
-    """Zet MAX_CONSECUTIVE_FAILURES batches die over de hele aanroep verspreid
-    liggen vooraan.
-
-    Na de ruimtelijke sortering liggen opeenvolgende batches in hetzelfde gebied. Een
-    datafout die bij één gebied hoort, liet anders de eerste batches allemaal
-    mislukken, en dan geldt de verwerking als kansloos (zie Bronuitval). De batches
-    zelf blijven ruimtelijk bij elkaar; alleen de volgorde verandert.
-    """
-    if len(batches) <= MAX_CONSECUTIVE_FAILURES:
-        return batches
-    stap = (len(batches) - 1) / (MAX_CONSECUTIVE_FAILURES - 1)
-    eerst = sorted({round(nummer * stap) for nummer in range(MAX_CONSECUTIVE_FAILURES)})
-    eerst_set = set(eerst)
-    return [batches[i] for i in eerst] + [
-        batch for i, batch in enumerate(batches) if i not in eerst_set
-    ]
-
-
 async def _query(
     session: aiohttp.ClientSession, verblijfsobject_ids: List[str]
 ) -> Tuple[pd.DataFrame, Bronuitval]:
     """Voer queries uit voor een lijst verblijfsobjecten.
 
     Batches worden parallel verwerkt. Retry en split-on-failure gebeuren per API
-    (cultureel erfgoed en kadaster) in hun eigen modules. Is een bron die nog geen
-    antwoord gaf na OUTAGE_GIVE_UP_SECONDS nog gestoord, dan ligt zij plat en worden
-    de resterende batches overgeslagen.
+    (cultureel erfgoed en kadaster) in hun eigen modules.
     Mislukt de verwerking van een batch onverwacht, dan worden zijn statussen
     onbepaald, zodat één fout niet het werk van een hele aanroep weggooit.
     Verblijfsobjecten waarvoor een bron geen antwoord gaf krijgen aan het einde één
@@ -552,7 +530,7 @@ async def _query(
     adrespunten: Dict[str, Tuple[float, float]] = {}
 
     async def _proefrequest(bron: str, verblijfsobject_id: str) -> None:
-        """Eén request voor één verblijfsobject aan een gestoorde bron."""
+        """Eén request voor één verblijfsobject aan een bron met een storing."""
         # Buiten de try: een bron zonder proefrequest is een programmeerfout, en die
         # mag niet als mislukte proefrequest in de log verdwijnen
         proef: Awaitable[object]
@@ -576,20 +554,8 @@ async def _query(
                 "Proefrequest voor %s mislukt (%s: %s)", bron, type(fout).__name__, fout
             )
 
-    async def _red_of_leg_plat(bron: str) -> None:
-        """Geef een bron die gestoord raakte voor haar eerste antwoord proefrequests,
-        tot zij antwoord geeft of plat ligt.
-
-        Zonder antwoord van de BAG valt er voor de andere bronnen weinig te vragen: na
-        de BAG-fase wordt daarom hier beslist, en niet pas als alle batches de andere
-        bronnen al hebben bevraagd.
-        """
-        while uitval.gestoord_zonder_antwoord(bron):
-            await uitval.wacht_op_proefrequest()
-            await _proefrequest(bron, next(iter(uitval.mislukt[bron])))
-
     # Eerst alle adrespunten ophalen: de BRK-PB heeft ze nodig, en de batches worden
-    # erop gesorteerd. Ligt de BAG plat, dan valt er verder niets te bepalen.
+    # erop gesorteerd.
     with tqdm_asyncio(
         total=len(verblijfsobject_ids),
         desc="Adrespunten (BAG)",
@@ -600,8 +566,6 @@ async def _query(
                 session, verblijfsobject_ids, uitval, voortgang=bag_voortgang.update
             )
         )
-    await _red_of_leg_plat(BAG)
-    uitval.controleer_tussentijds()
 
     batch_semaphore = asyncio.Semaphore(_BATCH_CONCURRENCY)
     # De traceback van een onverwachte fout één keer per fouttype loggen, niet voor
@@ -611,13 +575,6 @@ async def _query(
     async def _verwerk_batch(
         batch: List[str], rce: Optional[Set[str]], brk_pb: Optional[Set[str]]
     ) -> Optional[_BatchAntwoorden]:
-        # Ligt een bron plat, dan kan de aanroep niet meer slagen: bevraag ook de
-        # andere bronnen niet meer. Hetzelfde geldt als de verwerking kansloos is.
-        # uitval.controleer_tussentijds() geeft daarna de fout.
-        if uitval.sla_over_als_bron_plat_ligt(
-            batch
-        ) or uitval.sla_over_als_verwerking_kansloos(batch):
-            return None
         rce_ids = batch if rce is None else [i for i in batch if i in rce]
         brk_pb_adrespunten = {
             i: adrespunten[i]
@@ -640,7 +597,7 @@ async def _query(
                 exc_info=type(fout) not in gelogde_fouttypes,
             )
             gelogde_fouttypes.add(type(fout))
-            uitval.registreer_mislukte_verwerking(batch, fout)
+            uitval.registreer_fout(VERWERKING, batch, fout)
             return None
         uitval.registreer_antwoord(VERWERKING, len(batch))
         return antwoorden
@@ -661,7 +618,7 @@ async def _query(
                 result = await _verwerk_batch(batch, rce, brk_pb)
             if result is not None:
                 resultaten.append(result)
-            # Ook een mislukte of overgeslagen batch is afgehandeld: de balk loopt vol,
+            # Ook een mislukte batch is afgehandeld: de balk loopt vol,
             # en ernaast staat hoeveel verblijfsobjecten onvolledig bepaald zijn
             onvolledig_bepaald += uitval.aantal_onvolledig_bepaald(batch)
             voortgang.update(len(batch))
@@ -680,26 +637,21 @@ async def _query(
         return resultaten
 
     antwoorden = await _verwerk(
-        _eerst_verspreid(
-            _in_batches(_sorteer_ruimtelijk(verblijfsobject_ids, adrespunten))
-        ),
+        _in_batches(_sorteer_ruimtelijk(verblijfsobject_ids, adrespunten)),
         "Monumentstatus",
     )
-    uitval.controleer_tussentijds()
 
     # Herkansing: een bron die halverwege haperde geeft aan het einde vaak weer
     # antwoord. Wie geen antwoord kreeg, wordt daarom één keer opnieuw bevraagd, en
     # alleen bij de bron die geen antwoord gaf: wat de andere bronnen al antwoordden,
     # blijft staan. Een mislukte verwerking krijgt beide bronnen opnieuw.
     if uitval.mislukt:
-        # Een bron die nog gestoord is krijgt eerst één proefrequest voor één
-        # verblijfsobject. Blijft zij gestoord, dan heeft opnieuw bevragen geen zin.
+        # Een bron die nog een storing heeft krijgt eerst één proefrequest voor één
+        # verblijfsobject. Geeft zij geen antwoord, dan heeft opnieuw bevragen geen
+        # zin.
         await uitval.wacht_op_proefrequest()
-        for bron in uitval.gestoorde_bronnen():
+        for bron in uitval.bronnen_in_storing():
             await _proefrequest(bron, next(iter(uitval.mislukt[bron])))
-            # Zonder één antwoord van deze bron kan de aanroep niet slagen: zij krijgt
-            # proefrequests tot zij antwoord geeft of plat ligt
-            await _red_of_leg_plat(bron)
         herkansing = uitval.herkansbaar()
         verwerking = herkansing.get(VERWERKING, set())
         bag = herkansing.get(BAG, set())

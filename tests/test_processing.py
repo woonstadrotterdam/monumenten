@@ -19,7 +19,6 @@ from monumenten._api._backoff import (
     MAX_CONSECUTIVE_FAILURES,
     MAX_SPLIT_DEPTH,
     MIN_BATCH_SIZE,
-    OUTAGE_GIVE_UP_SECONDS,
     OUTAGE_PROBE_SECONDS,
 )
 from monumenten._api._cultureel_erfgoed import _query_rijksmonumenten
@@ -45,7 +44,6 @@ from monumenten._bronfouten import (
     MonumentStatusOnbepaaldWarning,
 )
 from monumenten._processing import (
-    _BATCH_CONCURRENCY,
     _GRENS_BUFFER_METER,
     _QUERY_BATCH_GROOTTE,
     _bepaal_provinciale_monumenten,
@@ -53,7 +51,6 @@ from monumenten._processing import (
     _get_provinciegrenzen,
     _bepaal_beschermde_gezichten,
     _bepaal_rijks_en_gemeentelijke_monumenten,
-    _eerst_verspreid,
     _beperkingen_frame,
     _process_batch,
     _query,
@@ -1082,7 +1079,7 @@ async def test_rijksmonumenten_keeps_splitting_while_smaller_queries_succeed():
     result = await _query_rijksmonumenten(session, ids, uitval)
 
     assert len(mislukt) > MAX_CONSECUTIVE_FAILURES
-    assert not uitval.is_gestoord(RCE)
+    assert not uitval.in_storing(RCE)
     assert uitval.mislukt == {}
     assert [r["identificatie"] for r in result] == ids
 
@@ -1158,19 +1155,17 @@ def _counting_sources(fails, batch_grootte, kadaster_wacht=False, klok=None):
             "monumenten._processing._sorteer_ruimtelijk",
             side_effect=lambda verblijfsobject_ids, adrespunten: verblijfsobject_ids,
         ),
-        patch("monumenten._processing._eerst_verspreid", side_effect=lambda b: b),
     ):
         yield session, requests
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bron", [RCE, BAG, BRK_PB])
-async def test_query_stops_early_when_a_source_is_down_from_the_start(bron, klok):
+async def test_query_fails_when_a_source_never_answers(bron, klok):
     """100 batches, every request takes a second, and one source never answers. That
     source gets MAX_CONSECUTIVE_FAILURES requests instead of one per ID and split,
-    then a probe request every OUTAGE_PROBE_SECONDS. Once it has been down for
-    OUTAGE_GIVE_UP_SECONDS the call stops, before the other sources were asked for
-    every batch."""
+    then a probe request every OUTAGE_PROBE_SECONDS and one before the retry at
+    the end. The retry has no use, so the call fails with every ID unanswered."""
     aantal_batches = 100
     ids = _ids(aantal_batches * 16)
 
@@ -1180,24 +1175,23 @@ async def test_query_stops_early_when_a_source_is_down_from_the_start(bron, klok
         with pytest.raises(BronFoutError, match=bron) as exc_info:
             await _query(session, ids)
 
-    proefrequests = OUTAGE_GIVE_UP_SECONDS // OUTAGE_PROBE_SECONDS
+    # Eén proefrequest per OUTAGE_PROBE_SECONDS: elke request verzet de klok één seconde
+    proefrequests = sum(requests.values()) // OUTAGE_PROBE_SECONDS + 1
     assert (
         MAX_CONSECUTIVE_FAILURES
         < requests[bron]
         <= MAX_CONSECUTIVE_FAILURES + proefrequests + 1
     )
-    for andere_bron in {RCE, BRK_PB} - {bron}:
-        assert requests[andere_bron] < aantal_batches / 2
     assert list(exc_info.value.verblijfsobject_ids) == [bron]
     assert sorted(exc_info.value.verblijfsobject_ids[bron]) == ids
     assert str(exc_info.value.__cause__) in {"transient fail", f"{bron} 503"}
 
 
 @pytest.mark.asyncio
-async def test_query_stops_before_the_other_sources_when_bag_is_down():
-    """Without the BAG there is no adrespunt, so nothing else is asked at all. The
-    call waits for the probe requests until the BAG has been down for
-    OUTAGE_GIVE_UP_SECONDS, and then stops."""
+async def test_query_asks_the_other_sources_before_failing_when_bag_is_down():
+    """Without the BAG there is no adrespunt, so the BRK-PB is not asked at all. The
+    RCE is asked for every batch; the probe request before the retry at the end
+    fails, and then the call stops."""
     with _counting_sources(lambda b, nummer: b == BAG, batch_grootte=16) as (
         session,
         requests,
@@ -1205,9 +1199,9 @@ async def test_query_stops_before_the_other_sources_when_bag_is_down():
         with pytest.raises(BronFoutError, match="BAG"):
             await _query(session, _ids(20 * 16))
 
-    assert requests == {
-        BAG: MAX_CONSECUTIVE_FAILURES + OUTAGE_GIVE_UP_SECONDS // OUTAGE_PROBE_SECONDS
-    }
+    assert requests[RCE] == 20
+    assert BRK_PB not in requests
+    assert MAX_CONSECUTIVE_FAILURES < requests[BAG] <= MAX_CONSECUTIVE_FAILURES + 2
 
 
 @pytest.mark.asyncio
@@ -1248,7 +1242,7 @@ async def test_query_resumes_when_a_source_recovers():
     ):
         result, uitval = await _query(session, ids)
 
-    assert not uitval.is_gestoord(BRK_PB)
+    assert not uitval.in_storing(BRK_PB)
     assert uitval.mislukt == {}
     assert result.empty
     # De RCE gaf overal antwoord en krijgt in de herkansing niets opnieuw
@@ -1941,32 +1935,6 @@ async def test_client_geen_enkele_batch_lukt_geeft_oorspronkelijke_fout():
 
 
 @pytest.mark.asyncio
-async def test_query_programmeerfout_stopt_na_de_eerste_batches(empty_geodataframe):
-    """Faalt elke batch, dan stopt de aanroep na MAX_CONSECUTIVE_FAILURES batches in
-    plaats van alle batches van een grote aanroep te doorlopen."""
-    ids = _ids(10 * MAX_CONSECUTIVE_FAILURES)
-    process_batch = AsyncMock(side_effect=ValueError("bug"))
-
-    with (
-        patch(
-            "monumenten._processing._get_beschermde_gezichten",
-            return_value=empty_geodataframe,
-        ),
-        patch("monumenten._processing._query_adrespunten", return_value={}),
-        patch("monumenten._processing._process_batch", process_batch),
-        patch("monumenten._processing._QUERY_BATCH_GROOTTE", 1),
-    ):
-        with pytest.raises(ValueError, match="bug"):
-            await _query(AsyncMock(), ids)
-
-    assert (
-        MAX_CONSECUTIVE_FAILURES
-        <= process_batch.await_count
-        < MAX_CONSECUTIVE_FAILURES + _BATCH_CONCURRENCY
-    )
-
-
-@pytest.mark.asyncio
 async def test_query_adrespunt_uit_herkansing_telt_mee_voor_provinciaal(
     empty_geodataframe,
 ):
@@ -2197,29 +2165,13 @@ async def test_fout_bij_koppelen_is_verwerking_en_geen_brk_pb_uitval(caplog):
     assert koppelingen.count([_VO_GEMEENTE]) == 2
 
 
-def test_eerst_verspreid_zet_verspreide_batches_vooraan():
-    """De eerste MAX_CONSECUTIVE_FAILURES batches komen uit de hele aanroep, zodat een
-    datafout in één gebied ze niet allemaal raakt; elke batch blijft er één keer in."""
-    batches = [[f"b{nummer}"] for nummer in range(100)]
-
-    volgorde = _eerst_verspreid(batches)
-
-    eerst = [int(batch[0][1:]) for batch in volgorde[:MAX_CONSECUTIVE_FAILURES]]
-    assert eerst[0] == 0 and eerst[-1] == 99
-    assert min(b - a for a, b in zip(eerst, eerst[1:])) >= 10
-    assert sorted(map(tuple, volgorde)) == sorted(map(tuple, batches))
-    # Weinig batches: de volgorde blijft
-    assert _eerst_verspreid(batches[:5]) == batches[:5]
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bron", [RCE, BAG, BRK_PB])
 async def test_query_overleeft_parallelle_fouten_aan_het_begin(bron, klok):
     """Aan het begin van een aanroep faalt elke request aan een bron, ook de requests
-    die tegelijk onderweg zijn: samen minstens MAX_CONSECUTIVE_FAILURES. Na korter dan
-    OUTAGE_GIVE_UP_SECONDS geeft de bron weer antwoord. Dat is een hapering en geen
-    bron die plat ligt: de proefrequest en de herkansing redden de aanroep, en geen
-    verblijfsobject blijft onbepaald."""
+    die tegelijk onderweg zijn: samen minstens MAX_CONSECUTIVE_FAILURES. Daarna geeft
+    de bron weer antwoord. Dat is een hapering: de proefrequest en de herkansing
+    redden de aanroep, en geen verblijfsobject blijft onbepaald."""
     ids = _ids(20 * 16)
     start = klok.nu
     mislukt = Counter()
@@ -2251,7 +2203,7 @@ def _fout_400():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fout", ["400", "afgekapt"])
-async def test_beperkingen_adrespunten_die_altijd_falen_leggen_brk_pb_niet_plat(fout):
+async def test_beperkingen_adrespunten_die_altijd_falen_geven_brk_pb_geen_storing(fout):
     """Twee adrespunten vooraan in een batch van 500 laten elke request waar een van
     beide in zit falen, ook na splitsen: 500, 250, ..., 3, 1 en 2 zijn
     MAX_CONSECUTIVE_FAILURES mislukte requests op rij, zonder één antwoord ertussen.
@@ -2273,12 +2225,12 @@ async def test_beperkingen_adrespunten_die_altijd_falen_leggen_brk_pb_niet_plat(
         await _query_beperkingen(AsyncMock(), adrespunten, uitval)
 
     assert uitval.mislukt == {BRK_PB: {ids[0], ids[1]}}
-    assert not uitval.is_gestoord(BRK_PB)
+    assert not uitval.in_storing(BRK_PB)
     uitval.controleer()
 
 
 @pytest.mark.asyncio
-async def test_rijksmonumenten_ids_die_altijd_400_geven_leggen_rce_niet_plat():
+async def test_rijksmonumenten_ids_die_altijd_400_geven_geven_rce_geen_storing():
     """Hetzelfde voor de RCE: een 400 voor twee ID's maakt alleen die ID's onbepaald."""
     ids = _ids(_QUERY_BATCH_GROOTTE)
 
@@ -2294,14 +2246,14 @@ async def test_rijksmonumenten_ids_die_altijd_400_geven_leggen_rce_niet_plat():
     await _query_rijksmonumenten(session, ids, uitval)
 
     assert uitval.mislukt == {RCE: {ids[0], ids[1]}}
-    assert not uitval.is_gestoord(RCE)
+    assert not uitval.in_storing(RCE)
     uitval.controleer()
 
 
 @pytest.mark.asyncio
-async def test_rijksmonumenten_een_400_voor_elke_request_legt_rce_wel_stil():
+async def test_rijksmonumenten_een_400_voor_elke_request_geeft_rce_wel_een_storing():
     """Faalt elke request met een 400, bijvoorbeeld omdat de API veranderde, dan
-    raakt de bron toch gestoord: elk verblijfsobject waar splitsen niet meer helpt
+    krijgt de bron toch een storing: elk verblijfsobject waar splitsen niet meer helpt
     telt mee. Zonder die grens zou elke batch tot op elk los ID worden gesplitst."""
     ids = _ids(_QUERY_BATCH_GROOTTE)
     response = _make_cm_response()
@@ -2312,6 +2264,6 @@ async def test_rijksmonumenten_een_400_voor_elke_request_legt_rce_wel_stil():
     uitval = Bronuitval()
     await _query_rijksmonumenten(session, ids, uitval)
 
-    assert uitval.is_gestoord(RCE)
+    assert uitval.in_storing(RCE)
     assert session.post.call_count < 3 * MAX_CONSECUTIVE_FAILURES
     assert sorted(uitval.mislukt[RCE]) == ids

@@ -255,17 +255,15 @@ De provinciale services staan hieronder bij [Provinciale monumenten](#provincial
 
 Aanroepen naar Kadaster (BAG, BRK-PB) en RCE gebruiken een gedeelde retry-logica: maximaal 2 pogingen per request, bij mislukking 3 seconden wachten. Alleen tijdelijke fouten worden herhaald (HTTP 429, 500, 502, 503, 504 en netwerk-/verbindingsfouten); permanente 4xx worden direct doorgegeven. Faalt een aanroep na retries, dan wordt de set IDs/adrespunten in tweeën gedeeld en elk deel opnieuw geprobeerd (recursief, per API, tot min. 1 ID of max. splitdiepte 10). Blijft een aanroep ook dan falen, dan heeft de bron voor die verblijfsobjecten geen antwoord gegeven (zie [Als een bron geen antwoord geeft](#als-een-bron-geen-antwoord-geeft)).
 
-Ligt een bron plat, dan stopt de package na 10 mislukte requests op rij met splitsen en slaat die bron over, met elke 10 seconden een proefrequest om te zien of zij weer antwoord geeft. Aan het einde van de aanroep krijgen de verblijfsobjecten waarvoor een bron geen antwoord gaf één herkansing bij die bron. Een korte storing kost daardoor meestal geen verblijfsobjecten.
-
-Gaf een bron nog geen enkel antwoord, dan krijgt zij 30 seconden proefrequests voordat de aanroep stopt. Een korte hapering aan het begin van een aanroep, waarin de requests die tegelijk onderweg zijn samen falen, stopt de aanroep zo niet. Een fout die bij de request hoort en niet bij de bron (een 4xx of een afgekapt antwoord) telt pas mee als splitsen niet meer kan: één verblijfsobject dat altijd faalt, maakt dan alleen dat verblijfsobject onbepaald.
+Heeft een bron een storing, dan stopt de package na 10 mislukte requests op rij met splitsen en slaat die bron over, met elke 10 seconden een proefrequest om te zien of zij weer antwoord geeft. Aan het einde van de aanroep krijgen de verblijfsobjecten waarvoor een bron geen antwoord gaf één herkansing bij die bron. Een korte storing kost daardoor meestal geen verblijfsobjecten, ook niet aan het begin van een aanroep. Een fout die bij de request hoort en niet bij de bron (een 4xx of een afgekapt antwoord) telt pas mee als splitsen niet meer kan: één verblijfsobject dat altijd faalt, maakt dan alleen dat verblijfsobject onbepaald.
 
 ### Als een bron geen antwoord geeft
 
 Een status die niet bepaald kon worden, is iets anders dan geen monumentstatus. De package geeft daarom nooit `False` voor een status die een bron niet heeft kunnen bevestigen of ontkennen:
 
-- **Een bron geeft helemaal geen antwoord** (bijvoorbeeld bij een storing): de aanroep stopt met een `BronFoutError`. De melding noemt de bron (`RCE`, `BAG` of `BRK-PB`) en de laatste fout; het attribuut `verblijfsobject_ids` bevat per bron de ID's zonder antwoord.
+- **Een bron geeft helemaal geen antwoord** (bijvoorbeeld bij een storing): de aanroep stopt na de herkansing met een `BronFoutError`. De melding noemt de bron (`RCE`, `BAG` of `BRK-PB`) en de laatste fout; het attribuut `verblijfsobject_ids` bevat per bron de ID's zonder antwoord.
 - **Een bron geeft voor een deel van de verblijfsobjecten geen antwoord**, ook niet na de herkansing: het resultaat komt terug met `pd.NA` voor de statussen die niet bepaald konden worden, en er volgt één `MonumentStatusOnbepaaldWarning`. Die noemt per bron de laatste fout en de betrokken ID's, die ook in het attribuut `verblijfsobject_ids` staan.
-- **De verwerking van een batch mislukt** (bijvoorbeeld door data die de package niet verwacht): de aanroep gaat door en de waarschuwing noemt de bron `verwerking`. Mislukken de eerste batches allemaal, dan is er iets mis met de package zelf en stopt de aanroep met de oorspronkelijke fout.
+- **De verwerking van een batch mislukt** (bijvoorbeeld door data die de package niet verwacht): de aanroep gaat door en de waarschuwing noemt de bron `verwerking`. Mislukt de verwerking van elke batch, dan is er iets mis met de package zelf en stopt de aanroep met de oorspronkelijke fout.
 
 Elke status hangt af van een aantal bronnen (zie de tabel hieronder). Per verblijfsobject is een status:
 

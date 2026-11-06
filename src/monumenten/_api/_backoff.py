@@ -12,9 +12,8 @@ Outage: splitting only helps when a smaller query can succeed. A source that fai
 MAX_CONSECUTIVE_FAILURES requests in a row (each after its retries) without a single
 answer in between is treated as down: no more splitting and no new requests to that
 source, except one probe request every OUTAGE_PROBE_SECONDS. An answer ends the outage.
-A source that went down before its first answer and is still down after
-OUTAGE_GIVE_UP_SECONDS stops the call (see Bronuitval). IDs a source gave no answer for
-get one more attempt at the end of the call (see _processing._query).
+IDs a source gave no answer for get one more attempt at the end of the call (see
+_processing._query).
 
 A failure that belongs to the request rather than the source (a 4xx other than 429, or a
 truncated answer) only counts towards an outage once the request cannot be split any
@@ -33,13 +32,9 @@ MAX_SPLIT_DEPTH = 10
 # Er lopen 4 requests per bron tegelijk: twee mislukte splitsniveaus (8 requests)
 # blijven eronder
 MAX_CONSECUTIVE_FAILURES = 10
-# Zo vaak krijgt een gestoorde bron één proefrequest; korter levert minder pd.NA op,
-# langer minder requests naar een bron die plat ligt
+# Zo vaak krijgt een bron met een storing één proefrequest; korter levert minder pd.NA
+# op, langer minder requests naar een bron die niet antwoordt
 OUTAGE_PROBE_SECONDS = 10
-# Zo lang blijft een bron die nog nooit antwoord gaf gestoord, met proefrequests, voor
-# de aanroep stopt. Een korte hapering aan het begin, waarin de requests die tegelijk
-# onderweg zijn samen falen, kost zo geen aanroep.
-OUTAGE_GIVE_UP_SECONDS = 3 * OUTAGE_PROBE_SECONDS
 RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 RATE_LIMIT_SLEEP_SECONDS = 60
 RETRYABLE_NETWORK_EXCEPTIONS: Tuple[Type[BaseException], ...] = (

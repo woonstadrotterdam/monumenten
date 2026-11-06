@@ -338,7 +338,7 @@ async def _vraag_beperkingen(
     sprong tussen twee opeenvolgende adrespunten.
     Bij falen na retries wordt de set adrespunten in tweeën gesplitst en opnieuw geprobeerd,
     behalve bij een rate limit (429): splitsen levert dan alleen meer requests op.
-    Is de BRK-PB gestoord, dan wordt de request overgeslagen (zie Bronuitval).
+    Heeft de BRK-PB een storing, dan wordt de request overgeslagen (zie Bronuitval).
     In uitval wordt vastgelegd voor welke verblijfsobjecten de BRK-PB wel en geen
     antwoord gaf. Geeft per beantwoorde request de adrespunten en de GeoJSON features
     die de BRK-PB teruggaf.
@@ -405,7 +405,7 @@ async def _vraag_beperkingen(
             and _depth < MAX_SPLIT_DEPTH
         )
         uitval.registreer_mislukte_request(BRK_PB, e, kan_kleiner=kan_kleiner)
-        if kan_kleiner and not uitval.is_gestoord(BRK_PB):
+        if kan_kleiner and not uitval.in_storing(BRK_PB):
             mid = len(punten) // 2
             logger.info(
                 "BRK-PB query mislukt, splitsen in 2 batches van %d en %d adrespunten (depth %d)",
@@ -448,7 +448,7 @@ async def _query_adrespunten(
     Per request gaan er maximaal _MAX_PER_BAG_REQUEST verblijfsobjecten mee.
     Bij falen na retries wordt de batch in tweeën gesplitst en opnieuw geprobeerd,
     behalve bij een rate limit (429): splitsen levert dan alleen meer requests op.
-    Is de BAG gestoord, dan wordt de request overgeslagen (zie Bronuitval).
+    Heeft de BAG een storing, dan wordt de request overgeslagen (zie Bronuitval).
     In uitval wordt vastgelegd voor welke verblijfsobjecten de BAG wel en, ook na
     retries en splitsen, geen antwoord gaf.
 
@@ -526,7 +526,7 @@ async def _vraag_adrespunten(
             and _depth < MAX_SPLIT_DEPTH
         )
         uitval.registreer_mislukte_request(BAG, e, kan_kleiner=kan_kleiner)
-        if kan_kleiner and not uitval.is_gestoord(BAG):
+        if kan_kleiner and not uitval.in_storing(BAG):
             mid = len(identificaties) // 2
             logger.info(
                 "BAG verblijfsobjecten query mislukt, splitsen in 2 batches van %d en %d IDs (depth %d)",

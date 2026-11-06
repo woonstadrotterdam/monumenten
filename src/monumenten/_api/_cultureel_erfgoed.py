@@ -80,7 +80,7 @@ async def _query_rijksmonumenten(
     """
     Voert een SPARQL-query uit om rijksmonumenten op te halen voor gegeven BAG-identificaties.
     Bij falen na retries wordt de batch in tweeën gesplitst en opnieuw geprobeerd,
-    behalve als de RCE gestoord is: dan wordt de request overgeslagen (zie Bronuitval).
+    behalve als de RCE een storing heeft: dan wordt de request overgeslagen (zie Bronuitval).
 
     Args:
         session (aiohttp.ClientSession): De aiohttp ClientSession voor het uitvoeren van de HTTP-aanvraag
@@ -173,7 +173,7 @@ async def _query_rijksmonumenten(
     except Exception as e:
         kan_kleiner = len(identificaties) > MIN_BATCH_SIZE and _depth < MAX_SPLIT_DEPTH
         uitval.registreer_mislukte_request(RCE, e, kan_kleiner=kan_kleiner)
-        if kan_kleiner and not uitval.is_gestoord(RCE):
+        if kan_kleiner and not uitval.in_storing(RCE):
             mid = len(identificaties) // 2
             logger.info(
                 "Rijksmonumenten query mislukt, splitsen in 2 batches van %d en %d IDs (depth %d)",
