@@ -1,3 +1,4 @@
+import itertools
 import warnings
 from contextlib import contextmanager
 from typing import Iterator
@@ -826,3 +827,161 @@ async def test_process_from_list_adrespunten_op_een_lijn(client: MonumentenClien
 
     for vbo_id in bag_verblijfsobject_ids:
         assert result[vbo_id]["gemeentelijk_monument"] is True, vbo_id
+
+
+def _gevarieerd_resultaat() -> pd.DataFrame:
+    """Bouw een resultaat zoals ``process_from_df`` het geeft, met alle combinaties.
+
+    Elke combinatie van bron, beschermd gezicht, gemeentelijk monument, provinciaal
+    monument (ook ``pd.NA``) en voorbescherming komt voor. Het verblijfsobject met
+    alle statussen staat er twee keer in, de tweede keer zonder beschermd gezicht,
+    zoals bij meerdere beschermde gezichten.
+
+    Returns:
+        pd.DataFrame: Resultaat met dezelfde kolommen en dtypes als in productie
+    """
+    rijen = []
+    for i, (bron, gezicht, gemeentelijk, provinciaal, voorbescherming) in enumerate(
+        itertools.product(
+            [pd.NA, "RCE", "Kadaster", "RCE, Kadaster"],
+            [False, True],
+            [False, True],
+            [False, True, pd.NA],
+            [False, True],
+        )
+    ):
+        rijen.append(
+            {
+                "bag_verblijfsobject_id": f"0599010000{i:06d}",
+                "rijksmonument": bron is not pd.NA,
+                "rijksmonument_bron": bron,
+                "rijksmonument_nummer": "12345" if bron is not pd.NA else pd.NA,
+                "rijksmonument_url": pd.NA,
+                "rijksmonument_voorbescherming": voorbescherming,
+                "rijksbeschermd_gezicht": gezicht,
+                "rijksbeschermd_gezicht_naam": "Gezicht" if gezicht else pd.NA,
+                "gemeentelijk_monument": gemeentelijk,
+                "grondslag_gemeentelijk_monument": (
+                    "Gemeentewet" if gemeentelijk else pd.NA
+                ),
+                "provinciaal_monument": provinciaal,
+                "provinciaal_monument_omschrijving": (
+                    "Provinciaal" if provinciaal is True else pd.NA
+                ),
+            }
+        )
+    alles = next(
+        rij
+        for rij in rijen
+        if rij["rijksmonument_bron"] is not pd.NA
+        and rij["rijksmonument_bron"] == "RCE, Kadaster"
+        and rij["rijksbeschermd_gezicht"]
+        and rij["gemeentelijk_monument"]
+        and rij["provinciaal_monument"] is True
+    )
+    dubbel = {**alles, "rijksbeschermd_gezicht": False}
+    df = pd.DataFrame(rijen + [dubbel])
+    df["provinciaal_monument"] = df["provinciaal_monument"].astype("boolean")
+    return df
+
+
+_BRON_ALS_LIJST = {
+    "RCE": ["RCE"],
+    "Kadaster": ["Kadaster"],
+    "RCE, Kadaster": ["RCE", "Kadaster"],
+}
+
+
+def _verwachte_vera(rij: dict) -> list | None:
+    """De VERA-referentiedata voor één rij, rechtstreeks uit de regels afgeleid.
+
+    Args:
+        rij (dict): Eén rij uit ``_gevarieerd_resultaat``
+
+    Returns:
+        list | None: De items in de volgorde RIJ, SGR, GEM, PRO, of ``None`` als het
+            provinciaal monument onbepaald is
+    """
+    if pd.isna(rij["provinciaal_monument"]):
+        return None
+    verwacht = []
+    if rij["rijksmonument"]:
+        verwacht.append(
+            {
+                "code": "RIJ",
+                "naam": "Rijksmonument",
+                "bron": _BRON_ALS_LIJST[rij["rijksmonument_bron"]],
+            }
+        )
+    if rij["rijksbeschermd_gezicht"]:
+        verwacht.append({"code": "SGR", "naam": "Rijksbeschermd stadsgezicht"})
+    if rij["gemeentelijk_monument"]:
+        verwacht.append({"code": "GEM", "naam": "Gemeentelijk monument"})
+    if rij["provinciaal_monument"]:
+        verwacht.append({"code": "PRO", "naam": "Provinciaal monument"})
+    return verwacht
+
+
+@contextmanager
+def _mock_process_from_df(result: pd.DataFrame) -> Iterator[None]:
+    """Laat ``process_from_df`` een vast resultaat geven, zonder netwerk."""
+
+    async def nep_process_from_df(self, df, verblijfsobject_id_col):
+        return result.copy()
+
+    with patch.object(MonumentenClient, "process_from_df", nep_process_from_df):
+        yield
+
+
+@pytest.mark.asyncio
+async def test_process_from_list_vera_alle_combinaties(client: MonumentenClient):
+    """Elke combinatie van statussen geeft de VERA-items volgens de regels.
+
+    Voorbescherming levert geen item op; bij een dubbel verblijfsobject telt de
+    eerste rij, en de volgorde van de keys is die van de invoer.
+    """
+    result = _gevarieerd_resultaat()
+    with _mock_process_from_df(result):
+        vera = await client.process_from_list(
+            result["bag_verblijfsobject_id"].tolist(), to_vera=True
+        )
+
+    eerste_rijen = result.drop_duplicates("bag_verblijfsobject_id").to_dict("records")
+    assert list(vera) == [rij["bag_verblijfsobject_id"] for rij in eerste_rijen]
+    for rij in eerste_rijen:
+        vbo_id = rij["bag_verblijfsobject_id"]
+        assert vera[vbo_id] == _verwachte_vera(rij), vbo_id
+    # Er zitten lijsten en None tussen, anders test de vergelijking weinig
+    assert any(v is None for v in vera.values())
+    assert any(v == [] for v in vera.values())
+
+
+@pytest.mark.asyncio
+async def test_process_from_list_vera_volgorde_en_bron(client: MonumentenClient):
+    """Volgorde van de items is RIJ, SGR, GEM, PRO; bron is een lijst.
+
+    Het verblijfsobject met alle statussen komt twee keer voor; de eerste rij telt,
+    dus SGR zit erin.
+    """
+    result = _gevarieerd_resultaat()
+    rijen = result.set_index("bag_verblijfsobject_id")
+    alles = rijen.index[
+        (rijen["rijksmonument_bron"] == "RCE, Kadaster").fillna(False)
+        & rijen["rijksbeschermd_gezicht"]
+        & rijen["gemeentelijk_monument"]
+        & rijen["provinciaal_monument"].fillna(False)
+    ][0]
+    onbepaald = rijen.index[rijen["provinciaal_monument"].isna()][0]
+    with _mock_process_from_df(result):
+        vera = await client.process_from_list(
+            result["bag_verblijfsobject_id"].tolist(), to_vera=True
+        )
+
+    assert vera[alles] == [
+        {"code": "RIJ", "naam": "Rijksmonument", "bron": ["RCE", "Kadaster"]},
+        {"code": "SGR", "naam": "Rijksbeschermd stadsgezicht"},
+        {"code": "GEM", "naam": "Gemeentelijk monument"},
+        {"code": "PRO", "naam": "Provinciaal monument"},
+    ]
+    assert vera[onbepaald] is None
+    assert len(vera) == len(rijen.index.unique())

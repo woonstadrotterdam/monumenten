@@ -5,7 +5,7 @@ from __future__ import annotations
 import functools
 import operator
 import warnings
-from typing import Any, Dict, FrozenSet, List, Optional, Union, cast
+from typing import Any, Dict, FrozenSet, List, Optional, Protocol, Union, cast
 
 import aiohttp
 import numpy as np
@@ -46,6 +46,21 @@ def _status(aanwezig: pd.Series[bool], onbepaald: pd.Series[bool]) -> pd.Series[
     return aanwezig.astype("boolean").mask(onbepaald & ~aanwezig)
 
 
+class _StatusRij(Protocol):
+    """De velden van een resultaatrij die de VERA-omzetting leest.
+
+    Een rij uit ``itertuples`` voldoet hieraan, net als een ``pd.Series``. Een
+    ontbrekende of verkeerd gespelde kolom vangt mypy hiermee in
+    ``_naar_referentiedata``.
+    """
+
+    rijksmonument: Optional[bool]
+    rijksmonument_bron: Optional[List[str]]
+    rijksbeschermd_gezicht: Optional[bool]
+    gemeentelijk_monument: Optional[bool]
+    provinciaal_monument: Optional[bool]
+
+
 class MonumentenClient:
     """Client voor het ophalen van monumentgegevens van verschillende Nederlandse overheids-API's.
 
@@ -73,7 +88,7 @@ class MonumentenClient:
             await self._session.close()
 
     def _naar_referentiedata(
-        self, row: pd.Series[bool]
+        self, row: _StatusRij
     ) -> Optional[List[Dict[str, object]]]:
         # Met een niet-bepaalde status zou de lijst onvolledig zijn
         if None in (
@@ -83,7 +98,7 @@ class MonumentenClient:
             row.provinciaal_monument,
         ):
             return None
-        statuses = []
+        statuses: List[Dict[str, object]] = []
         if row.rijksmonument:
             statuses.append(
                 {
@@ -318,10 +333,13 @@ class MonumentenClient:
                 result_indexed.to_dict(orient="index"),
             )
 
+        # itertuples maakt per rij een namedtuple in plaats van een pd.Series,
+        # wat bij miljoenen rijen vele malen sneller is. _naar_referentiedata
+        # leest de rij via attributen, dus een namedtuple werkt hetzelfde.
         return cast(
             Dict[str, Optional[List[Dict[str, str]]]],
             {
-                verblijfsobject_id: self._naar_referentiedata(row)
-                for verblijfsobject_id, row in result_indexed.iterrows()
+                row.Index: self._naar_referentiedata(cast(_StatusRij, row))
+                for row in result_indexed.itertuples(name="Rij")
             },
         )
