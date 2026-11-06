@@ -15,3 +15,11 @@ _Avoid_: Provinciale bescherming, voorbeschermd monument
 **Provinciaal beschermd dorpsgezicht**:
 Een gebied dat een provincie als geheel beschermt om zijn cultuurhistorische samenhang; een verblijfsobject erin is daardoor géén **Provinciaal monument**. Alleen Barsingerhorn heeft deze status.
 _Avoid_: Provinciaal monument (voor het gebied of de panden erin)
+
+**Onbepaalde status**:
+Een monumentstatus die `pd.NA` is: zij is niet gevonden, en een bron waar zij van afhangt gaf voor het verblijfsobject geen antwoord. Een gevonden status is nooit onbepaald.
+_Avoid_: Onbekend, ontbrekend, False
+
+**Onvolledig bepaald verblijfsobject**:
+Een verblijfsobject waarvan de monumentstatussen niet volledig bepaald konden worden, omdat ten minste één bron geen antwoord gaf of de verwerking mislukte. Het verblijfsobject zelf is niet onvolledig. Alleen de statussen die van die bron afhangen en niet gevonden zijn, zijn daardoor een **Onbepaalde status**; de rest is gewoon `True` of `False`.
+_Avoid_: Onvolledig verblijfsobject, onbepaald verblijfsobject, mislukt verblijfsobject
