@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import warnings
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -21,7 +22,12 @@ from monumenten._api._cultureel_erfgoed import (
     _query_beschermde_gezichten,
     _query_rijksmonumenten,
 )
-from monumenten._api._kadaster import _query_verblijfsobjecten
+from monumenten._api._kadaster import (
+    _RD,
+    _Adrespunten,
+    _query_adrespunten,
+    _query_beperkingen,
+)
 from monumenten._api._provincies import (
     PROVINCIES,
     Provincie,
@@ -34,6 +40,8 @@ logger = logging.getLogger("monumenten.processing")
 
 _QUERY_BATCH_GROOTTE = 500  # lijkt meest optimaal qua performance
 _BATCH_CONCURRENCY = 4
+# Bereik van RD-coördinaten in Nederland: minx, miny, maxx, maxy
+_RD_BEREIK = (0, 300_000, 300_000, 650_000)
 
 # Kadaster grondslagcodes (publiekrechtelijke beperkingen, BRK)
 # EWE: inschrijving in het rijksmonumentenregister -> rijksmonument (art. 1.1 Erfgoedwet)
@@ -48,7 +56,6 @@ _NL_LON = (3.0, 7.5)
 _NL_LAT = (50.5, 53.8)
 
 _WGS84 = "EPSG:4326"
-_RD = "EPSG:28992"
 
 # Marge om de provinciegrens. Enkele Drentse monumentvlakken steken tot 1,3 m
 # buiten de grens van PDOK, door verschillen in nauwkeurigheid; de grens wordt
@@ -104,10 +111,10 @@ def _lege_batch_frames() -> _BatchFrames:
 
 
 def _lege_adrespunten() -> gpd.GeoDataFrame:
-    """Leeg frame met adrespunten (WGS84), zoals _process_batch dat teruggeeft."""
+    """Leeg frame met adrespunten (RD), zoals _process_batch dat teruggeeft."""
     return gpd.GeoDataFrame(
         {"identificatie": pd.Series(dtype="string")},
-        geometry=gpd.GeoSeries([], crs=_WGS84),
+        geometry=gpd.GeoSeries([], crs=_RD),
     )
 
 
@@ -120,6 +127,7 @@ async def _process_batch(
     session: aiohttp.ClientSession,
     batch: List[str],
     beschermde_gezichten_df: gpd.GeoDataFrame,
+    adrespunten: _Adrespunten,
 ) -> _BatchResult:
     """Verwerk een batch verblijfsobjecten.
 
@@ -127,34 +135,32 @@ async def _process_batch(
         session (aiohttp.ClientSession): De sessie voor HTTP requests
         batch (List[str]): Lijst met verblijfsobject ID's
         beschermde_gezichten_df (gpd.GeoDataFrame): GeoDataFrame met beschermde gezichten
+        adrespunten (_Adrespunten): Adrespunt per verblijfsobject ID uit de BAG
 
     Returns:
         _BatchResult: Tuple met rijksmonumenten, beschermde gezichten,
-            gemeentelijke monumenten, adrespunten (WGS84) en aantal verwerkte objecten.
+            gemeentelijke monumenten, adrespunten (RD) en aantal verwerkte objecten.
             De provinciale monumenten worden na alle batches bepaald.
     """
     # Get the current event loop
     loop = asyncio.get_running_loop()
+    batch_adrespunten = {i: adrespunten[i] for i in batch if i in adrespunten}
 
     # Create tasks using the current loop
     rijksmonumenten_taak = loop.create_task(_query_rijksmonumenten(session, batch))
-    verblijfsobjecten_taak = loop.create_task(_query_verblijfsobjecten(session, batch))
+    beperkingen_taak = loop.create_task(_query_beperkingen(session, batch_adrespunten))
 
     # Wait for both tasks to complete
-    rijksmonumenten, verblijfsobjecten = await asyncio.gather(
-        rijksmonumenten_taak, verblijfsobjecten_taak
+    rijksmonumenten, beperkingen = await asyncio.gather(
+        rijksmonumenten_taak, beperkingen_taak
     )
 
-    if not verblijfsobjecten:
-        logger.warning(
-            "Geen geldige BAG verblijfsobjecten gevonden voor batch van %d ID's",
-            len(batch),
-        )
-        return (*_lege_batch_frames(), len(batch))
-
-    verblijfsobjecten_df = pd.DataFrame(verblijfsobjecten).astype(
-        {"identificatie": "string"}
-    )
+    # Geen vroege return als de beperkingen leeg zijn: de RCE-query heeft geen
+    # adrespunt nodig, en het beschermd gezicht volgt uit het adrespunt zelf.
+    beperkingen_df = pd.DataFrame(
+        beperkingen,
+        columns=["identificatie", "grondslagcode", "grondslag_gemeentelijk_monument"],
+    ).astype({"identificatie": "string"})
 
     rijksmonumenten_df = pd.merge(
         pd.DataFrame(
@@ -162,8 +168,8 @@ async def _process_batch(
             columns=["identificatie", "rijksmonument_nummer"],
             dtype="string",
         ),
-        verblijfsobjecten_df[
-            verblijfsobjecten_df["grondslagcode"].isin(_RIJKSMONUMENT_GRONDSLAGCODES)
+        beperkingen_df[
+            beperkingen_df["grondslagcode"].isin(_RIJKSMONUMENT_GRONDSLAGCODES)
         ][["identificatie", "grondslagcode"]],
         on="identificatie",
         how="outer",
@@ -198,8 +204,8 @@ async def _process_batch(
     # Voorbescherming (EWD) is geen rijksmonument in de zin van art. 1.1 Erfgoedwet
     # en telt dus niet mee voor rijksmonument/rijksmonument_bron. Wel apart teruggeven.
     voorbescherming_df = (
-        verblijfsobjecten_df[
-            verblijfsobjecten_df["grondslagcode"].isin(_VOORBESCHERMING_GRONDSLAGCODES)
+        beperkingen_df[
+            beperkingen_df["grondslagcode"].isin(_VOORBESCHERMING_GRONDSLAGCODES)
         ][["identificatie"]]
         .drop_duplicates()
         .assign(rijksmonument_voorbescherming=True)
@@ -212,16 +218,17 @@ async def _process_batch(
     ].eq(True)
 
     # Process gemeentelijke monumenten
-    gemeentelijke_monumenten_df = verblijfsobjecten_df[
-        verblijfsobjecten_df["grondslagcode"].isin(_GEMEENTELIJK_GRONDSLAGCODES)
+    gemeentelijke_monumenten_df = beperkingen_df[
+        beperkingen_df["grondslagcode"].isin(_GEMEENTELIJK_GRONDSLAGCODES)
     ][["identificatie", "grondslag_gemeentelijk_monument"]]
 
     # Process beschermde gezichten
+    xs = [x for x, _ in batch_adrespunten.values()]
+    ys = [y for _, y in batch_adrespunten.values()]
     geo_df = gpd.GeoDataFrame(
-        verblijfsobjecten_df[["identificatie", "verblijfsobjectWKT"]].assign(
-            geometry=lambda x: gpd.GeoSeries.from_wkt(x["verblijfsobjectWKT"])
-        )[["identificatie", "geometry"]],
-        geometry="geometry",
+        {"identificatie": pd.Series(list(batch_adrespunten), dtype="string")},
+        geometry=gpd.points_from_xy(xs, ys),
+        crs=_RD,
     )
 
     # Find objects within beschermde gezichten
@@ -232,14 +239,12 @@ async def _process_batch(
         predicate="within",
     )[["identificatie", "rijksbeschermd_gezicht_naam"]]
 
-    # De KKG levert POINT(lon lat) in WGS84
-    adrespunten = geo_df.set_crs(_WGS84)
-
     return (
         rijksmonumenten_df,
         verblijfsobjecten_in_beschermde_gezichten_df,
         gemeentelijke_monumenten_df,
-        adrespunten,
+        # Adrespunten in RD; de provinciale stap rekent zelf om voor de bbox-check
+        geo_df,
         len(batch),
     )
 
@@ -259,10 +264,24 @@ async def _get_beschermde_gezichten(
     beschermde_gezichten_df["geometry"] = gpd.GeoSeries.from_wkt(
         beschermde_gezichten_df["gezichtWKT"]
     )
+    # De RCE levert de gezichten in WGS84, de adrespunten van het Kadaster zijn in RD
     beschermde_gezichten_df = gpd.GeoDataFrame(
         beschermde_gezichten_df[["rijksbeschermd_gezicht_naam", "geometry"]],
         geometry="geometry",
-    )
+        crs="EPSG:4326",
+    ).to_crs(_RD)
+    # Levert de RCE ooit iets anders dan WGS84, dan vindt de spatial join stilletjes
+    # niets meer. Na omrekening moeten de gezichten daarom binnen Nederland liggen.
+    minx, miny, maxx, maxy = beschermde_gezichten_df.total_bounds
+    bereik_minx, bereik_miny, bereik_maxx, bereik_maxy = _RD_BEREIK
+    if not (
+        bereik_minx <= minx <= maxx <= bereik_maxx
+        and bereik_miny <= miny <= maxy <= bereik_maxy
+    ):
+        raise ValueError(
+            "Beschermde gezichten liggen na omrekening naar RD buiten Nederland; "
+            "levert de RCE de geometrie nog in WGS84?"
+        )
 
     return beschermde_gezichten_df
 
@@ -332,7 +351,7 @@ async def _bepaal_provinciale_monumenten(
     onbepaald: Dict[str, ProvincieOnbepaald] = {}
     # Een verblijfsobject met meerdere beperkingen komt meerdere keren voor
     adrespunten = adrespunten.drop_duplicates(subset="identificatie")
-    # De KKG levert punten; .x en .y falen op iets anders (zoals een multipoint)
+    # De BAG levert punten; .x en .y falen op iets anders (zoals een multipoint)
     is_punt = adrespunten.geom_type.eq("Point") & ~adrespunten.is_empty
     if not is_punt.all():
         logger.warning(
@@ -344,7 +363,11 @@ async def _bepaal_provinciale_monumenten(
     if adrespunten.empty:
         return _lege_provinciale_monumenten(), onbepaald
 
-    wgs84 = adrespunten.geometry.to_crs(_WGS84)
+    with warnings.catch_warnings():
+        # pyproj 3.7 geeft bij precies één punt een DeprecationWarning van NumPy
+        # (array met ndim > 0 naar scalar); die hoort niet bij de gebruiker.
+        warnings.filterwarnings("ignore", category=DeprecationWarning, module="pyproj")
+        wgs84 = adrespunten.geometry.to_crs(_WGS84)
     lon, lat = wgs84.x, wgs84.y
     in_nederland = lon.between(*_NL_LON) & lat.between(*_NL_LAT)
     if in_nederland.mean() < 0.5:
@@ -477,6 +500,32 @@ async def _query(
     """
     beschermde_gezichten_df = await _get_beschermde_gezichten(session)
 
+    # De BRK-PB requests zijn alleen snel als de adrespunten in een request bij elkaar
+    # liggen. Daarom eerst alle adrespunten ophalen en de verblijfsobjecten langs een
+    # Hilbert-curve sorteren: opeenvolgende ID's liggen dan bij elkaar in de buurt.
+    adrespunten = await _query_adrespunten(session, verblijfsobject_ids)
+    zonder_adrespunt = len(verblijfsobject_ids) - len(adrespunten)
+    if zonder_adrespunt:
+        logger.warning(
+            "%d van %d verblijfsobjecten hebben geen adrespunt uit de BAG; die krijgen "
+            "geen Kadaster-beperking en geen beschermd gezicht",
+            zonder_adrespunt,
+            len(verblijfsobject_ids),
+        )
+    if adrespunten:
+        xs, ys = zip(*adrespunten.values())
+        hilbert_afstand = dict(
+            zip(
+                adrespunten,
+                gpd.GeoSeries(gpd.points_from_xy(xs, ys)).hilbert_distance(
+                    total_bounds=_RD_BEREIK
+                ),
+            )
+        )
+        verblijfsobject_ids = sorted(
+            verblijfsobject_ids, key=lambda i: hilbert_afstand.get(i, float("inf"))
+        )
+
     batches = [
         verblijfsobject_ids[i : i + _QUERY_BATCH_GROOTTE]
         for i in range(0, len(verblijfsobject_ids), _QUERY_BATCH_GROOTTE)
@@ -493,7 +542,9 @@ async def _query(
     async def _run_batch(batch: List[str]) -> None:
         async with batch_semaphore:
             try:
-                result = await _process_batch(session, batch, beschermde_gezichten_df)
+                result = await _process_batch(
+                    session, batch, beschermde_gezichten_df, adrespunten
+                )
                 results_list.append(result)
                 progress_bar.update(result[4])
             except Exception:
@@ -524,11 +575,11 @@ async def _query(
         rijksmonumenten_result,
         verblijfsobjecten_in_beschermd_gezicht_result,
         gemeentelijke_monumenten_result,
-        adrespunten,
+        adrespunten_rd,
     ) = samengevoegd
 
     provinciale_monumenten_result, onbepaald = await _bepaal_provinciale_monumenten(
-        session, adrespunten
+        session, adrespunten_rd
     )
 
     if all(

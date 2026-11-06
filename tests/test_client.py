@@ -521,13 +521,16 @@ _VO_ALLEEN_EWE = "0599010000000002"
 _VO_RCE_EN_EWD = "0599010000000003"
 
 
+# Adrespunten in RD, zoals de BAG van PDOK ze levert
+_ROTTERDAM_RD = (92500.0, 437500.0)
+_HAARLEM_RD = (103800.0, 488600.0)
+_LEIDEN_RD = (93911.705, 464260.065)
+
+
 def _beperking(identificatie: str, grondslagcode: str | None) -> dict:
-    """Een rij zoals _query_verblijfsobjecten die teruggeeft."""
-    # Rotterdam ligt buiten de bbox van Noord-Holland en Drenthe, dus er wordt
-    # geen provincie bevraagd
+    """Een rij zoals _query_beperkingen die teruggeeft."""
     return {
         "identificatie": identificatie,
-        "verblijfsobjectWKT": "POINT (4.48 51.92)",
         "grondslagcode": grondslagcode,
         "grondslag_gemeentelijk_monument": None,
     }
@@ -543,13 +546,20 @@ def _mock_api_met_voorbescherming() -> Iterator[None]:
     rijksmonumenten = [
         {"identificatie": _VO_RCE_EN_EWD, "rijksmonument_nummer": "12345"}
     ]
-    verblijfsobjecten = [
+    beperkingen = [
         _beperking(_VO_ALLEEN_EWD, "EWD"),
         _beperking(_VO_ALLEEN_EWE, "EWE"),
         _beperking(_VO_RCE_EN_EWD, "EWD"),
     ]
+    # Rotterdam ligt buiten de bbox van Noord-Holland en Drenthe, dus er wordt
+    # geen provincie bevraagd
+    adrespunten = {
+        vo: _ROTTERDAM_RD for vo in (_VO_ALLEEN_EWD, _VO_ALLEEN_EWE, _VO_RCE_EN_EWD)
+    }
     geen_gezichten = gpd.GeoDataFrame(
-        columns=["rijksbeschermd_gezicht_naam", "geometry"], geometry="geometry"
+        columns=["rijksbeschermd_gezicht_naam", "geometry"],
+        geometry="geometry",
+        crs="EPSG:28992",
     )
     with (
         patch(
@@ -557,8 +567,12 @@ def _mock_api_met_voorbescherming() -> Iterator[None]:
             AsyncMock(return_value=rijksmonumenten),
         ),
         patch(
-            "monumenten._processing._query_verblijfsobjecten",
-            AsyncMock(return_value=verblijfsobjecten),
+            "monumenten._processing._query_adrespunten",
+            AsyncMock(return_value=adrespunten),
+        ),
+        patch(
+            "monumenten._processing._query_beperkingen",
+            AsyncMock(return_value=beperkingen),
         ),
         patch(
             "monumenten._processing._get_beschermde_gezichten",
@@ -645,22 +659,18 @@ def _mock_api_noord_holland_plat() -> Iterator[None]:
     Haarlem heeft ook een gemeentelijk monument en een rijksmonument; die
     statussen blijven bepaald.
     """
-    verblijfsobjecten = [
+    beperkingen = [
         {
             "identificatie": _VO_HAARLEM,
-            "verblijfsobjectWKT": "POINT (4.6352 52.3829)",
             "grondslagcode": "GG",
             "grondslag_gemeentelijk_monument": "Gemeentewet",
         },
-        {
-            "identificatie": _VO_LEIDEN,
-            "verblijfsobjectWKT": "POINT (4.4905 52.1597)",
-            "grondslagcode": None,
-            "grondslag_gemeentelijk_monument": None,
-        },
     ]
+    adrespunten = {_VO_HAARLEM: _HAARLEM_RD, _VO_LEIDEN: _LEIDEN_RD}
     geen_gezichten = gpd.GeoDataFrame(
-        columns=["rijksbeschermd_gezicht_naam", "geometry"], geometry="geometry"
+        columns=["rijksbeschermd_gezicht_naam", "geometry"],
+        geometry="geometry",
+        crs="EPSG:28992",
     )
     with (
         patch(
@@ -672,8 +682,12 @@ def _mock_api_noord_holland_plat() -> Iterator[None]:
             ),
         ),
         patch(
-            "monumenten._processing._query_verblijfsobjecten",
-            AsyncMock(return_value=verblijfsobjecten),
+            "monumenten._processing._query_adrespunten",
+            AsyncMock(return_value=adrespunten),
+        ),
+        patch(
+            "monumenten._processing._query_beperkingen",
+            AsyncMock(return_value=beperkingen),
         ),
         patch(
             "monumenten._processing._get_beschermde_gezichten",
@@ -792,4 +806,22 @@ async def test_process_from_list_beperkingsgebied_bevat_adrespunt(
 
     # Adrespunt binnen het beperkingsgebied: status blijft
     for vbo_id in ["0119010000024715", "0363010001026929"]:
+        assert result[vbo_id]["gemeentelijk_monument"] is True, vbo_id
+
+
+@pytest.mark.asyncio
+async def test_process_from_list_adrespunten_op_een_lijn(client: MonumentenClient):
+    """Adrespunten die exact op één verticale lijn liggen krijgen hun beperking.
+
+    De BRK-PB WFS vindt niets als de omhullende rechthoek van de adrespunten geen
+    breedte heeft. Beide adressen hebben x = 177087.49 en verschillen 5 cm in y.
+    """
+    bag_verblijfsobject_ids = [
+        "0935010000036807",  # Lyonnetstraat 13A Maastricht: GWA
+        "0935010000036808",  # Lyonnetstraat 13B Maastricht: GWA
+    ]
+
+    result = await client.process_from_list(bag_verblijfsobject_ids)
+
+    for vbo_id in bag_verblijfsobject_ids:
         assert result[vbo_id]["gemeentelijk_monument"] is True, vbo_id
