@@ -10,7 +10,11 @@ import pytest
 import pytest_asyncio
 from shapely.geometry import box
 
-from monumenten import MonumentenClient, MonumentStatusOnbepaaldWarning
+from monumenten import (
+    GeenAdrespuntWarning,
+    MonumentenClient,
+    MonumentStatusOnbepaaldWarning,
+)
 from monumenten._api._provincies import ProvincialeMonumentenError
 
 
@@ -640,6 +644,62 @@ async def test_voorbescherming_gemockt_df(client: MonumentenClient):
     assert bool(row["rijksmonument_voorbescherming"]) is True
 
 
+# Staat niet in de BAG (bijvoorbeeld "Niet gerealiseerd verblijfsobject"), maar
+# de RCE koppelt het wel aan een rijksmonument
+_VO_ZONDER_ADRESPUNT = "0599010000000009"
+
+
+@pytest.mark.asyncio
+async def test_zonder_adrespunt_geeft_false_en_waarschuwing(client: MonumentenClient):
+    """Zonder adrespunt zijn de statussen False en niet pd.NA, want de BAG gaf
+    antwoord; een rijksmonument van de RCE blijft True. Eén GeenAdrespuntWarning
+    noemt de ID's, en er volgt geen MonumentStatusOnbepaaldWarning."""
+    rijksmonumenten = [
+        {"identificatie": _VO_RCE_EN_EWD, "rijksmonument_nummer": "12345"},
+        {"identificatie": _VO_ZONDER_ADRESPUNT, "rijksmonument_nummer": "67890"},
+    ]
+    with (
+        _mock_api_met_voorbescherming(),
+        patch(
+            "monumenten._processing._query_rijksmonumenten",
+            AsyncMock(return_value=rijksmonumenten),
+        ),
+        warnings.catch_warnings(),
+    ):
+        warnings.simplefilter("error", MonumentStatusOnbepaaldWarning)
+        with pytest.warns(GeenAdrespuntWarning) as meldingen:
+            result = await client.process_from_df(
+                pd.DataFrame(
+                    {"bag_verblijfsobject_id": [_VO_ALLEEN_EWE, _VO_ZONDER_ADRESPUNT]}
+                ),
+                "bag_verblijfsobject_id",
+            )
+
+    assert len(meldingen) == 1
+    assert meldingen[0].message.verblijfsobject_ids == {"BAG": [_VO_ZONDER_ADRESPUNT]}
+    row = result.set_index("bag_verblijfsobject_id").loc[_VO_ZONDER_ADRESPUNT]
+    assert bool(row["rijksmonument"]) is True
+    assert row["rijksmonument_bron"] == "RCE"
+    for status in (
+        "rijksmonument_voorbescherming",
+        "rijksbeschermd_gezicht",
+        "gemeentelijk_monument",
+        "provinciaal_monument",
+    ):
+        assert row[status] is not pd.NA, status
+        assert bool(row[status]) is False, status
+
+
+@pytest.mark.asyncio
+async def test_alle_adrespunten_geen_adrespunt_waarschuwing(client: MonumentenClient):
+    with _mock_api_met_voorbescherming(), warnings.catch_warnings():
+        warnings.simplefilter("error", GeenAdrespuntWarning)
+        await client.process_from_df(
+            pd.DataFrame({"bag_verblijfsobject_id": [_VO_ALLEEN_EWE]}),
+            "bag_verblijfsobject_id",
+        )
+
+
 @pytest.mark.asyncio
 async def test_voorbescherming_gemockt_vera(client: MonumentenClient):
     """Voorbescherming heeft geen VERA-code (EENHEIDMONUMENT kent geen voorbescherming)."""
@@ -663,7 +723,7 @@ def _mock_api_noord_holland_plat() -> Iterator[None]:
     beperkingen = [
         {
             "identificatie": _VO_HAARLEM,
-            "grondslagcode": "GG",
+            "grondslagcode": "GWA",
             "grondslag_gemeentelijk_monument": "Gemeentewet",
         },
     ]
