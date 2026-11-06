@@ -262,7 +262,7 @@ Naast de drie monumenttypes hierboven bepaalt de package ook de status **Provinc
 | **Noord-Holland** | `https://geoservices.noord-holland.nl/ags/rest/services/oi_dataservice_protected_sites/MapServer/2/query`  | Categorieën _Kleine objecten_, _Stelling van Amsterdam_, _Stelling van Den Helder_, _Waterstaatkundige werken_ |
 | **Drenthe**       | `https://kaartportaal.drenthe.nl/server/rest/services/37/Provinciale_monumenten_Drenthe/MapServer/3/query` | Status `beschermd`                                                                                             |
 
-Een verblijfsobject is een provinciaal monument als zijn adrespunt (uit het Kadaster) binnen een monumentvlak ligt, net als bij rijksbeschermde gezichten. `provinciaal_monument_omschrijving` bevat in Drenthe het nummer en de naam van het monument (bijvoorbeeld `PM1-0001 Dwarshuisboerderij Rolde`); in Noord-Holland alleen de categorie, omdat de provincie geen naam of nummer per vlak publiceert. Bij meerdere vlakken worden de omschrijvingen gescheiden door `, `. In VERA-referentiedataformaat is de code `PRO`.
+Een verblijfsobject is een provinciaal monument als zijn adrespunt (uit de BAG) binnen een monumentvlak ligt, net als bij rijksbeschermde gezichten. `provinciaal_monument_omschrijving` bevat in Drenthe het nummer en de naam van het monument (bijvoorbeeld `PM1-0001 Dwarshuisboerderij Rolde`); in Noord-Holland alleen de categorie, omdat de provincie geen naam of nummer per vlak publiceert. Bij meerdere vlakken worden de omschrijvingen gescheiden door `, `. In VERA-referentiedataformaat is de code `PRO`.
 
 Keuzes en beperkingen:
 
@@ -287,7 +287,7 @@ Keuzes en beperkingen:
   warnings.simplefilter("error", MonumentStatusOnbepaaldWarning)
   ```
 
-  Dit dekt alleen uitval van de provincie. Een verblijfsobject waarvoor de BAG na retries geen adrespunt gaf, of waarvan de hele batch mislukte, wordt niet getoetst; het krijgt, net als bij de andere statussen, `False` met een waarschuwing of foutmelding in de log.
+  Dit dekt alleen uitval van de provincie. Een verblijfsobject waarvoor de BAG na retries geen adrespunt gaf, wordt niet getoetst; het krijgt, net als bij de andere statussen, `False` met een waarschuwing in de log. Een mislukte batch raakt het provinciale monument niet: de package haalt alle adrespunten op voordat de batches beginnen.
 
 - **Combinaties.** Volgens de provinciale verordeningen kan een object niet tegelijk rijks- of gemeentelijk én provinciaal monument zijn. De package dwingt dat niet af, omdat de Kadaster-statussen per perceel gelden en dus ook buurgebouwen kunnen raken.
 

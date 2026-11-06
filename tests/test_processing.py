@@ -8,7 +8,7 @@ import geopandas as gpd
 import pandas as pd
 import pytest
 import shapely
-from shapely.geometry import MultiPoint, Point, box
+from shapely.geometry import Point, box
 
 from monumenten._api._backoff import MAX_SPLIT_DEPTH, MIN_BATCH_SIZE
 from monumenten._api._cultureel_erfgoed import _query_rijksmonumenten
@@ -31,14 +31,13 @@ from monumenten._processing import (
     _get_beschermde_gezichten,
     _get_provinciegrenzen,
     ProvincieOnbepaald,
-    _lege_adrespunten,
     _process_batch,
     _query,
 )
 
 
 def _make_batch_result(identificaties, count=None):
-    """Minimal valid (rm, beschermd_gezicht, gemeentelijk, adrespunten) frames + count."""
+    """Minimal valid (rm, beschermd_gezicht, gemeentelijk) frames + count."""
     n = count if count is not None else len(identificaties)
     ids_df = pd.DataFrame({"identificatie": list(identificaties)[:n]})
     rm = ids_df.assign(
@@ -48,7 +47,7 @@ def _make_batch_result(identificaties, count=None):
     )
     bg = ids_df.assign(rijksbeschermd_gezicht_naam=pd.NA)
     gm = ids_df.assign(grondslag_gemeentelijk_monument=pd.NA)
-    return (rm, bg, gm, _lege_adrespunten(), n)
+    return (rm, bg, gm, n)
 
 
 @pytest.fixture
@@ -423,7 +422,7 @@ async def test_process_batch_zonder_adrespunten_houdt_rce_rijksmonumenten():
         ),
         patch("monumenten._processing._query_beperkingen", return_value=[]),
     ):
-        rijksmonumenten, gezichten, gemeentelijk, _, aantal = await _process_batch(
+        rijksmonumenten, gezichten, gemeentelijk, aantal = await _process_batch(
             AsyncMock(),
             ["ligplaats", "onbekend"],
             _beschermde_gezichten("Gezicht", 0, 0, 10, 10),
@@ -450,7 +449,7 @@ async def test_process_batch_beschermd_gezicht_zonder_brk_pb():
         patch("monumenten._processing._query_rijksmonumenten", return_value=[]),
         patch("monumenten._processing._query_beperkingen", return_value=[]),
     ):
-        _, gezichten, _, _, _ = await _process_batch(
+        _, gezichten, _, _ = await _process_batch(
             AsyncMock(),
             ["binnen", "buiten"],
             _beschermde_gezichten("Gezicht", 0, 0, 10, 10),
@@ -564,10 +563,9 @@ _DRENTSE_GRENS = box(200000, 520000, 270000, 580000)
 _NH_GRENS = box(100000, 470000, 150000, 580000)
 
 
-def _adrespunten(punten, crs="EPSG:28992"):
-    return gpd.GeoDataFrame(
-        {"identificatie": list(punten)}, geometry=list(punten.values()), crs=crs
-    )
+def _adrespunten(punten):
+    """Adrespunten zoals _query_adrespunten ze levert: (x, y) in RD per ID."""
+    return {identificatie: (p.x, p.y) for identificatie, p in punten.items()}
 
 
 def _drenthe_monumenten():
@@ -719,34 +717,6 @@ async def test_bepaal_provinciaal_grenzen_falen_terugval_op_bbox(caplog):
 
 
 @pytest.mark.asyncio
-async def test_bepaal_provinciaal_wgs84_en_rd_geven_hetzelfde():
-    """De KKG levert WGS84, PDOK RD: de uitkomst is gelijk."""
-    rd = _adrespunten({"rolde": _ROLDE, "haarlem": _HAARLEM, "leiden": _LEIDEN})
-    wgs84 = rd.to_crs("EPSG:4326")
-    monumenten = {"Drenthe": _drenthe_monumenten(), "Noord-Holland": _nh_monumenten()}
-
-    (uit_rd, _), _, _ = await _bepaal(rd, _GRENZEN, monumenten)
-    (uit_wgs84, _), _, _ = await _bepaal(wgs84, _GRENZEN, monumenten)
-
-    assert sorted(uit_rd["identificatie"]) == ["haarlem", "rolde"]
-    assert sorted(uit_wgs84["identificatie"]) == sorted(uit_rd["identificatie"])
-
-
-@pytest.mark.asyncio
-async def test_bepaal_provinciaal_dubbele_id_een_keer_onbepaald():
-    """Een verblijfsobject met meerdere beperkingen staat één keer in de melding."""
-    adrespunten = _adrespunten({"haarlem": _HAARLEM})
-    adrespunten = pd.concat([adrespunten, adrespunten], ignore_index=True)
-    (_, onbepaald), _, _ = await _bepaal(
-        adrespunten,
-        _GRENZEN,
-        {"Noord-Holland": ProvincialeMonumentenError("Noord-Holland plat")},
-    )
-
-    assert onbepaald["Noord-Holland"].verblijfsobject_ids == ["haarlem"]
-
-
-@pytest.mark.asyncio
 async def test_bepaal_provinciaal_onverwachte_fout_geeft_onbepaald(caplog):
     """Een fout buiten ProvincialeMonumentenError (zoals een geometrie die
     from_features niet leest) breekt de aanroep niet af."""
@@ -784,36 +754,45 @@ async def test_bepaal_provinciaal_onverwachte_fout_grenzen_terugval(caplog):
 
 
 @pytest.mark.asyncio
-async def test_bepaal_provinciaal_geen_punt_valt_af(caplog):
-    """Een multipoint of lege geometrie geeft geen fout op .x/.y, maar een
-    waarschuwing; de overige punten worden gewoon bepaald."""
-    adrespunten = _adrespunten(
-        {
-            "rolde": _ROLDE,
-            "multi": MultiPoint([_ROLDE, _ROLDE_NAAST]),
-            "leeg": Point(),
-        }
-    )
-    with caplog.at_level(logging.WARNING):
-        (result, onbepaald), _, _ = await _bepaal(
-            adrespunten, _GRENZEN, {"Drenthe": _drenthe_monumenten()}
-        )
+async def test_query_mislukte_batch_bepaalt_provinciaal_monument_wel(
+    empty_geodataframe,
+):
+    """Faalt een batch, dan wordt het provinciale monument toch bepaald: de
+    adrespunten zijn er al voor de batches beginnen."""
 
-    assert result["identificatie"].tolist() == ["rolde"]
+    async def mislukte_batch(session, batch, bg_df, adrespunten):
+        raise RuntimeError("RCE onbereikbaar")
+
+    with (
+        patch(
+            "monumenten._processing._get_beschermde_gezichten",
+            return_value=empty_geodataframe,
+        ),
+        patch(
+            "monumenten._processing._query_adrespunten",
+            return_value=_adrespunten({"rolde": _ROLDE}),
+        ),
+        patch("monumenten._processing._process_batch", side_effect=mislukte_batch),
+        patch(
+            "monumenten._processing._get_provinciegrenzen",
+            AsyncMock(return_value=_GRENZEN),
+        ),
+        patch(
+            "monumenten._processing._get_provinciale_monumenten",
+            AsyncMock(return_value=_drenthe_monumenten()),
+        ),
+    ):
+        result, onbepaald = await _query(AsyncMock(), ["rolde"])
+
     assert onbepaald == {}
-    assert "2 adrespunten zijn geen punt" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_bepaal_provinciaal_verwisselde_assen_geeft_fout(caplog):
-    """POINT(lat lon) valt buiten Nederland en zou stil nooit in een bbox liggen."""
-    (_, _), opgehaald, _ = await _bepaal(
-        _adrespunten({"rolde": Point(52.9885, 6.646)}, crs="EPSG:4326"),
-        AssertionError("geen grenzen"),
-    )
-
-    assert opgehaald == []
-    assert "buiten het bereik van Nederland" in caplog.text
+    assert result[["identificatie", "provinciaal_monument_omschrijving"]].to_dict(
+        "records"
+    ) == [
+        {
+            "identificatie": "rolde",
+            "provinciaal_monument_omschrijving": "PM1-0001 Dwarshuisboerderij Rolde",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -964,7 +943,7 @@ def _rij(rm_df, identificatie):
 @pytest.mark.asyncio
 async def test_process_batch_ewd_is_geen_rijksmonument(empty_geodataframe):
     """EWD (voorbescherming) zet alleen rijksmonument_voorbescherming, geen bron."""
-    rm_df, _, gm_df, _, n = await _run_process_batch(
+    rm_df, _, gm_df, n = await _run_process_batch(
         rijksmonumenten=[],
         beperkingen=[_beperking("vo_ewd", "EWD", _EWD_GRONDSLAG)],
         beschermde_gezichten_df=empty_geodataframe,
@@ -989,7 +968,7 @@ async def test_process_batch_ewd_is_geen_rijksmonument(empty_geodataframe):
 async def test_process_batch_ewe_is_rijksmonument_zonder_voorbescherming(
     empty_geodataframe,
 ):
-    rm_df, _, _, _, _ = await _run_process_batch(
+    rm_df, _, _, _ = await _run_process_batch(
         rijksmonumenten=[],
         beperkingen=[_beperking("vo_ewe", "EWE", _EWE_GRONDSLAG)],
         beschermde_gezichten_df=empty_geodataframe,
@@ -1003,7 +982,7 @@ async def test_process_batch_ewe_is_rijksmonument_zonder_voorbescherming(
 @pytest.mark.asyncio
 async def test_process_batch_ewe_en_ewd_op_zelfde_verblijfsobject(empty_geodataframe):
     """EWE + EWD: één rij, bron Kadaster én voorbescherming True."""
-    rm_df, _, _, _, _ = await _run_process_batch(
+    rm_df, _, _, _ = await _run_process_batch(
         rijksmonumenten=[],
         beperkingen=[
             _beperking("vo_beide", "EWE", _EWE_GRONDSLAG),
@@ -1020,7 +999,7 @@ async def test_process_batch_ewe_en_ewd_op_zelfde_verblijfsobject(empty_geodataf
 @pytest.mark.asyncio
 async def test_process_batch_rce_en_ewd(empty_geodataframe):
     """RCE-nummer + EWD: bron is alleen RCE (EWD telt niet als Kadaster-bron)."""
-    rm_df, _, _, _, _ = await _run_process_batch(
+    rm_df, _, _, _ = await _run_process_batch(
         rijksmonumenten=[{"identificatie": "vo_rce", "rijksmonument_nummer": "12345"}],
         beperkingen=[_beperking("vo_rce", "EWD", _EWD_GRONDSLAG)],
         beschermde_gezichten_df=empty_geodataframe,
@@ -1034,7 +1013,7 @@ async def test_process_batch_rce_en_ewd(empty_geodataframe):
 
 @pytest.mark.asyncio
 async def test_process_batch_rce_en_ewe(empty_geodataframe):
-    rm_df, _, _, _, _ = await _run_process_batch(
+    rm_df, _, _, _ = await _run_process_batch(
         rijksmonumenten=[{"identificatie": "vo_rce", "rijksmonument_nummer": "12345"}],
         beperkingen=[_beperking("vo_rce", "EWE", _EWE_GRONDSLAG)],
         beschermde_gezichten_df=empty_geodataframe,
@@ -1048,7 +1027,7 @@ async def test_process_batch_rce_en_ewe(empty_geodataframe):
 @pytest.mark.asyncio
 async def test_process_batch_zonder_beperking(empty_geodataframe):
     """Verblijfsobject zonder beperking komt niet in rijksmonumenten_df."""
-    rm_df, _, gm_df, adrespunten, _ = await _run_process_batch(
+    rm_df, _, gm_df, _ = await _run_process_batch(
         rijksmonumenten=[],
         beperkingen=[_beperking("vo_leeg")],
         beschermde_gezichten_df=empty_geodataframe,
@@ -1056,9 +1035,6 @@ async def test_process_batch_zonder_beperking(empty_geodataframe):
 
     assert rm_df.empty
     assert gm_df.empty
-    # Het adrespunt gaat door naar de provinciale stap, in RD
-    assert adrespunten["identificatie"].tolist() == ["vo_leeg"]
-    assert adrespunten.crs == "EPSG:28992"
 
 
 @pytest.mark.asyncio
@@ -1068,7 +1044,7 @@ async def test_process_batch_geen_bron_is_none(empty_geodataframe):
     De client leidt rijksmonument af uit een gevulde bron (notna), dus een lege
     string zou zo'n rij ten onrechte als rijksmonument laten tellen.
     """
-    rm_df, _, _, _, _ = await _run_process_batch(
+    rm_df, _, _, _ = await _run_process_batch(
         rijksmonumenten=[{"identificatie": "vo_rce", "rijksmonument_nummer": None}],
         beperkingen=[_beperking("vo_rce")],
         beschermde_gezichten_df=empty_geodataframe,

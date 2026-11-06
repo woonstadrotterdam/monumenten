@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import warnings
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -51,10 +50,6 @@ _VOORBESCHERMING_GRONDSLAGCODES = ["EWD"]
 # GG/GWA: gemeentelijk monument (GWA bundelt voorbescherming, aanwijzing en afschrift)
 _GEMEENTELIJK_GRONDSLAGCODES = ["GG", "GWA"]
 
-# Ruim bereik van Nederland in WGS84, om verwisselde assen te herkennen
-_NL_LON = (3.0, 7.5)
-_NL_LAT = (50.5, 53.8)
-
 _WGS84 = "EPSG:4326"
 
 # Marge om de provinciegrens. Enkele Drentse monumentvlakken steken tot 1,3 m
@@ -79,8 +74,8 @@ class ProvincieOnbepaald:
     verblijfsobject_ids: List[str]
 
 
-_BatchFrames = Tuple[DataFrame, DataFrame, DataFrame, gpd.GeoDataFrame]
-_BatchResult = Tuple[DataFrame, DataFrame, DataFrame, gpd.GeoDataFrame, int]
+_BatchFrames = Tuple[DataFrame, DataFrame, DataFrame]
+_BatchResult = Tuple[DataFrame, DataFrame, DataFrame, int]
 
 _RESULTAAT_KOLOMMEN = [
     "identificatie",
@@ -106,15 +101,6 @@ def _lege_batch_frames() -> _BatchFrames:
         ),
         pd.DataFrame(columns=["identificatie", "rijksbeschermd_gezicht_naam"]),
         pd.DataFrame(columns=["identificatie", "grondslag_gemeentelijk_monument"]),
-        _lege_adrespunten(),
-    )
-
-
-def _lege_adrespunten() -> gpd.GeoDataFrame:
-    """Leeg frame met adrespunten (RD), zoals _process_batch dat teruggeeft."""
-    return gpd.GeoDataFrame(
-        {"identificatie": pd.Series(dtype="string")},
-        geometry=gpd.GeoSeries([], crs=_RD),
     )
 
 
@@ -139,8 +125,8 @@ async def _process_batch(
 
     Returns:
         _BatchResult: Tuple met rijksmonumenten, beschermde gezichten,
-            gemeentelijke monumenten, adrespunten (RD) en aantal verwerkte objecten.
-            De provinciale monumenten worden na alle batches bepaald.
+            gemeentelijke monumenten en aantal verwerkte objecten. De provinciale
+            monumenten worden na alle batches bepaald, uit alle adrespunten.
     """
     # Get the current event loop
     loop = asyncio.get_running_loop()
@@ -243,8 +229,6 @@ async def _process_batch(
         rijksmonumenten_df,
         verblijfsobjecten_in_beschermde_gezichten_df,
         gemeentelijke_monumenten_df,
-        # Adrespunten in RD; de provinciale stap rekent zelf om voor de bbox-check
-        geo_df,
         len(batch),
     )
 
@@ -268,7 +252,7 @@ async def _get_beschermde_gezichten(
     beschermde_gezichten_df = gpd.GeoDataFrame(
         beschermde_gezichten_df[["rijksbeschermd_gezicht_naam", "geometry"]],
         geometry="geometry",
-        crs="EPSG:4326",
+        crs=_WGS84,
     ).to_crs(_RD)
     # Levert de RCE ooit iets anders dan WGS84, dan vindt de spatial join stilletjes
     # niets meer. Na omrekening moeten de gezichten daarom binnen Nederland liggen.
@@ -324,7 +308,7 @@ async def _get_provinciegrenzen(
 
 
 async def _bepaal_provinciale_monumenten(
-    session: aiohttp.ClientSession, adrespunten: gpd.GeoDataFrame
+    session: aiohttp.ClientSession, adrespunten: _Adrespunten
 ) -> Tuple[DataFrame, Dict[str, ProvincieOnbepaald]]:
     """Bepaal welke adrespunten binnen een provinciaal monumentvlak liggen.
 
@@ -339,8 +323,7 @@ async def _bepaal_provinciale_monumenten(
 
     Args:
         session (aiohttp.ClientSession): De sessie voor HTTP requests
-        adrespunten (gpd.GeoDataFrame): Adrespunten met kolom ``identificatie`` en
-            een coördinatenstelsel
+        adrespunten (_Adrespunten): Adrespunt (RD) per verblijfsobject ID uit de BAG
 
     Returns:
         Tuple[DataFrame, Dict[str, ProvincieOnbepaald]]: De gevonden monumenten
@@ -349,46 +332,26 @@ async def _bepaal_provinciale_monumenten(
             niet op te halen waren de oorzaak en de ID's van haar kandidaten
     """
     onbepaald: Dict[str, ProvincieOnbepaald] = {}
-    # Een verblijfsobject met meerdere beperkingen komt meerdere keren voor
-    adrespunten = adrespunten.drop_duplicates(subset="identificatie")
-    # De BAG levert punten; .x en .y falen op iets anders (zoals een multipoint)
-    is_punt = adrespunten.geom_type.eq("Point") & ~adrespunten.is_empty
-    if not is_punt.all():
-        logger.warning(
-            "%d adrespunten zijn geen punt en tellen niet mee voor provinciale "
-            "monumenten",
-            (~is_punt).sum(),
-        )
-        adrespunten = adrespunten[is_punt]
-    if adrespunten.empty:
+    if not adrespunten:
         return _lege_provinciale_monumenten(), onbepaald
 
-    with warnings.catch_warnings():
-        # pyproj 3.7 geeft bij precies één punt een DeprecationWarning van NumPy
-        # (array met ndim > 0 naar scalar); die hoort niet bij de gebruiker.
-        warnings.filterwarnings("ignore", category=DeprecationWarning, module="pyproj")
-        wgs84 = adrespunten.geometry.to_crs(_WGS84)
-    lon, lat = wgs84.x, wgs84.y
-    in_nederland = lon.between(*_NL_LON) & lat.between(*_NL_LAT)
-    if in_nederland.mean() < 0.5:
-        logger.error(
-            "%d van %d adrespunten liggen buiten het bereik van Nederland; "
-            "controleer de volgorde van lengte- en breedtegraad. Provinciale "
-            "monumenten worden voor deze punten niet gevonden.",
-            (~in_nederland).sum(),
-            len(adrespunten),
-        )
+    xs, ys = zip(*adrespunten.values())
+    rd = gpd.GeoDataFrame(
+        {"identificatie": pd.Series(list(adrespunten), dtype="string")},
+        geometry=gpd.points_from_xy(xs, ys),
+        crs=_RD,
+    )
+    x, y = rd.geometry.x, rd.geometry.y
 
     in_bbox: Dict[Provincie, pd.Series[bool]] = {}
     for provincie in PROVINCIES:
-        min_lon, min_lat, max_lon, max_lat = provincie.bbox
-        masker = lon.between(min_lon, max_lon) & lat.between(min_lat, max_lat)
+        min_x, min_y, max_x, max_y = provincie.bbox
+        masker = x.between(min_x, max_x) & y.between(min_y, max_y)
         if masker.any():
             in_bbox[provincie] = masker
     if not in_bbox:
         return _lege_provinciale_monumenten(), onbepaald
 
-    rd = adrespunten.to_crs(_RD)
     grenzen: Dict[str, BaseGeometry] | None
     try:
         grenzen = await _get_provinciegrenzen(session)
@@ -508,7 +471,7 @@ async def _query(
     if zonder_adrespunt:
         logger.warning(
             "%d van %d verblijfsobjecten hebben geen adrespunt uit de BAG; die krijgen "
-            "geen Kadaster-beperking en geen beschermd gezicht",
+            "geen Kadaster-beperking, geen beschermd gezicht en geen provinciaal monument",
             zonder_adrespunt,
             len(verblijfsobject_ids),
         )
@@ -546,7 +509,7 @@ async def _query(
                     session, batch, beschermde_gezichten_df, adrespunten
                 )
                 results_list.append(result)
-                progress_bar.update(result[4])
+                progress_bar.update(result[3])
             except Exception:
                 logger.error(
                     "Batch (size %d) mislukt na retry/split in API-laag, overgeslagen",
@@ -566,7 +529,7 @@ async def _query(
     samengevoegd: List[DataFrame] = (
         [
             pd.concat(frames, ignore_index=True)
-            for frames in zip(*(r[:4] for r in results_list))
+            for frames in zip(*(r[:3] for r in results_list))
         ]
         if results_list
         else list(_lege_batch_frames())
@@ -575,11 +538,11 @@ async def _query(
         rijksmonumenten_result,
         verblijfsobjecten_in_beschermd_gezicht_result,
         gemeentelijke_monumenten_result,
-        adrespunten_rd,
     ) = samengevoegd
 
+    # Uit alle adrespunten en niet per batch: ook een mislukte batch heeft ze al
     provinciale_monumenten_result, onbepaald = await _bepaal_provinciale_monumenten(
-        session, adrespunten_rd
+        session, adrespunten
     )
 
     if all(

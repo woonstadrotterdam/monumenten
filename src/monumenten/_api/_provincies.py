@@ -28,6 +28,7 @@ from monumenten._api._backoff import (
     RETRYABLE_NETWORK_EXCEPTIONS,
     RETRYABLE_STATUS_CODES,
 )
+from monumenten._api._kadaster import _RD
 
 logger = logging.getLogger("monumenten.api.provincies")
 
@@ -37,8 +38,6 @@ _PAGINA_GROOTTE = 250
 # blijft melden dat er meer is. Ruim boven de huidige omvang (enkele duizenden
 # vlakken per provincie).
 _MAX_PAGINAS = 400
-
-_RD = "EPSG:28992"
 
 # Ook een afgebroken overdracht (ClientPayloadError) of verbroken verbinding
 # (ClientOSError) is tijdelijk.
@@ -70,7 +69,7 @@ class Provincie:
         url (str): ArcGIS REST ``query``-endpoint van de laag met monumentvlakken.
         velden (Tuple[str, ...]): Attributen die per vlak worden opgevraagd.
         bbox (Tuple[float, float, float, float]): Ruime omhullende rechthoek van
-            de provincie als (min_lon, min_lat, max_lon, max_lat) in WGS84. De
+            de provincie als (min_x, min_y, max_x, max_y) in RD. De
             grens en de service worden alleen bevraagd als een adrespunt
             hierbinnen ligt.
         omschrijving (Callable[[Dict[str, Any]], Optional[str]]): Bepaalt uit de
@@ -187,7 +186,7 @@ NOORD_HOLLAND = Provincie(
         "oi_dataservice_protected_sites/MapServer/2/query"
     ),
     velden=("siteName_Spelling",),
-    bbox=(4.40, 52.10, 5.40, 53.30),
+    bbox=(87_000, 456_000, 156_000, 591_000),
     omschrijving=_omschrijving_noord_holland,
 )
 
@@ -199,7 +198,7 @@ DRENTHE = Provincie(
         "Provinciale_monumenten_Drenthe/MapServer/3/query"
     ),
     velden=("PM_nummer", "PM_object", "PM_status"),
-    bbox=(6.00, 52.55, 7.15, 53.25),
+    bbox=(195_000, 507_000, 275_000, 587_000),
     omschrijving=_omschrijving_drenthe,
 )
 
