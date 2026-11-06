@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import aiohttp
 import geopandas as gpd
@@ -408,7 +408,7 @@ async def _query_adrespunten(
     identificaties: List[str],
     uitval: Bronuitval,
     *,
-    _depth: int = 0,
+    voortgang: Optional[Callable[[int], object]] = None,
 ) -> _Adrespunten:
     """Stage 1: query BAG for the adrespunt of the given verblijfsobject IDs.
 
@@ -418,6 +418,18 @@ async def _query_adrespunten(
     Is de BAG gestoord, dan wordt de request overgeslagen (zie Bronuitval).
     In uitval wordt vastgelegd voor welke verblijfsobjecten de BAG wel en, ook na
     retries en splitsen, geen antwoord gaf.
+
+    Args:
+        session (aiohttp.ClientSession): De sessie voor HTTP requests
+        identificaties (List[str]): De verblijfsobject ID's
+        uitval (Bronuitval): Hierin legt de BAG vast voor welke verblijfsobjecten
+            zij wel en geen antwoord gaf
+        voortgang (Optional[Callable[[int], object]]): Krijgt per afgehandelde groep
+            het aantal verblijfsobjecten, met of zonder antwoord; samen precies het
+            aantal identificaties
+
+    Returns:
+        _Adrespunten: Adrespunt per verblijfsobject ID dat in de BAG staat
     """
     if not identificaties:
         return {}
@@ -427,7 +439,10 @@ async def _query_adrespunten(
         for deel in await asyncio.gather(
             *(
                 _query_adrespunten(
-                    session, identificaties[i : i + _MAX_PER_BAG_REQUEST], uitval
+                    session,
+                    identificaties[i : i + _MAX_PER_BAG_REQUEST],
+                    uitval,
+                    voortgang=voortgang,
                 )
                 for i in range(0, len(identificaties), _MAX_PER_BAG_REQUEST)
             )
@@ -435,6 +450,20 @@ async def _query_adrespunten(
             gevonden.update(deel)
         return gevonden
 
+    gevonden = await _vraag_adrespunten(session, identificaties, uitval)
+    if voortgang is not None:
+        voortgang(len(identificaties))
+    return gevonden
+
+
+async def _vraag_adrespunten(
+    session: aiohttp.ClientSession,
+    identificaties: List[str],
+    uitval: Bronuitval,
+    *,
+    _depth: int = 0,
+) -> _Adrespunten:
+    """Eén BAG-request voor hooguit _MAX_PER_BAG_REQUEST ID's, gesplitst bij falen."""
     try:
         async with _get_semaphore(asyncio.get_running_loop()):
             if uitval.sla_over_bij_storing(BAG, identificaties):
@@ -472,10 +501,10 @@ async def _query_adrespunten(
                 len(identificaties) - mid,
                 _depth + 1,
             )
-            left = await _query_adrespunten(
+            left = await _vraag_adrespunten(
                 session, identificaties[:mid], uitval, _depth=_depth + 1
             )
-            right = await _query_adrespunten(
+            right = await _vraag_adrespunten(
                 session, identificaties[mid:], uitval, _depth=_depth + 1
             )
             return {**left, **right}

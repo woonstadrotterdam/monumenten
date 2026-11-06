@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import aiohttp
 import geopandas as gpd
@@ -38,9 +38,8 @@ from monumenten._bronfouten import BAG, RCE, VERWERKING, Bronuitval
 logger = logging.getLogger("monumenten.processing")
 
 _QUERY_BATCH_GROOTTE = 500  # lijkt meest optimaal qua performance
-# Zoveel adrespunten per stap van de voortgangsbalk van de BAG-fase. Elke stap wacht
-# op zijn traagste request; bij 100 requests per stap kost dat weinig.
-_BAG_VOORTGANG_STAP = 10_000
+# Vanaf zoveel verblijfsobjecten toont de BAG-fase een voortgangsbalk
+_BAG_VOORTGANG_VANAF = 10_000
 _BATCH_CONCURRENCY = 4
 # Bereik van RD-coördinaten in Nederland: minx, miny, maxx, maxy
 _RD_BEREIK = (0, 300_000, 300_000, 650_000)
@@ -119,22 +118,24 @@ async def _process_batch(
             gemeentelijke monumenten en aantal verwerkte objecten. De provinciale
             monumenten worden na alle batches bepaald, uit alle adrespunten.
     """
-    # Get the current event loop
-    loop = asyncio.get_running_loop()
     batch_adrespunten = {i: adrespunten[i] for i in batch if i in adrespunten}
 
-    # Create tasks using the current loop
-    rijksmonumenten_taak = loop.create_task(
+    rijksmonumenten_taak = asyncio.create_task(
         _query_rijksmonumenten(session, batch, uitval)
     )
-    beperkingen_taak = loop.create_task(
+    beperkingen_taak = asyncio.create_task(
         _query_beperkingen(session, batch_adrespunten, uitval)
     )
-
-    # Wait for both tasks to complete
-    rijksmonumenten, beperkingen = await asyncio.gather(
-        rijksmonumenten_taak, beperkingen_taak
-    )
+    try:
+        rijksmonumenten, beperkingen = await asyncio.gather(
+            rijksmonumenten_taak, beperkingen_taak
+        )
+    finally:
+        # Faalt één query onverwacht, dan mag de andere niet ongezien doorlopen: de
+        # batch is dan al als mislukt vastgelegd, en zij zou daarna, ook tijdens de
+        # herkansing, nog antwoorden en fouten in uitval kunnen vastleggen.
+        rijksmonumenten_taak.cancel()
+        beperkingen_taak.cancel()
 
     # Geen vroege return als de beperkingen leeg zijn: de RCE-query heeft geen
     # adrespunt nodig, en het beschermd gezicht volgt uit het adrespunt zelf.
@@ -525,16 +526,14 @@ async def _query(
 
     # Eerst alle adrespunten ophalen: de BRK-PB heeft ze nodig, en de batches worden
     # erop gesorteerd. Zonder de BAG valt er verder niets te bepalen.
-    adrespunten: _Adrespunten = {}
     with tqdm_asyncio(
         total=len(verblijfsobject_ids),
         desc="Adrespunten (BAG)",
-        disable=len(verblijfsobject_ids) <= _BAG_VOORTGANG_STAP,
+        disable=len(verblijfsobject_ids) < _BAG_VOORTGANG_VANAF,
     ) as bag_voortgang:
-        for i in range(0, len(verblijfsobject_ids), _BAG_VOORTGANG_STAP):
-            stap = verblijfsobject_ids[i : i + _BAG_VOORTGANG_STAP]
-            adrespunten.update(await _query_adrespunten(session, stap, uitval))
-            bag_voortgang.update(len(stap))
+        adrespunten = await _query_adrespunten(
+            session, verblijfsobject_ids, uitval, voortgang=bag_voortgang.update
+        )
     uitval.controleer()
 
     # Verblijfsobjecten waarvoor de BAG geen antwoord gaf, krijgen een herkansing en
@@ -556,44 +555,55 @@ async def _query(
     # elke batch opnieuw
     gelogde_fouttypes: Set[type] = set()
 
+    async def _verwerk_batch(batch: List[str]) -> Optional[_BatchResult]:
+        # Ligt een bron plat, dan kan de aanroep niet meer slagen: bevraag ook de
+        # andere bronnen niet meer. Hetzelfde geldt als de verwerking kansloos is.
+        # uitval.controleer() geeft daarna de fout.
+        if uitval.sla_over_als_bron_plat_ligt(batch) or uitval.verwerking_kansloos():
+            return None
+        try:
+            result = await _process_batch(
+                session, batch, beschermde_gezichten_df, adrespunten, uitval
+            )
+        except Exception as fout:
+            # Niet stil overslaan: dan kreeg de batch overal False. Uitval van een
+            # bron loopt via uitval; dit is een onverwachte fout.
+            logger.warning(
+                "Verwerking van een batch van %d verblijfsobjecten mislukt (%s: %s); "
+                "hun statussen worden onbepaald",
+                len(batch),
+                type(fout).__name__,
+                fout,
+                exc_info=type(fout) not in gelogde_fouttypes,
+            )
+            gelogde_fouttypes.add(type(fout))
+            uitval.registreer_mislukte_verwerking(batch, fout)
+            return None
+        uitval.registreer_antwoord(VERWERKING, len(batch))
+        return result
+
     async def _verwerk(batches: List[List[str]], fase: str) -> List[_BatchResult]:
         resultaten: List[_BatchResult] = []
+        onvolledig = 0
 
         async def _run_batch(batch: List[str]) -> None:
+            nonlocal onvolledig
             async with batch_semaphore:
-                # Ligt een bron plat, dan kan de aanroep niet meer slagen: bevraag ook
-                # de andere bronnen niet meer. uitval.controleer() geeft dan de
-                # fout.
-                if uitval.sla_over_als_bron_plat_ligt(batch):
-                    return
-                try:
-                    result = await _process_batch(
-                        session, batch, beschermde_gezichten_df, adrespunten, uitval
-                    )
-                except Exception as fout:
-                    # Niet stil overslaan: dan kreeg de batch overal False. Uitval van
-                    # een bron loopt via uitval; dit is een onverwachte fout.
-                    logger.warning(
-                        "Verwerking van een batch van %d verblijfsobjecten mislukt "
-                        "(%s: %s); hun statussen worden onbepaald",
-                        len(batch),
-                        type(fout).__name__,
-                        fout,
-                        exc_info=type(fout) not in gelogde_fouttypes,
-                    )
-                    gelogde_fouttypes.add(type(fout))
-                    uitval.registreer_mislukte_verwerking(batch, fout)
-                    return
-            uitval.registreer_antwoord(VERWERKING, len(batch))
-            resultaten.append(result)
+                result = await _verwerk_batch(batch)
+            if result is not None:
+                resultaten.append(result)
+            # Ook een mislukte of overgeslagen batch is afgehandeld: de balk loopt vol,
+            # en ernaast staat hoeveel verblijfsobjecten een onvolledig resultaat hebben
+            onvolledig += uitval.aantal_zonder_antwoord(batch)
             voortgang.update(len(batch))
+            voortgang.set_postfix(onvolledig=onvolledig, refresh=False)
 
         with tqdm_asyncio(
             total=sum(len(batch) for batch in batches),
             desc=fase,
             disable=len(batches) <= 1,
         ) as voortgang:
-            # _run_batch vangt elke gewone fout op; alleen bijvoorbeeld een
+            # _verwerk_batch vangt elke gewone fout op; alleen bijvoorbeeld een
             # KeyboardInterrupt breekt de TaskGroup af, en die geeft zij onverpakt door.
             async with asyncio.TaskGroup() as tg:
                 for batch in batches:

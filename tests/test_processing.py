@@ -2168,7 +2168,7 @@ async def test_query_adrespunt_uit_herkansing_telt_mee_voor_provinciaal(
     monument daarmee bepaald: de provinciale stap volgt na de herkansing."""
     bag_aanroepen = []
 
-    async def query_adrespunten(session, ids, uitval):
+    async def query_adrespunten(session, ids, uitval, voortgang=None):
         bag_aanroepen.append(list(ids))
         if len(bag_aanroepen) == 1:
             uitval.registreer_fout(BAG, ["rolde"], RuntimeError("BAG 503"))
@@ -2210,4 +2210,137 @@ async def test_query_adrespunt_uit_herkansing_telt_mee_voor_provinciaal(
             "identificatie": "rolde",
             "provinciaal_monument_omschrijving": "PM1-0001 Dwarshuisboerderij Rolde",
         }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_query_adrespunten_meldt_elk_id_precies_een_keer_aan_voortgang():
+    """De voortgang telt per groep van _MAX_PER_BAG_REQUEST, met of zonder antwoord,
+    ook als een groep wordt gesplitst; opgeteld precies het aantal ID's."""
+    ids = _ids(2 * _MAX_PER_BAG_REQUEST + 50)
+    gemeld = []
+
+    async def mock_post_wfs(session, endpoint, query, context):
+        if "vo0007<" in query:
+            raise RuntimeError("BAG 503")
+        return _bag_response(_ids_in(query))
+
+    with patch("monumenten._api._kadaster._post_wfs_json", side_effect=mock_post_wfs):
+        uitval = Bronuitval()
+        adrespunten = await _query_adrespunten(
+            AsyncMock(), ids, uitval, voortgang=gemeld.append
+        )
+
+    assert sorted(gemeld) == [50, _MAX_PER_BAG_REQUEST, _MAX_PER_BAG_REQUEST]
+    assert uitval.mislukt == {BAG: {"vo0007"}}
+    assert sorted(adrespunten) == [i for i in ids if i != "vo0007"]
+
+
+def test_controleer_bron_die_plat_ligt_gaat_voor_verwerkingsfout():
+    """Faalde een batch onverwacht en ligt daarna een bron plat, dan is de bron de
+    reden dat geen batch slaagde: de aanroeper krijgt de BronFoutError."""
+    uitval = Bronuitval()
+    uitval.registreer_mislukte_verwerking(["id1"], ValueError("onverwacht"))
+    for _ in range(MAX_CONSECUTIVE_FAILURES):
+        uitval.registreer_mislukte_request(RCE, RuntimeError("RCE 503"))
+    assert uitval.sla_over_als_bron_plat_ligt(["id2"])
+
+    with pytest.raises(BronFoutError, match="RCE"):
+        uitval.controleer()
+
+
+def test_verwerking_kansloos_is_geen_storing():
+    """Een mislukte verwerking krijgt geen proefrequest en telt niet als gestoorde
+    bron; na MAX_CONSECUTIVE_FAILURES mislukte batches zonder succes is zij kansloos."""
+    uitval = Bronuitval()
+    for nummer in range(MAX_CONSECUTIVE_FAILURES):
+        assert not uitval.verwerking_kansloos()
+        uitval.registreer_mislukte_verwerking([f"id{nummer}"], ValueError("bug"))
+
+    assert uitval.verwerking_kansloos()
+    assert uitval.gestoorde_bronnen() == []
+    with pytest.raises(ValueError, match="bug"):
+        uitval.controleer()
+
+    # Lukte eerder wel een batch, dan is het geen programmeerfout maar data
+    uitval = Bronuitval()
+    uitval.registreer_antwoord(VERWERKING, 1)
+    for nummer in range(MAX_CONSECUTIVE_FAILURES):
+        uitval.registreer_mislukte_verwerking([f"id{nummer}"], ValueError("data"))
+    assert not uitval.verwerking_kansloos()
+    uitval.controleer()
+
+
+@pytest.mark.asyncio
+async def test_process_batch_annuleert_andere_query_bij_onverwachte_fout(
+    empty_geodataframe,
+):
+    """Faalt de ene query onverwacht, dan loopt de andere niet ongezien door."""
+    geannuleerd = asyncio.Event()
+
+    async def trage_beperkingen(session, adrespunten, uitval):
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            geannuleerd.set()
+            raise
+        return []
+
+    with (
+        patch(
+            "monumenten._processing._query_rijksmonumenten",
+            AsyncMock(side_effect=ValueError("onverwacht")),
+        ),
+        patch(
+            "monumenten._processing._query_beperkingen", side_effect=trage_beperkingen
+        ),
+    ):
+        with pytest.raises(ValueError, match="onverwacht"):
+            await _process_batch(
+                AsyncMock(),
+                ["id1"],
+                empty_geodataframe,
+                {"id1": (0.0, 0.0)},
+                Bronuitval(),
+            )
+        await asyncio.wait_for(geannuleerd.wait(), timeout=1)
+
+
+class _Balk:
+    """Neemt de plaats in van tqdm en onthoudt de voortgang per fase."""
+
+    def __init__(self, total, desc, disable):
+        self.total, self.desc, self.n, self.postfix = total, desc, 0, {}
+        self.alle.append(self)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def update(self, n):
+        self.n += n
+
+    def set_postfix(self, refresh=True, **postfix):
+        self.postfix = postfix
+
+
+@pytest.mark.asyncio
+async def test_voortgang_loopt_vol_en_telt_onvolledige_verblijfsobjecten():
+    """Ook een mislukte batch is afgehandeld: elke balk loopt vol, en ernaast staat
+    hoeveel verblijfsobjecten een onvolledig resultaat hebben."""
+    _Balk.alle = []
+    with (
+        _mocked_sources() as client,
+        _batch_faalt({_VO_GEMEENTE}),
+        patch("monumenten._processing.tqdm_asyncio", _Balk),
+    ):
+        with pytest.warns(MonumentStatusOnbepaaldWarning):
+            await client.process_from_list(_ALLE)
+
+    assert [(b.desc, b.n, b.total, b.postfix) for b in _Balk.alle] == [
+        ("Adrespunten (BAG)", len(_ALLE), len(_ALLE), {}),
+        ("Monumentstatus", len(_ALLE), len(_ALLE), {"onvolledig": 1}),
+        ("Herkansing", 1, 1, {"onvolledig": 1}),
     ]

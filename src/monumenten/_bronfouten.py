@@ -24,6 +24,9 @@ VERWERKING = "verwerking"
 # stopt de aanroep, en haar uitval krijgt een herkansing. Een provincie die niet op te
 # halen is, maakt alleen provinciaal_monument onbepaald.
 BATCHBRONNEN: FrozenSet[str] = frozenset({RCE, BAG, BRK_PB, VERWERKING})
+# De externe bronnen onder de batchbronnen: alleen die kunnen gestoord raken of plat
+# liggen. De verwerking kent geen storing en geen proefrequest.
+_EXTERNE_BATCHBRONNEN: FrozenSet[str] = BATCHBRONNEN - {VERWERKING}
 
 _MAX_IDS_IN_MELDING = 10
 
@@ -160,9 +163,9 @@ class Bronuitval:
         """Leg vast dat het verwerken van een batch onverwacht mislukte.
 
         De statussen van de batch worden onbepaald en de batch krijgt een herkansing.
-        Mislukken de eerste MAX_CONSECUTIVE_FAILURES batches allemaal, dan is het
-        vrijwel zeker een programmeerfout: de verwerking ligt dan plat, de resterende
-        batches worden overgeslagen en controleer geeft de oorspronkelijke fout.
+        Een mislukte verwerking is geen storing van een bron: er volgt geen
+        proefrequest, en de andere batches worden gewoon verwerkt, tenzij de
+        verwerking kansloos is (zie verwerking_kansloos).
 
         Args:
             verblijfsobject_ids (Iterable[str]): De verblijfsobject ID's van de batch
@@ -171,16 +174,44 @@ class Bronuitval:
         self.registreer_fout(VERWERKING, verblijfsobject_ids, fout)
         self._fouten_op_rij[VERWERKING] += 1
         if (
-            not self._beantwoord[VERWERKING]
-            and self._fouten_op_rij[VERWERKING] >= MAX_CONSECUTIVE_FAILURES
+            self.verwerking_kansloos()
+            and self._fouten_op_rij[VERWERKING] == MAX_CONSECUTIVE_FAILURES
         ):
-            self._plat.add(VERWERKING)
-            self._storing[VERWERKING] = fout
             logger.error(
                 "De verwerking van de eerste %d batches mislukte; de resterende "
                 "batches worden overgeslagen en de aanroep stopt.",
                 MAX_CONSECUTIVE_FAILURES,
             )
+
+    def verwerking_kansloos(self) -> bool:
+        """Geef aan of de eerste MAX_CONSECUTIVE_FAILURES batches allemaal mislukten.
+
+        Dan is het vrijwel zeker een programmeerfout en geen probleem met de data van
+        één batch: de resterende batches hoeven niet meer verwerkt te worden, en
+        controleer geeft de oorspronkelijke fout.
+
+        Returns:
+            bool: Of de verwerking kansloos is
+        """
+        return (
+            not self._beantwoord[VERWERKING]
+            and self._fouten_op_rij[VERWERKING] >= MAX_CONSECUTIVE_FAILURES
+        )
+
+    def aantal_zonder_antwoord(self, verblijfsobject_ids: Iterable[str]) -> int:
+        """Tel de verblijfsobjecten waarvoor een bron tot nu toe geen antwoord gaf.
+
+        Args:
+            verblijfsobject_ids (Iterable[str]): De verblijfsobject ID's
+
+        Returns:
+            int: Hoeveel daarvan een onvolledig resultaat hebben
+        """
+        return sum(
+            1
+            for verblijfsobject_id in verblijfsobject_ids
+            if any(verblijfsobject_id in ids for ids in self.mislukt.values())
+        )
 
     def is_gestoord(self, bron: str) -> bool:
         """Geef aan of een bron gestoord is; er wordt dan niet gesplitst.
@@ -298,10 +329,12 @@ class Bronuitval:
             await asyncio.sleep(wachttijd)
 
     def controleer(self) -> None:
-        """Stop als een batchbron voor geen enkel bevraagd verblijfsobject antwoord gaf.
+        """Stop als een bron of de verwerking voor geen enkel verblijfsobject slaagde.
 
-        Lukte de verwerking van geen enkele batch, dan is dat geen uitval van een bron
-        maar vrijwel zeker een programmeerfout: die fout zelf bereikt de aanroeper.
+        Een bron die plat ligt gaat voor: zij kan de reden zijn dat geen batch werd
+        verwerkt. Ligt geen bron plat en lukte de verwerking van geen enkele batch,
+        dan is dat vrijwel zeker een programmeerfout: die fout zelf bereikt de
+        aanroeper.
 
         Raises:
             BronFoutError: Als een bron voor alle bevraagde verblijfsobjecten faalde
@@ -312,19 +345,18 @@ class Bronuitval:
         plat = {
             bron: ids
             for bron, ids in self.mislukt.items()
-            if bron in BATCHBRONNEN
+            if bron in _EXTERNE_BATCHBRONNEN
             and (bron in self._plat or not self._beantwoord[bron])
         }
-        if not plat:
-            return
-        if VERWERKING in plat:
+        if plat:
+            raise BronFoutError(
+                "De monumentstatus kon niet worden bepaald: een bron gaf, ook na "
+                "retries, voor geen enkel bevraagd verblijfsobject antwoord. "
+                + self._beschrijf(plat),
+                _ids_per_bron(plat),
+            ) from self.laatste_fout[next(iter(plat))]
+        if VERWERKING in self.mislukt and not self._beantwoord[VERWERKING]:
             raise self.laatste_fout[VERWERKING]
-        raise BronFoutError(
-            "De monumentstatus kon niet worden bepaald: een bron gaf, ook na "
-            "retries, voor geen enkel bevraagd verblijfsobject antwoord. "
-            + self._beschrijf(plat),
-            _ids_per_bron(plat),
-        ) from self.laatste_fout[next(iter(plat))]
 
     def waarschuwing(self) -> Optional[MonumentStatusOnbepaaldWarning]:
         """Geef de waarschuwing voor de verblijfsobjecten zonder antwoord.
