@@ -6,13 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import aiohttp
 import geopandas as gpd
 
-from monumenten._api._backoff import (
-    MAX_SPLIT_DEPTH,
-    MIN_BATCH_SIZE,
-    AfgekaptAntwoordError,
-    is_rate_limited,
-    met_retries,
-)
+from monumenten._api._backoff import AfgekaptAntwoordError, met_retries
 from monumenten._bronfouten import BAG, BRK_PB, Bronuitval
 
 # PDOK WFS endpoints following the BAG + BRK-PB two-stage approach
@@ -212,7 +206,7 @@ async def _query_beperkingen(
     adrespunten: _Adrespunten,
     uitval: Bronuitval,
 ) -> List[Dict[str, Any]]:
-    """Stage 2: query BRK-PB for the beperkingen at the given adrespunten.
+    """Stage 2: vraag de BRK-PB om de beperkingen bij de adrespunten.
 
     Eerst gaan alle requests de deur uit (zie _vraag_beperkingen), daarna wordt per
     request bepaald binnen welke beperkingen de adrespunten liggen. Een fout bij dat
@@ -239,43 +233,24 @@ async def _query_beperkingen(
     ]
 
 
-async def _vraag_beperkingen(
-    session: aiohttp.ClientSession,
-    adrespunten: _Adrespunten,
-    uitval: Bronuitval,
-    *,
-    _depth: int = 0,
-) -> List[Tuple[_Adrespunten, List[Dict[str, Any]]]]:
-    """Vraag de BRK-PB om de beperkingen bij de adrespunten.
+def _verdeel_in_requests(
+    punten: List[Tuple[str, Tuple[float, float]]],
+) -> List[List[str]]:
+    """Verdeel adrespunten in BRK-PB requests: de verblijfsobject ID's per request.
 
-    De BRK-PB WFS doorzoekt de omhullende rechthoek van alle adrespunten in een request
-    en wordt traag als die groot is. Opeenvolgende adrespunten horen daarom bij elkaar
-    te liggen; per request gaan er maximaal _MAX_PER_BRK_PB_REQUEST mee. Is de rechthoek
-    te groot voor het aantal adrespunten, dan wordt de set gesplitst op de grootste
-    sprong tussen twee opeenvolgende adrespunten.
-    Bij falen na retries wordt de set adrespunten in tweeën gesplitst en opnieuw geprobeerd,
-    behalve bij een rate limit (429): splitsen levert dan alleen meer requests op.
-    Heeft de BRK-PB een storing, dan wordt de request overgeslagen (zie Bronuitval).
-    In uitval wordt vastgelegd voor welke verblijfsobjecten de BRK-PB wel en geen
-    antwoord gaf. Geeft per beantwoorde request de adrespunten en de GeoJSON features
-    die de BRK-PB teruggaf.
+    De BRK-PB WFS doorzoekt de omhullende rechthoek van alle adrespunten in een
+    request en wordt traag als die groot is. Opeenvolgende adrespunten horen daarom
+    bij elkaar te liggen; per request gaan er maximaal _MAX_PER_BRK_PB_REQUEST mee. Is
+    de rechthoek te groot voor het aantal adrespunten, dan wordt de set gesplitst op
+    de grootste sprong tussen twee opeenvolgende adrespunten.
     """
-    if not adrespunten:
-        return []
-
-    punten = list(adrespunten.items())
     if len(punten) > _MAX_PER_BRK_PB_REQUEST:
-        delen = await asyncio.gather(
-            *(
-                _vraag_beperkingen(
-                    session, dict(punten[i : i + _MAX_PER_BRK_PB_REQUEST]), uitval
-                )
-                for i in range(0, len(punten), _MAX_PER_BRK_PB_REQUEST)
-            )
-        )
-        return [antwoord for deel in delen for antwoord in deel]
-
-    xs, ys = zip(*adrespunten.values())
+        return [
+            request
+            for i in range(0, len(punten), _MAX_PER_BRK_PB_REQUEST)
+            for request in _verdeel_in_requests(punten[i : i + _MAX_PER_BRK_PB_REQUEST])
+        ]
+    xs, ys = zip(*(punt for _, punt in punten))
     omhullende_km2 = (max(xs) - min(xs)) * (max(ys) - min(ys)) / 1e6
     if len(punten) * omhullende_km2 > _MAX_ADRESPUNTEN_KEER_KM2:
         # Zoek de sprong in de middelste helft, zodat beide delen groot genoeg blijven
@@ -284,27 +259,39 @@ async def _vraag_beperkingen(
             range(max(kwart, 1), len(punten) - kwart),
             key=lambda i: math.dist(punten[i - 1][1], punten[i][1]),
         )
-        left, right = await asyncio.gather(
-            _vraag_beperkingen(session, dict(punten[:sprong]), uitval),
-            _vraag_beperkingen(session, dict(punten[sprong:]), uitval),
+        return _verdeel_in_requests(punten[:sprong]) + _verdeel_in_requests(
+            punten[sprong:]
         )
-        return left + right
+    return [[identificatie for identificatie, _ in punten]]
 
-    try:
-        async with uitval.semaphore(BRK_PB):
-            if uitval.sla_over_bij_storing(BRK_PB, adrespunten):
-                return []
-            brk_pb_query = _BRK_PB_BEPERKINGEN_QUERY_TEMPLATE.format(
-                adrespunten="".join(
-                    _ADRESPUNT_TEMPLATE.format(nummer=nummer, x=x, y=y)
-                    for nummer, (x, y) in enumerate(_punten_voor_query(adrespunten))
-                )
-            )
-            brk_pb_data = await _post_wfs_json(
-                session, _BRK_PB_ENDPOINT, brk_pb_query, "BRK-PB beperkingen query"
-            )
 
-        beperkingen = brk_pb_data["features"]
+async def _vraag_beperkingen(
+    session: aiohttp.ClientSession,
+    adrespunten: _Adrespunten,
+    uitval: Bronuitval,
+) -> List[Tuple[_Adrespunten, List[Dict[str, Any]]]]:
+    """Vraag de BRK-PB om de beperkingen bij de adrespunten.
+
+    De adrespunten gaan in requests die ruimtelijk compact zijn (zie
+    _verdeel_in_requests). Retries, splitsen bij falen en overslaan bij een storing:
+    zie Bronuitval.bevraag. Geeft per beantwoorde request de adrespunten en de
+    GeoJSON features die de BRK-PB teruggaf.
+    """
+    if not adrespunten:
+        return []
+
+    async def vraag(ids: List[str]) -> List[Tuple[_Adrespunten, List[Dict[str, Any]]]]:
+        punten = {i: adrespunten[i] for i in ids}
+        query = _BRK_PB_BEPERKINGEN_QUERY_TEMPLATE.format(
+            adrespunten="".join(
+                _ADRESPUNT_TEMPLATE.format(nummer=nummer, x=x, y=y)
+                for nummer, (x, y) in enumerate(_punten_voor_query(punten))
+            )
+        )
+        data = await _post_wfs_json(
+            session, _BRK_PB_ENDPOINT, query, "BRK-PB beperkingen query"
+        )
+        beperkingen = data["features"]
         if len(beperkingen) >= _WFS_MAX_FEATURES:
             # Eigen logregel: lukt splitsen niet meer (bijvoorbeeld bij één adrespunt
             # met zoveel beperkingen), dan is anders alleen "definitief overgeslagen"
@@ -312,45 +299,18 @@ async def _vraag_beperkingen(
             logger.warning(
                 "BRK-PB response afgekapt op %d features voor %d adrespunten",
                 len(beperkingen),
-                len(adrespunten),
+                len(punten),
             )
             raise AfgekaptAntwoordError("BRK-PB response is afgekapt")
-    except Exception as e:
-        kan_kleiner = (
-            not is_rate_limited(e)
-            and len(adrespunten) > MIN_BATCH_SIZE
-            and _depth < MAX_SPLIT_DEPTH
-        )
-        uitval.registreer_mislukte_request(BRK_PB, e, kan_kleiner=kan_kleiner)
-        if kan_kleiner and not uitval.in_storing(BRK_PB):
-            mid = len(punten) // 2
-            logger.info(
-                "BRK-PB query mislukt, splitsen in 2 batches van %d en %d adrespunten (depth %d)",
-                mid,
-                len(punten) - mid,
-                _depth + 1,
-            )
-            left = await _vraag_beperkingen(
-                session, dict(punten[:mid]), uitval, _depth=_depth + 1
-            )
-            right = await _vraag_beperkingen(
-                session, dict(punten[mid:]), uitval, _depth=_depth + 1
-            )
-            return left + right
-        logger.warning(
-            "BRK-PB query definitief overgeslagen voor %d adrespunten",
-            len(adrespunten),
-        )
-        uitval.registreer_fout(BRK_PB, adrespunten, e)
-        return []
+        return [(punten, beperkingen)]
 
-    if _depth > 0:
-        logger.info(
-            "BRK-PB query geslaagd na splitsing (depth %d)",
-            _depth,
+    delen = await asyncio.gather(
+        *(
+            uitval.bevraag(BRK_PB, ids, vraag)
+            for ids in _verdeel_in_requests(list(adrespunten.items()))
         )
-    uitval.registreer_antwoord(BRK_PB, len(adrespunten))
-    return [(adrespunten, beperkingen)]
+    )
+    return [antwoord for deel in delen for antwoord in deel]
 
 
 async def _query_adrespunten(
@@ -360,14 +320,10 @@ async def _query_adrespunten(
     *,
     voortgang: Optional[Callable[[int], object]] = None,
 ) -> _Adrespunten:
-    """Stage 1: query BAG for the adrespunt of the given verblijfsobject IDs.
+    """Stage 1: vraag de BAG om het adrespunt van de verblijfsobjecten.
 
-    Per request gaan er maximaal _MAX_PER_BAG_REQUEST verblijfsobjecten mee.
-    Bij falen na retries wordt de batch in tweeën gesplitst en opnieuw geprobeerd,
-    behalve bij een rate limit (429): splitsen levert dan alleen meer requests op.
-    Heeft de BAG een storing, dan wordt de request overgeslagen (zie Bronuitval).
-    In uitval wordt vastgelegd voor welke verblijfsobjecten de BAG wel en, ook na
-    retries en splitsen, geen antwoord gaf.
+    Per request gaan er maximaal _MAX_PER_BAG_REQUEST verblijfsobjecten mee. Retries,
+    splitsen bij falen en overslaan bij een storing: zie Bronuitval.bevraag.
 
     Args:
         session (aiohttp.ClientSession): De sessie voor HTTP requests
@@ -379,98 +335,39 @@ async def _query_adrespunten(
             aantal identificaties
 
     Returns:
-        _Adrespunten: Adrespunt per verblijfsobject ID dat in de BAG staat
+        _Adrespunten: Adrespunt per verblijfsobject ID dat in de BAG staat. Een ID
+            dat niet in de BAG staat is een geldig leeg antwoord.
     """
-    if not identificaties:
-        return {}
 
-    if len(identificaties) > _MAX_PER_BAG_REQUEST:
-        gevonden: _Adrespunten = {}
-        for deel in await asyncio.gather(
-            *(
-                _query_adrespunten(
-                    session,
-                    identificaties[i : i + _MAX_PER_BAG_REQUEST],
-                    uitval,
-                    voortgang=voortgang,
-                )
-                for i in range(0, len(identificaties), _MAX_PER_BAG_REQUEST)
+    async def vraag(ids: List[str]) -> List[Tuple[str, Tuple[float, float]]]:
+        filters = [_IDENTIFICATIE_FILTER_TEMPLATE.format(identificatie=i) for i in ids]
+        query = _BAG_VERBLIJFSOBJECTEN_QUERY_TEMPLATE.format(
+            # Een fes:Or vereist minimaal twee filters
+            identificatie_filter=filters[0]
+            if len(filters) == 1
+            else f"<fes:Or>{''.join(filters)}</fes:Or>"
+        )
+        data = await _post_wfs_json(
+            session, _BAG_ENDPOINT, query, "BAG verblijfsobjecten query"
+        )
+        return [
+            (
+                verblijfsobject["properties"]["identificatie"],
+                tuple(verblijfsobject["geometry"]["coordinates"][:2]),
             )
-        ):
-            gevonden.update(deel)
+            for verblijfsobject in data["features"]
+        ]
+
+    async def groep(ids: List[str]) -> List[Tuple[str, Tuple[float, float]]]:
+        gevonden = await uitval.bevraag(BAG, ids, vraag)
+        if voortgang is not None:
+            voortgang(len(ids))
         return gevonden
 
-    gevonden = await _vraag_adrespunten(session, identificaties, uitval)
-    if voortgang is not None:
-        voortgang(len(identificaties))
-    return gevonden
-
-
-async def _vraag_adrespunten(
-    session: aiohttp.ClientSession,
-    identificaties: List[str],
-    uitval: Bronuitval,
-    *,
-    _depth: int = 0,
-) -> _Adrespunten:
-    """Eén BAG-request voor hooguit _MAX_PER_BAG_REQUEST ID's, gesplitst bij falen."""
-    try:
-        async with uitval.semaphore(BAG):
-            if uitval.sla_over_bij_storing(BAG, identificaties):
-                return {}
-            filters = [
-                _IDENTIFICATIE_FILTER_TEMPLATE.format(identificatie=identificatie)
-                for identificatie in identificaties
-            ]
-            bag_query = _BAG_VERBLIJFSOBJECTEN_QUERY_TEMPLATE.format(
-                # Een fes:Or vereist minimaal twee filters
-                identificatie_filter=filters[0]
-                if len(filters) == 1
-                else f"<fes:Or>{''.join(filters)}</fes:Or>"
-            )
-            bag_data = await _post_wfs_json(
-                session, _BAG_ENDPOINT, bag_query, "BAG verblijfsobjecten query"
-            )
-
-        adrespunten: _Adrespunten = {}
-        for verblijfsobject in bag_data["features"]:
-            x, y = verblijfsobject["geometry"]["coordinates"][:2]
-            adrespunten[verblijfsobject["properties"]["identificatie"]] = (x, y)
-    except Exception as e:
-        kan_kleiner = (
-            not is_rate_limited(e)
-            and len(identificaties) > MIN_BATCH_SIZE
-            and _depth < MAX_SPLIT_DEPTH
+    delen = await asyncio.gather(
+        *(
+            groep(identificaties[i : i + _MAX_PER_BAG_REQUEST])
+            for i in range(0, len(identificaties), _MAX_PER_BAG_REQUEST)
         )
-        uitval.registreer_mislukte_request(BAG, e, kan_kleiner=kan_kleiner)
-        if kan_kleiner and not uitval.in_storing(BAG):
-            mid = len(identificaties) // 2
-            logger.info(
-                "BAG verblijfsobjecten query mislukt, splitsen in 2 batches van %d en %d IDs (depth %d)",
-                mid,
-                len(identificaties) - mid,
-                _depth + 1,
-            )
-            left = await _vraag_adrespunten(
-                session, identificaties[:mid], uitval, _depth=_depth + 1
-            )
-            right = await _vraag_adrespunten(
-                session, identificaties[mid:], uitval, _depth=_depth + 1
-            )
-            return {**left, **right}
-        logger.warning(
-            "BAG verblijfsobjecten query definitief overgeslagen voor %d IDs",
-            len(identificaties),
-        )
-        uitval.registreer_fout(BAG, identificaties, e)
-        return {}
-
-    # Ook een leeg antwoord is een antwoord: het verblijfsobject staat dan niet in de BAG
-    uitval.registreer_antwoord(BAG, len(identificaties))
-
-    if _depth > 0:
-        logger.info(
-            "BAG verblijfsobjecten query geslaagd na splitsing (depth %d)",
-            _depth,
-        )
-    return adrespunten
+    )
+    return dict(paar for deel in delen for paar in deel)

@@ -8,13 +8,26 @@ import logging
 import time
 from asyncio import Semaphore
 from collections import Counter
-from typing import Dict, FrozenSet, Iterable, List, Optional, Set
+from typing import (
+    Awaitable,
+    Callable,
+    Dict,
+    FrozenSet,
+    Iterable,
+    List,
+    Optional,
+    Set,
+    TypeVar,
+)
 
 from monumenten._api._backoff import (
     MAX_CONSECUTIVE_FAILURES,
     MAX_PARALLELLE_REQUESTS,
+    MAX_SPLIT_DEPTH,
+    MIN_BATCH_SIZE,
     OUTAGE_PROBE_SECONDS,
     is_fout_van_de_request,
+    is_rate_limited,
 )
 
 logger = logging.getLogger("monumenten.bronfouten")
@@ -35,6 +48,8 @@ BATCHBRONNEN: FrozenSet[str] = frozenset({RCE, BAG, BRK_PB, VERWERKING})
 _EXTERNE_BATCHBRONNEN: FrozenSet[str] = BATCHBRONNEN - {VERWERKING}
 
 _MAX_IDS_IN_MELDING = 10
+
+T = TypeVar("T")
 
 
 class _MetVerblijfsobjectIds(Exception):
@@ -126,6 +141,81 @@ class Bronuitval:
         if bron not in self._semaphores:
             self._semaphores[bron] = Semaphore(MAX_PARALLELLE_REQUESTS)
         return self._semaphores[bron]
+
+    async def bevraag(
+        self,
+        bron: str,
+        verblijfsobject_ids: List[str],
+        vraag: Callable[[List[str]], Awaitable[List[T]]],
+        *,
+        _diepte: int = 0,
+    ) -> List[T]:
+        """Bevraag een bron voor verblijfsobjecten, met splitsen bij falen.
+
+        ``vraag`` doet één request voor de gegeven ID's en geeft de rijen van het
+        antwoord. Er lopen hooguit MAX_PARALLELLE_REQUESTS requests per bron tegelijk.
+        Heeft de bron een storing, dan wordt de request overgeslagen, op de
+        proefrequest na. Mislukt de request, ook na haar retries, dan wordt de set
+        ID's gehalveerd en elk deel opnieuw gevraagd, behalve bij een rate limit (429),
+        omdat splitsen dan alleen meer requests oplevert, bij een storing, bij één ID
+        of op de maximale splitsdiepte: dan krijgen de ID's geen antwoord. Antwoord en
+        uitval worden hier vastgelegd.
+
+        Args:
+            bron (str): De bron
+            verblijfsobject_ids (List[str]): De verblijfsobject ID's van de request
+            vraag (Callable[[List[str]], Awaitable[List[T]]]): Doet de request voor
+                een deel van de ID's en geeft de rijen van het antwoord
+
+        Returns:
+            List[T]: De rijen van alle requests die antwoord gaven, in de volgorde van
+                de ID's
+        """
+        if not verblijfsobject_ids:
+            return []
+        try:
+            async with self.semaphore(bron):
+                if self.sla_over_bij_storing(bron, verblijfsobject_ids):
+                    return []
+                rijen = await vraag(verblijfsobject_ids)
+        except Exception as fout:
+            kan_kleiner = (
+                not is_rate_limited(fout)
+                and len(verblijfsobject_ids) > MIN_BATCH_SIZE
+                and _diepte < MAX_SPLIT_DEPTH
+            )
+            self.registreer_mislukte_request(bron, fout, kan_kleiner=kan_kleiner)
+            if kan_kleiner and not self.in_storing(bron):
+                mid = len(verblijfsobject_ids) // 2
+                logger.info(
+                    "%s: request mislukt (%s: %s), splitsen in twee requests van %d en "
+                    "%d verblijfsobjecten (diepte %d)",
+                    bron,
+                    type(fout).__name__,
+                    fout,
+                    mid,
+                    len(verblijfsobject_ids) - mid,
+                    _diepte + 1,
+                )
+                return [
+                    *await self.bevraag(
+                        bron, verblijfsobject_ids[:mid], vraag, _diepte=_diepte + 1
+                    ),
+                    *await self.bevraag(
+                        bron, verblijfsobject_ids[mid:], vraag, _diepte=_diepte + 1
+                    ),
+                ]
+            logger.warning(
+                "%s: request definitief overgeslagen voor %d verblijfsobjecten",
+                bron,
+                len(verblijfsobject_ids),
+            )
+            self.registreer_fout(bron, verblijfsobject_ids, fout)
+            return []
+        if _diepte > 0:
+            logger.info("%s: request geslaagd na splitsen (diepte %d)", bron, _diepte)
+        self.registreer_antwoord(bron, len(verblijfsobject_ids))
+        return rijen
 
     def registreer_antwoord(self, bron: str, aantal: int) -> None:
         """Leg vast dat een bron voor een aantal verblijfsobjecten antwoord gaf.
