@@ -61,6 +61,9 @@ _IDENTIFICATIE_FILTER_TEMPLATE = (
 # contour of het perceel zelf). De WFS geeft alle monumentbeperkingen terug waarvan
 # het gebied minstens één van de adrespunten raakt; welk adrespunt binnen welk gebied
 # ligt wordt daarna lokaal bepaald (zie _koppel_beperkingen).
+# Alleen pb_multipolygon wordt bevraagd, niet pb_multipoint of pb_multilinestring:
+# een adrespunt ligt niet zinvol binnen een punt of lijn. De oude KKG-query
+# (geof:sfWithin) had dezelfde beperking.
 _BRK_PB_BEPERKINGEN_QUERY_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 <wfs:GetFeature service="WFS" version="2.0.0" outputFormat="application/json"
     xmlns:wfs="http://www.opengis.net/wfs/2.0"
@@ -84,12 +87,12 @@ _BRK_PB_BEPERKINGEN_QUERY_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
             <fes:ValueReference>grondslagCode</fes:ValueReference>
             <fes:Literal>GWA</fes:Literal>
           </fes:PropertyIsEqualTo>
-          <!-- Erfgoedwet: Afschrift inschrijving monument of archeologisch monument in rijksmonumentenregister door minister OCW -->
+          <!-- Erfgoedwet: Afschrift inschrijving monument of archeologisch monument in rijksmonumentenregister door minister OCW (= rijksmonument) -->
           <fes:PropertyIsEqualTo>
             <fes:ValueReference>grondslagCode</fes:ValueReference>
             <fes:Literal>EWE</fes:Literal>
           </fes:PropertyIsEqualTo>
-          <!-- Erfgoedwet: Toezending ontwerpbesluit aanwijzing rijksmonument door minister OCW (voorbescherming) -->
+          <!-- Erfgoedwet: Toezending ontwerpbesluit aanwijzing rijksmonument door minister OCW (voorbescherming; geen rijksmonument, zie rijksmonument_voorbescherming) -->
           <fes:PropertyIsEqualTo>
             <fes:ValueReference>grondslagCode</fes:ValueReference>
             <fes:Literal>EWD</fes:Literal>
@@ -114,6 +117,9 @@ _ADRESPUNT_TEMPLATE = (
 )
 
 _Adrespunten = Dict[str, Tuple[float, float]]
+
+# Verschuiving van het hulppunt dat een lijnvormige puntenset een rechthoek maakt
+_HULPPUNT_VERSCHUIVING_M = 0.01
 
 _kadaster_semaphore: Optional[asyncio.Semaphore] = None
 
@@ -213,6 +219,29 @@ async def _post_wfs_json(
     raise RuntimeError("Geen response ontvangen")
 
 
+def _punten_voor_query(adrespunten: _Adrespunten) -> List[Tuple[float, float]]:
+    """Geef de punten voor het BRK-PB request, zo nodig met een hulppunt.
+
+    De BRK-PB WFS vindt niets als alle punten exact op één horizontale of verticale
+    lijn liggen, zodat de omhullende rechthoek geen breedte of hoogte heeft. Gemeten
+    op 5 november 2026: 500 punten op één horizontale lijn door Amsterdam gaven 0
+    beperkingen, met één extra punt 1 cm hoger 111. Bij adrespunten op hele meters
+    (zoals in Amsterdam en Maastricht) liggen de adressen van één pand vaak zo.
+    Een los punt (rechthoek zonder breedte én hoogte) werkt wel.
+
+    Een hulppunt naast de lijn maakt er een rechthoek van. Het hulppunt kan extra
+    beperkingen opleveren, maar die vallen weg in _koppel_beperkingen, dat alleen naar
+    de echte adrespunten kijkt.
+    """
+    punten = list(adrespunten.values())
+    xs, ys = zip(*punten)
+    if len(set(punten)) > 1 and (min(xs) == max(xs) or min(ys) == max(ys)):
+        punten.append(
+            (min(xs) + _HULPPUNT_VERSCHUIVING_M, min(ys) + _HULPPUNT_VERSCHUIVING_M)
+        )
+    return punten
+
+
 def _koppel_beperkingen(
     adrespunten: _Adrespunten, beperkingen: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
@@ -235,7 +264,6 @@ def _koppel_beperkingen(
         geometry=gpd.points_from_xy(xs, ys),
         crs=_RD,
     )
-    punten["verblijfsobjectWKT"] = punten.geometry.to_wkt()
     if beperkingen:
         punten = punten.sjoin(
             gpd.GeoDataFrame.from_features(beperkingen, crs=_RD),
@@ -245,7 +273,6 @@ def _koppel_beperkingen(
     gekoppeld = punten.reindex(
         columns=[
             "identificatie",
-            "verblijfsobjectWKT",
             "grondslagCode",
             "grondslagOmschrijving",
         ]
@@ -253,11 +280,10 @@ def _koppel_beperkingen(
     return [
         {
             "identificatie": identificatie,
-            "verblijfsobjectWKT": verblijfsobject_wkt,
             "grondslagcode": grondslagcode,
             "grondslag_gemeentelijk_monument": grondslag,
         }
-        for identificatie, verblijfsobject_wkt, grondslagcode, grondslag in (
+        for identificatie, grondslagcode, grondslag in (
             gekoppeld.where(gekoppeld.notna(), None).itertuples(index=False)
         )
     ]
@@ -281,8 +307,7 @@ async def _query_beperkingen(
     behalve bij een rate limit (429): splitsen levert dan alleen meer requests op.
     Is de BRK-PB gestoord, dan wordt de request overgeslagen (zie Bronuitval).
     In uitval wordt vastgelegd voor welke verblijfsobjecten de BRK-PB wel en geen
-    antwoord gaf. Zonder antwoord komt het adrespunt terug zonder beperkingen: daarmee
-    is het rijksbeschermd gezicht nog wel te bepalen.
+    antwoord gaf. Zonder antwoord komen de adrespunten terug zonder beperkingen.
     """
     if not adrespunten:
         return []
@@ -321,7 +346,7 @@ async def _query_beperkingen(
             brk_pb_query = _BRK_PB_BEPERKINGEN_QUERY_TEMPLATE.format(
                 adrespunten="".join(
                     _ADRESPUNT_TEMPLATE.format(nummer=nummer, x=x, y=y)
-                    for nummer, (x, y) in enumerate(adrespunten.values())
+                    for nummer, (x, y) in enumerate(_punten_voor_query(adrespunten))
                 )
             )
             brk_pb_data = await _post_wfs_json(
@@ -330,6 +355,14 @@ async def _query_beperkingen(
 
         beperkingen = brk_pb_data["features"]
         if len(beperkingen) >= _WFS_MAX_FEATURES:
+            # Eigen logregel: lukt splitsen niet meer (bijvoorbeeld bij één adrespunt
+            # met zoveel beperkingen), dan is anders alleen "definitief overgeslagen"
+            # te zien en niet waarom.
+            logger.warning(
+                "BRK-PB response afgekapt op %d features voor %d adrespunten",
+                len(beperkingen),
+                len(adrespunten),
+            )
             raise RuntimeError("BRK-PB response is afgekapt")
 
         if _depth > 0:

@@ -53,7 +53,8 @@ class MonumentStatusOnbepaaldWarning(UserWarning):
     Args:
         melding (str): Omschrijving van de waarschuwing
         verblijfsobject_ids (Optional[Dict[str, List[str]]]): Per bron ("RCE",
-            "BAG" of "BRK-PB") de verblijfsobject ID's zonder antwoord
+            "BAG" of "BRK-PB", of een provincie zoals "Noord-Holland" of "Drenthe")
+            de verblijfsobject ID's zonder antwoord
     """
 
     def __init__(

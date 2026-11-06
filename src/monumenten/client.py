@@ -9,7 +9,7 @@ import aiohttp
 import numpy as np
 import pandas as pd
 
-from monumenten._bronfouten import BAG, BRK_PB, RCE
+from monumenten._bronfouten import BAG, BRK_PB, RCE, MonumentStatusOnbepaaldWarning
 from monumenten._processing import _query
 
 
@@ -62,6 +62,7 @@ class MonumentenClient:
             row.rijksmonument,
             row.rijksbeschermd_gezicht,
             row.gemeentelijk_monument,
+            row.provinciaal_monument,
         ):
             return None
         statuses = []
@@ -77,6 +78,8 @@ class MonumentenClient:
             statuses.append({"code": "SGR", "naam": "Rijksbeschermd stadsgezicht"})
         if row.gemeentelijk_monument:
             statuses.append({"code": "GEM", "naam": "Gemeentelijk monument"})
+        if row.provinciaal_monument:
+            statuses.append({"code": "PRO", "naam": "Provinciaal monument"})
         return statuses
 
     async def process_from_df(
@@ -92,10 +95,11 @@ class MonumentenClient:
 
         Returns:
             pd.DataFrame: DataFrame met toegevoegde monumentinformatie. De kolommen
-                ``rijksmonument``, ``rijksbeschermd_gezicht`` en ``gemeentelijk_monument``
-                zijn nullable booleans: ``pd.NA`` betekent dat de status niet bepaald
-                kon worden omdat een bron geen antwoord gaf. In dat geval volgt ook
-                een ``MonumentStatusOnbepaaldWarning``.
+                ``rijksmonument``, ``rijksbeschermd_gezicht``, ``gemeentelijk_monument``
+                en ``provinciaal_monument`` zijn nullable booleans: ``pd.NA`` betekent
+                dat de status niet bepaald kon worden omdat een bron geen antwoord gaf
+                of de monumenten van de provincie niet opgehaald konden worden. In dat
+                geval volgt ook een ``MonumentStatusOnbepaaldWarning``.
 
         Raises:
             RuntimeError: Als de client niet als context manager wordt gebruikt
@@ -122,13 +126,30 @@ class MonumentenClient:
         valid_id_df = df.loc[~invalid_verblijf_object_ids]
         if valid_id_df.empty:
             raise ValueError("Geen enkel geldig verblijfsobject ID gevonden")
-        results, uitval = await _query(
+        results, uitval, onbepaald = await _query(
             self._session,
             valid_id_df.loc[:, verblijfsobject_id_col].drop_duplicates().tolist(),
         )
         waarschuwing = uitval.waarschuwing()
         if waarschuwing is not None:
             warnings.warn(waarschuwing, stacklevel=2)
+        onbepaalde_ids = {
+            provincie: o.verblijfsobject_ids for provincie, o in onbepaald.items()
+        }
+        if onbepaald:
+            warnings.warn(
+                MonumentStatusOnbepaaldWarning(
+                    "Provinciale monumenten niet op te halen voor "
+                    + "; ".join(
+                        f"{provincie} ({len(o.verblijfsobject_ids)} "
+                        f"verblijfsobjecten): {o.oorzaak}"
+                        for provincie, o in onbepaald.items()
+                    )
+                    + ". provinciaal_monument is voor die verblijfsobjecten pd.NA",
+                    verblijfsobject_ids=onbepaalde_ids,
+                ),
+                stacklevel=2,
+            )
         merged = pd.merge(
             valid_id_df,
             results,
@@ -141,9 +162,9 @@ class MonumentenClient:
             merged = merged.drop(columns=["identificatie"])
 
         # Een status die niet is gevonden is onbepaald als een bron waar zij van afhangt
-        # geen antwoord gaf. Het rijksbeschermd gezicht hangt alleen af van het
-        # adrespunt uit de BAG; de beperkingen uit de BRK-PB hebben dat adrespunt
-        # ook nodig.
+        # geen antwoord gaf. Het rijksbeschermd gezicht en het provinciaal monument
+        # hangen af van het adrespunt uit de BAG; de beperkingen uit de BRK-PB hebben
+        # dat adrespunt ook nodig.
         verblijfsobject_ids = merged[verblijfsobject_id_col]
         zonder_rce = verblijfsobject_ids.isin(list(uitval.mislukt.get(RCE, {})))
         zonder_adrespunt = verblijfsobject_ids.isin(list(uitval.mislukt.get(BAG, {})))
@@ -185,6 +206,11 @@ class MonumentenClient:
         columns.insert(rijksmonument_nummer_position + 1, "rijksmonument_bron")
         merged = merged[columns]
 
+        # voorbescherming (Kadaster EWD): geen rijksmonument, wel apart zichtbaar
+        merged["rijksmonument_voorbescherming"] = merged[
+            "rijksmonument_voorbescherming"
+        ].eq(True)
+
         rijksbeschermd_gezicht_naam_position = merged.columns.get_loc(
             "rijksbeschermd_gezicht_naam"
         )
@@ -214,6 +240,27 @@ class MonumentenClient:
             "gemeentelijk_monument",
             _status(
                 merged["grondslag_gemeentelijk_monument"].notna(), zonder_beperkingen
+            ),
+        )
+
+        provinciaal_monument_position = merged.columns.get_loc(
+            "provinciaal_monument_omschrijving",
+        )
+
+        if not isinstance(provinciaal_monument_position, int):
+            raise RuntimeError(
+                "Interne fout: Kan kolomnummer voor 'provinciaal_monument_omschrijving' niet bepalen"
+            )
+
+        merged.insert(
+            provinciaal_monument_position,
+            "provinciaal_monument",
+            _status(
+                merged["provinciaal_monument_omschrijving"].notna(),
+                zonder_adrespunt
+                | verblijfsobject_ids.isin(
+                    [vo_id for ids in onbepaalde_ids.values() for vo_id in ids]
+                ),
             ),
         )
 
