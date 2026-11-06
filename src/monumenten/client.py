@@ -30,6 +30,24 @@ _AFHANKELIJKHEDEN: Dict[str, FrozenSet[str]] = {
     "provinciaal_monument": frozenset({BAG, *(p.naam for p in PROVINCIES)}),
 }
 
+# De kolommen die process_from_df achter de kolommen van de invoer zet, in deze
+# volgorde: elke status met daarachter de gegevens waar zij uit volgt
+_UITVOERKOLOMMEN = [
+    "rijksmonument",
+    "rijksmonument_bron",
+    "rijksmonument_nummer",
+    "rijksmonument_url",
+    "rijksmonument_voorbescherming",
+    "rijksbeschermd_gezicht",
+    "rijksbeschermd_gezicht_naam",
+    "gemeentelijk_monument",
+    "grondslag_gemeentelijk_monument",
+    "provinciaal_monument",
+    "provinciaal_monument_omschrijving",
+]
+
+_MONUMENTENREGISTER_URL = "https://monumentenregister.cultureelerfgoed.nl/monumenten/"
+
 
 def _status(aanwezig: pd.Series[bool], onbepaald: pd.Series[bool]) -> pd.Series[bool]:
     """Bepaal een monumentstatus als nullable boolean.
@@ -138,12 +156,20 @@ class MonumentenClient:
 
         Raises:
             RuntimeError: Als de client niet als context manager wordt gebruikt
-            ValueError: Als er geen enkel geldig verblijfsobject ID is
+            ValueError: Als er geen enkel geldig verblijfsobject ID is, of als de
+                DataFrame al een kolom heeft die process_from_df toevoegt
             BronFoutError: Als een bron voor geen enkel verblijfsobject antwoord gaf
         """
 
         if not self._session:
             raise RuntimeError("Client must be used as a context manager")
+
+        bestaand = [kolom for kolom in _UITVOERKOLOMMEN if kolom in df.columns]
+        if bestaand:
+            raise ValueError(
+                "De DataFrame heeft al kolommen die process_from_df toevoegt: "
+                + ", ".join(bestaand)
+            )
 
         # verblijfsobject_id's moeten 16 cijfers lang zijn, en cijfers 5 en 6 moeten '01', '02' of '03' zijn
         ids = df[verblijfsobject_id_col]
@@ -168,16 +194,11 @@ class MonumentenClient:
         waarschuwing = uitval.waarschuwing()
         if waarschuwing is not None:
             warnings.warn(waarschuwing, stacklevel=2)
-        merged = pd.merge(
-            valid_id_df,
-            results,
-            left_on=verblijfsobject_id_col,
-            right_on="identificatie",
+        merged = valid_id_df.merge(
+            results.rename(columns={"identificatie": verblijfsobject_id_col}),
+            on=verblijfsobject_id_col,
             how="left",
         )
-
-        if "identificatie" not in df.columns:
-            merged = merged.drop(columns=["identificatie"])
 
         # Eén masker per bron, en niet per status een nieuwe unie: bij een uitval
         # voor miljoenen verblijfsobjecten telt dat
@@ -196,98 +217,31 @@ class MonumentenClient:
             ]
             return functools.reduce(operator.or_, maskers, geen_uitval)
 
-        rijksmonument_nummer_position = merged.columns.get_loc("rijksmonument_nummer")
-
-        if not isinstance(rijksmonument_nummer_position, int):
-            raise RuntimeError(
-                "Interne fout: Kan kolomnummer voor 'rijksmonument_nummer' niet bepalen"
-            )
-
-        merged.insert(
-            rijksmonument_nummer_position + 1,
-            "rijksmonument_url",
-            (
-                "https://monumentenregister.cultureelerfgoed.nl/monumenten/"
-                + merged["rijksmonument_nummer"].fillna("").astype(str)
-            ).where(
-                merged["rijksmonument_nummer"].notna(),
-                np.nan,
-            ),
+        nummer = merged["rijksmonument_nummer"]
+        merged["rijksmonument_url"] = (
+            _MONUMENTENREGISTER_URL + nummer.fillna("").astype(str)
+        ).where(nummer.notna(), np.nan)
+        merged["rijksmonument"] = _status(
+            merged["rijksmonument_bron"].notna(), onbepaald("rijksmonument")
         )
-
-        merged.insert(
-            rijksmonument_nummer_position,
-            "rijksmonument",
-            _status(merged["rijksmonument_bron"].notna(), onbepaald("rijksmonument")),
-        )
-
-        # verplaats rijksmonument_bron naar rijksmonument_nummer_position + 1
-        columns = merged.columns.tolist()
-        rijksmonument_bron_index = columns.index("rijksmonument_bron")
-        columns.pop(rijksmonument_bron_index)
-        columns.insert(rijksmonument_nummer_position + 1, "rijksmonument_bron")
-        merged = merged[columns]
-
-        # voorbescherming (Kadaster EWD): geen rijksmonument, wel apart zichtbaar
+        # Voorbescherming (Kadaster EWD): geen rijksmonument, wel apart zichtbaar
         merged["rijksmonument_voorbescherming"] = _status(
             merged["rijksmonument_voorbescherming"].eq(True),
             onbepaald("rijksmonument_voorbescherming"),
         )
-
-        rijksbeschermd_gezicht_naam_position = merged.columns.get_loc(
-            "rijksbeschermd_gezicht_naam"
+        merged["rijksbeschermd_gezicht"] = _status(
+            merged["rijksbeschermd_gezicht_naam"].notna(),
+            onbepaald("rijksbeschermd_gezicht"),
         )
-
-        if not isinstance(rijksbeschermd_gezicht_naam_position, int):
-            raise RuntimeError(
-                "Interne fout: Kan kolomnummer voor 'rijksbeschermd_gezicht_naam' niet bepalen"
-            )
-
-        merged.insert(
-            rijksbeschermd_gezicht_naam_position,
-            "rijksbeschermd_gezicht",
-            _status(
-                merged["rijksbeschermd_gezicht_naam"].notna(),
-                onbepaald("rijksbeschermd_gezicht"),
-            ),
+        merged["gemeentelijk_monument"] = _status(
+            merged["grondslag_gemeentelijk_monument"].notna(),
+            onbepaald("gemeentelijk_monument"),
         )
-
-        gemeentelijk_monument_position = merged.columns.get_loc(
-            "grondslag_gemeentelijk_monument",
+        merged["provinciaal_monument"] = _status(
+            merged["provinciaal_monument_omschrijving"].notna(),
+            onbepaald("provinciaal_monument"),
         )
-
-        if not isinstance(gemeentelijk_monument_position, int):
-            raise RuntimeError(
-                "Interne fout: Kan kolomnummer voor 'grondslag_gemeentelijk_monument' niet bepalen"
-            )
-
-        merged.insert(
-            gemeentelijk_monument_position,
-            "gemeentelijk_monument",
-            _status(
-                merged["grondslag_gemeentelijk_monument"].notna(),
-                onbepaald("gemeentelijk_monument"),
-            ),
-        )
-
-        provinciaal_monument_position = merged.columns.get_loc(
-            "provinciaal_monument_omschrijving",
-        )
-
-        if not isinstance(provinciaal_monument_position, int):
-            raise RuntimeError(
-                "Interne fout: Kan kolomnummer voor 'provinciaal_monument_omschrijving' niet bepalen"
-            )
-
-        merged.insert(
-            provinciaal_monument_position,
-            "provinciaal_monument",
-            _status(
-                merged["provinciaal_monument_omschrijving"].notna(),
-                onbepaald("provinciaal_monument"),
-            ),
-        )
-
+        merged = merged[[*valid_id_df.columns, *_UITVOERKOLOMMEN]]
         merged = merged.replace([np.nan, ""], pd.NA)
         merged = merged.replace({None: pd.NA})
         return merged
@@ -315,17 +269,12 @@ class MonumentenClient:
 
         result = result.replace({pd.NA: None, pd.NaT: None, np.nan: None})
 
-        if "rijksmonument_bron" in result.columns:
-            result["rijksmonument_bron"] = result["rijksmonument_bron"].apply(
-                lambda x: x.split(", ") if pd.notna(x) else None
-            )
-        # Ensure unique index before converting to dictionary
+        result["rijksmonument_bron"] = result["rijksmonument_bron"].apply(
+            lambda x: x.split(", ") if pd.notna(x) else None
+        )
         result_indexed = result.set_index("bag_verblijfsobject_id")
-        if result_indexed.index.duplicated().any():
-            # If there are duplicates, keep the first occurrence
-            result_indexed = result_indexed[
-                ~result_indexed.index.duplicated(keep="first")
-            ]
+        # Bij een dubbel verblijfsobject telt de eerste rij
+        result_indexed = result_indexed[~result_indexed.index.duplicated(keep="first")]
 
         if not to_vera:
             return cast(
