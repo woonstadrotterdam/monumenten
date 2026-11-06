@@ -86,12 +86,12 @@ _BRK_PB_BEPERKINGEN_QUERY_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
             <fes:ValueReference>grondslagCode</fes:ValueReference>
             <fes:Literal>GWA</fes:Literal>
           </fes:PropertyIsEqualTo>
-          <!-- Erfgoedwet: Afschrift inschrijving monument of archeologisch monument in rijksmonumentenregister door minister OCW -->
+          <!-- Erfgoedwet: Afschrift inschrijving monument of archeologisch monument in rijksmonumentenregister door minister OCW (= rijksmonument) -->
           <fes:PropertyIsEqualTo>
             <fes:ValueReference>grondslagCode</fes:ValueReference>
             <fes:Literal>EWE</fes:Literal>
           </fes:PropertyIsEqualTo>
-          <!-- Erfgoedwet: Toezending ontwerpbesluit aanwijzing rijksmonument door minister OCW (voorbescherming) -->
+          <!-- Erfgoedwet: Toezending ontwerpbesluit aanwijzing rijksmonument door minister OCW (voorbescherming; geen rijksmonument, zie rijksmonument_voorbescherming) -->
           <fes:PropertyIsEqualTo>
             <fes:ValueReference>grondslagCode</fes:ValueReference>
             <fes:Literal>EWD</fes:Literal>

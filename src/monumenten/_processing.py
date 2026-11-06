@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import List, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
 
 import aiohttp
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import shapely
 from aiocache import cached_stampede
 from pandas import DataFrame
+from shapely.geometry.base import BaseGeometry
 from tqdm.asyncio import tqdm_asyncio
 
 from monumenten._api._cultureel_erfgoed import (
@@ -24,6 +27,13 @@ from monumenten._api._kadaster import (
     _query_adrespunten,
     _query_beperkingen,
 )
+from monumenten._api._provincies import (
+    PROVINCIES,
+    Provincie,
+    ProvincialeMonumentenError,
+    _query_provinciale_monumenten,
+    _query_provinciegrenzen,
+)
 
 logger = logging.getLogger("monumenten.processing")
 
@@ -32,13 +42,79 @@ _BATCH_CONCURRENCY = 4
 # Bereik van RD-coördinaten in Nederland: minx, miny, maxx, maxy
 _RD_BEREIK = (0, 300_000, 300_000, 650_000)
 
+# Kadaster grondslagcodes (publiekrechtelijke beperkingen, BRK)
+# EWE: inschrijving in het rijksmonumentenregister -> rijksmonument (art. 1.1 Erfgoedwet)
+_RIJKSMONUMENT_GRONDSLAGCODES = ["EWE"]
+# EWD: toezending ontwerpbesluit aanwijzing (voorbescherming) -> nog geen rijksmonument
+_VOORBESCHERMING_GRONDSLAGCODES = ["EWD"]
+# GG/GWA: gemeentelijk monument (GWA bundelt voorbescherming, aanwijzing en afschrift)
+_GEMEENTELIJK_GRONDSLAGCODES = ["GG", "GWA"]
+
+_WGS84 = "EPSG:4326"
+
+# Marge om de provinciegrens. Enkele Drentse monumentvlakken steken tot 1,3 m
+# buiten de grens van PDOK, door verschillen in nauwkeurigheid; de grens wordt
+# bovendien maar jaarlijks bijgewerkt. Een te ruime marge kost alleen wat extra
+# kandidaten, een te krappe geeft stil False.
+_GRENS_BUFFER_METER = 100
+
+
+@dataclass(frozen=True)
+class ProvincieOnbepaald:
+    """Een provincie waarvan de monumentvlakken niet op te halen waren.
+
+    Attributes:
+        oorzaak (str): Waarom het ophalen mislukte, voor de waarschuwing aan de
+            gebruiker
+        verblijfsobject_ids (List[str]): De kandidaten in die provincie, waarvoor
+            ``provinciaal_monument`` onbepaald is
+    """
+
+    oorzaak: str
+    verblijfsobject_ids: List[str]
+
+
+_BatchFrames = Tuple[DataFrame, DataFrame, DataFrame]
+_BatchResult = Tuple[DataFrame, DataFrame, DataFrame, int]
+
+_RESULTAAT_KOLOMMEN = [
+    "identificatie",
+    "rijksmonument_nummer",
+    "rijksmonument_bron",
+    "rijksmonument_voorbescherming",
+    "rijksbeschermd_gezicht_naam",
+    "grondslag_gemeentelijk_monument",
+    "provinciaal_monument_omschrijving",
+]
+
+
+def _lege_batch_frames() -> _BatchFrames:
+    """Lege resultaatframes voor een batch, in de volgorde van _process_batch."""
+    return (
+        pd.DataFrame(
+            columns=[
+                "identificatie",
+                "rijksmonument_nummer",
+                "rijksmonument_bron",
+                "rijksmonument_voorbescherming",
+            ]
+        ),
+        pd.DataFrame(columns=["identificatie", "rijksbeschermd_gezicht_naam"]),
+        pd.DataFrame(columns=["identificatie", "grondslag_gemeentelijk_monument"]),
+    )
+
+
+def _lege_provinciale_monumenten() -> DataFrame:
+    """Leeg resultaat van _bepaal_provinciale_monumenten."""
+    return pd.DataFrame(columns=["identificatie", "provinciaal_monument_omschrijving"])
+
 
 async def _process_batch(
     session: aiohttp.ClientSession,
     batch: List[str],
     beschermde_gezichten_df: gpd.GeoDataFrame,
     adrespunten: _Adrespunten,
-) -> Tuple[DataFrame, DataFrame, DataFrame, int]:
+) -> _BatchResult:
     """Verwerk een batch verblijfsobjecten.
 
     Args:
@@ -48,8 +124,9 @@ async def _process_batch(
         adrespunten (_Adrespunten): Adrespunt per verblijfsobject ID uit de BAG
 
     Returns:
-        Tuple[DataFrame, DataFrame, DataFrame, int]: Tuple met rijksmonumenten,
-            beschermde gezichten, gemeentelijke monumenten en aantal verwerkte objecten
+        _BatchResult: Tuple met rijksmonumenten, beschermde gezichten,
+            gemeentelijke monumenten en aantal verwerkte objecten. De provinciale
+            monumenten worden na alle batches bepaald, uit alle adrespunten.
     """
     # Get the current event loop
     loop = asyncio.get_running_loop()
@@ -77,9 +154,9 @@ async def _process_batch(
             columns=["identificatie", "rijksmonument_nummer"],
             dtype="string",
         ),
-        beperkingen_df[beperkingen_df["grondslagcode"].isin(["EWE", "EWD"])][
-            ["identificatie", "grondslagcode"]
-        ],
+        beperkingen_df[
+            beperkingen_df["grondslagcode"].isin(_RIJKSMONUMENT_GRONDSLAGCODES)
+        ][["identificatie", "grondslagcode"]],
         on="identificatie",
         how="outer",
     )
@@ -88,29 +165,47 @@ async def _process_batch(
     condition_choice_map = {
         "RCE, Kadaster": (
             rijksmonumenten_df["rijksmonument_nummer"].notna()
-            & rijksmonumenten_df["grondslagcode"].isin(["EWE", "EWD"])
+            & rijksmonumenten_df["grondslagcode"].isin(_RIJKSMONUMENT_GRONDSLAGCODES)
         ),
         "RCE": (
             rijksmonumenten_df["rijksmonument_nummer"].notna()
-            & ~rijksmonumenten_df["grondslagcode"].isin(["EWE", "EWD"])
+            & ~rijksmonumenten_df["grondslagcode"].isin(_RIJKSMONUMENT_GRONDSLAGCODES)
         ),
         "Kadaster": (
             rijksmonumenten_df["rijksmonument_nummer"].isna()
-            & rijksmonumenten_df["grondslagcode"].isin(["EWE", "EWD"])
+            & rijksmonumenten_df["grondslagcode"].isin(_RIJKSMONUMENT_GRONDSLAGCODES)
         ),
     }
 
     rijksmonumenten_df["rijksmonument_bron"] = np.select(
         list(condition_choice_map.values()),
         list(condition_choice_map.keys()),
-        default="",
+        # None en geen "": de client leidt rijksmonument af uit een gevulde bron.
+        # Als object-array, omdat de numpy-stubs geen kale None accepteren.
+        default=np.array(None, dtype=object),
     )
 
     rijksmonumenten_df = rijksmonumenten_df.drop(columns=["grondslagcode"])
 
+    # Voorbescherming (EWD) is geen rijksmonument in de zin van art. 1.1 Erfgoedwet
+    # en telt dus niet mee voor rijksmonument/rijksmonument_bron. Wel apart teruggeven.
+    voorbescherming_df = (
+        beperkingen_df[
+            beperkingen_df["grondslagcode"].isin(_VOORBESCHERMING_GRONDSLAGCODES)
+        ][["identificatie"]]
+        .drop_duplicates()
+        .assign(rijksmonument_voorbescherming=True)
+    )
+    rijksmonumenten_df = pd.merge(
+        rijksmonumenten_df, voorbescherming_df, on="identificatie", how="outer"
+    )
+    rijksmonumenten_df["rijksmonument_voorbescherming"] = rijksmonumenten_df[
+        "rijksmonument_voorbescherming"
+    ].eq(True)
+
     # Process gemeentelijke monumenten
     gemeentelijke_monumenten_df = beperkingen_df[
-        beperkingen_df["grondslagcode"].isin(["GG", "GWA"])
+        beperkingen_df["grondslagcode"].isin(_GEMEENTELIJK_GRONDSLAGCODES)
     ][["identificatie", "grondslag_gemeentelijk_monument"]]
 
     # Process beschermde gezichten
@@ -157,7 +252,7 @@ async def _get_beschermde_gezichten(
     beschermde_gezichten_df = gpd.GeoDataFrame(
         beschermde_gezichten_df[["rijksbeschermd_gezicht_naam", "geometry"]],
         geometry="geometry",
-        crs="EPSG:4326",
+        crs=_WGS84,
     ).to_crs(_RD)
     # Levert de RCE ooit iets anders dan WGS84, dan vindt de spatial join stilletjes
     # niets meer. Na omrekening moeten de gezichten daarom binnen Nederland liggen.
@@ -175,13 +270,196 @@ async def _get_beschermde_gezichten(
     return beschermde_gezichten_df
 
 
+# Cache 7 dagen. De lease (standaard 2 s) dekt het pagineren van Noord-Holland,
+# zodat gelijktijdige aanroepen niet allemaal zelf downloaden.
+@cached_stampede(lease=60, ttl=60 * 60 * 24 * 7, noself=True)
+async def _get_provinciale_monumenten(
+    session: aiohttp.ClientSession, provincie: Provincie
+) -> gpd.GeoDataFrame:
+    """Haal de monumentvlakken van een provincie op als GeoDataFrame (RD)."""
+    features = await _query_provinciale_monumenten(session, provincie)
+    return gpd.GeoDataFrame.from_features(features, crs=_RD)[
+        ["provinciaal_monument_omschrijving", "geometry"]
+    ]
+
+
+@cached_stampede(ttl=60 * 60 * 24 * 7, noself=True)  # Cache resultaat voor 7 dagen
+async def _get_provinciegrenzen(
+    session: aiohttp.ClientSession,
+) -> Dict[str, BaseGeometry]:
+    """Haal de grenzen van alle provincies in PROVINCIES op, met de marge erom (RD).
+
+    Args:
+        session (aiohttp.ClientSession): De sessie voor HTTP requests
+
+    Returns:
+        Dict[str, BaseGeometry]: Per provinciecode het gebied waarbinnen een
+            adrespunt kandidaat is voor die provincie
+    """
+    grenzen = await _query_provinciegrenzen(session, PROVINCIES)
+    gebieden = {
+        code: grens.buffer(_GRENS_BUFFER_METER) for code, grens in grenzen.items()
+    }
+    for gebied in gebieden.values():
+        # Eén keer voorbereiden; anders kost elk adrespunt een volledige doorloop
+        # van de grens.
+        shapely.prepare(gebied)
+    return gebieden
+
+
+async def _bepaal_provinciale_monumenten(
+    session: aiohttp.ClientSession, adrespunten: _Adrespunten
+) -> Tuple[DataFrame, Dict[str, ProvincieOnbepaald]]:
+    """Bepaal welke adrespunten binnen een provinciaal monumentvlak liggen.
+
+    Een adrespunt is kandidaat voor een provincie als het in haar ruime bounding
+    box ligt en binnen haar grens (met een marge van ``_GRENS_BUFFER_METER``).
+    Alleen provincies met kandidaten worden gedownload; ligt geen adrespunt in een
+    bounding box, dan volgt er geen enkele request. Zijn de grenzen niet op te
+    halen, dan is elk adrespunt in de bounding box kandidaat.
+
+    Een fout bij een provincie breekt de aanroep niet af: haar kandidaten worden
+    onbepaald.
+
+    Args:
+        session (aiohttp.ClientSession): De sessie voor HTTP requests
+        adrespunten (_Adrespunten): Adrespunt (RD) per verblijfsobject ID uit de BAG
+
+    Returns:
+        Tuple[DataFrame, Dict[str, ProvincieOnbepaald]]: De gevonden monumenten
+            (kolommen ``identificatie`` en ``provinciaal_monument_omschrijving``,
+            één rij per combinatie), en per provincie waarvan de monumentvlakken
+            niet op te halen waren de oorzaak en de ID's van haar kandidaten
+    """
+    onbepaald: Dict[str, ProvincieOnbepaald] = {}
+    if not adrespunten:
+        return _lege_provinciale_monumenten(), onbepaald
+
+    xs, ys = zip(*adrespunten.values())
+    rd = gpd.GeoDataFrame(
+        {"identificatie": pd.Series(list(adrespunten), dtype="string")},
+        geometry=gpd.points_from_xy(xs, ys),
+        crs=_RD,
+    )
+    x, y = rd.geometry.x, rd.geometry.y
+
+    in_bbox: Dict[Provincie, pd.Series[bool]] = {}
+    for provincie in PROVINCIES:
+        min_x, min_y, max_x, max_y = provincie.bbox
+        masker = x.between(min_x, max_x) & y.between(min_y, max_y)
+        if masker.any():
+            in_bbox[provincie] = masker
+    if not in_bbox:
+        return _lege_provinciale_monumenten(), onbepaald
+
+    grenzen: Dict[str, BaseGeometry] | None
+    try:
+        grenzen = await _get_provinciegrenzen(session)
+    except Exception as e:
+        logger.warning(
+            "Provinciegrenzen niet op te halen (%s); elk adrespunt in de bounding "
+            "box van een provincie telt als kandidaat",
+            e,
+            # Bij een onverwachte fout ook de traceback
+            exc_info=not isinstance(e, ProvincialeMonumentenError),
+        )
+        grenzen = None
+
+    delen: List[DataFrame] = []
+    for provincie, masker in in_bbox.items():
+        kandidaten = rd[masker]
+        if grenzen is not None:
+            kandidaten = kandidaten[
+                shapely.contains_xy(
+                    grenzen[provincie.code],
+                    kandidaten.geometry.x,
+                    kandidaten.geometry.y,
+                )
+            ]
+        if kandidaten.empty:
+            continue
+        try:
+            monumenten_df = await _get_provinciale_monumenten(session, provincie)
+        except Exception as e:
+            # Ook een onverwachte fout, zoals een geometrie die from_features niet
+            # leest, mag de rest van de aanroep niet afbreken.
+            oorzaak = (
+                str(e)
+                if isinstance(e, ProvincialeMonumentenError)
+                else f"Onverwachte fout bij {provincie.naam}: {type(e).__name__}: {e}"
+            )
+            logger.warning(
+                "%s; provinciaal_monument is onbepaald voor %d verblijfsobjecten",
+                oorzaak,
+                len(kandidaten),
+                exc_info=not isinstance(e, ProvincialeMonumentenError),
+            )
+            onbepaald[provincie.naam] = ProvincieOnbepaald(
+                oorzaak, kandidaten["identificatie"].tolist()
+            )
+            continue
+        delen.append(
+            gpd.sjoin(
+                kandidaten,
+                monumenten_df,
+                how="inner",
+                predicate="within",
+            )[["identificatie", "provinciaal_monument_omschrijving"]]
+        )
+    if not delen:
+        return _lege_provinciale_monumenten(), onbepaald
+    return pd.concat(delen, ignore_index=True), onbepaald
+
+
+def _voeg_namen_samen(df: DataFrame, kolom: str) -> DataFrame:
+    """Voeg per identificatie de unieke waarden van ``kolom`` samen met ", ".
+
+    Args:
+        df (DataFrame): Rijen met kolommen ``identificatie`` en ``kolom``;
+            lege waarden worden genegeerd
+        kolom (str): Naam van de kolom die wordt samengevoegd
+
+    Returns:
+        DataFrame: Eén rij per identificatie; ``None`` als er geen waarden zijn
+    """
+    # Deduplicate (id, name) pairs so we only aggregate unique names per id.
+    df = df.drop_duplicates(subset=["identificatie", kolom])
+    # Use numpy for aggregation
+    ids = df["identificatie"].to_numpy(dtype=object)
+    names = df[kolom].to_numpy(dtype=object)
+    # Sort by id so all rows with the same identificatie are contiguous.
+    order = np.argsort(ids)
+    ids, names = ids[order], names[order]
+    # Get start index of each group; end is start of next group or length.
+    unique_ids, group_start = np.unique(ids, return_index=True)
+    group_end = np.concatenate([group_start[1:], [len(ids)]])
+    # For each id, join its names (drop NaNs) with ", ".
+    parts = []
+    for i in range(len(unique_ids)):
+        valid = names[group_start[i] : group_end[i]]
+        valid = valid[~pd.isna(valid)]
+        parts.append(", ".join(valid.astype(str)) or None)
+    return pd.DataFrame({"identificatie": unique_ids, kolom: parts})
+
+
 async def _query(
     session: aiohttp.ClientSession, verblijfsobject_ids: List[str]
-) -> pd.DataFrame:
+) -> Tuple[pd.DataFrame, Dict[str, ProvincieOnbepaald]]:
     """Voer queries uit voor een lijst verblijfsobjecten.
 
     Batches worden parallel verwerkt. Retry en split-on-failure gebeuren per API
-    (cultureel erfgoed en kadaster) in hun eigen modules.
+    (cultureel erfgoed en kadaster) in hun eigen modules. De provinciale
+    monumenten worden daarna in één stap bepaald.
+
+    Args:
+        session (aiohttp.ClientSession): De sessie voor HTTP requests
+        verblijfsobject_ids (List[str]): Lijst met verblijfsobject ID's
+
+    Returns:
+        Tuple[pd.DataFrame, Dict[str, ProvincieOnbepaald]]: Eén rij per
+            verblijfsobject met een monumentstatus, met de kolommen uit
+            ``_RESULTAAT_KOLOMMEN``; en per provincie die niet op te halen was de
+            oorzaak en de ID's waarvan ``provinciaal_monument`` onbepaald is
     """
     beschermde_gezichten_df = await _get_beschermde_gezichten(session)
 
@@ -193,7 +471,7 @@ async def _query(
     if zonder_adrespunt:
         logger.warning(
             "%d van %d verblijfsobjecten hebben geen adrespunt uit de BAG; die krijgen "
-            "geen Kadaster-beperking en geen beschermd gezicht",
+            "geen Kadaster-beperking, geen beschermd gezicht en geen provinciaal monument",
             zonder_adrespunt,
             len(verblijfsobject_ids),
         )
@@ -220,16 +498,7 @@ async def _query(
         total=len(verblijfsobject_ids), disable=len(batches) <= 1
     )
 
-    _BatchResult = Tuple[DataFrame, DataFrame, DataFrame, int]
     results_list: List[_BatchResult] = []
-
-    _empty_batch_result = (
-        pd.DataFrame(
-            columns=["identificatie", "rijksmonument_nummer", "rijksmonument_bron"]
-        ),
-        pd.DataFrame(columns=["identificatie", "rijksbeschermd_gezicht_naam"]),
-        pd.DataFrame(columns=["identificatie", "grondslag_gemeentelijk_monument"]),
-    )
 
     batch_semaphore = asyncio.Semaphore(_BATCH_CONCURRENCY)
 
@@ -246,54 +515,49 @@ async def _query(
                     "Batch (size %d) mislukt na retry/split in API-laag, overgeslagen",
                     len(batch),
                 )
-                results_list.append((*_empty_batch_result, len(batch)))
+                results_list.append((*_lege_batch_frames(), len(batch)))
                 progress_bar.update(len(batch))
 
-    async with asyncio.TaskGroup() as tg:
-        for batch in batches:
-            tg.create_task(_run_batch(batch))
+    try:
+        async with asyncio.TaskGroup() as tg:
+            for batch in batches:
+                tg.create_task(_run_batch(batch))
+    finally:
+        progress_bar.close()
 
-    rijksmonumenten_parts = [r[0] for r in results_list]
-    beschermd_gezicht_parts = [r[1] for r in results_list]
-    gemeentelijke_parts = [r[2] for r in results_list]
+    # Per monumenttype de frames van alle batches samenvoegen
+    samengevoegd: List[DataFrame] = (
+        [
+            pd.concat(frames, ignore_index=True)
+            for frames in zip(*(r[:3] for r in results_list))
+        ]
+        if results_list
+        else list(_lege_batch_frames())
+    )
+    (
+        rijksmonumenten_result,
+        verblijfsobjecten_in_beschermd_gezicht_result,
+        gemeentelijke_monumenten_result,
+    ) = samengevoegd
 
-    rijksmonumenten_result = (
-        pd.concat(rijksmonumenten_parts, ignore_index=True)
-        if rijksmonumenten_parts
-        else pd.DataFrame(
-            columns=["identificatie", "rijksmonument_nummer", "rijksmonument_bron"]
+    # Uit alle adrespunten en niet per batch: ook een mislukte batch heeft ze al
+    provinciale_monumenten_result, onbepaald = await _bepaal_provinciale_monumenten(
+        session, adrespunten
+    )
+
+    if all(
+        frame.empty
+        for frame in (
+            rijksmonumenten_result,
+            verblijfsobjecten_in_beschermd_gezicht_result,
+            gemeentelijke_monumenten_result,
+            provinciale_monumenten_result,
         )
-    )
-    verblijfsobjecten_in_beschermd_gezicht_result = (
-        pd.concat(beschermd_gezicht_parts, ignore_index=True)
-        if beschermd_gezicht_parts
-        else pd.DataFrame(columns=["identificatie", "rijksbeschermd_gezicht_naam"])
-    )
-    gemeentelijke_monumenten_result = (
-        pd.concat(gemeentelijke_parts, ignore_index=True)
-        if gemeentelijke_parts
-        else pd.DataFrame(columns=["identificatie", "grondslag_gemeentelijk_monument"])
-    )
-
-    progress_bar.close()
-
-    if (
-        rijksmonumenten_result.empty
-        and verblijfsobjecten_in_beschermd_gezicht_result.empty
-        and gemeentelijke_monumenten_result.empty
     ):
-        return pd.DataFrame(
-            columns=[
-                "identificatie",
-                "rijksmonument_nummer",
-                "rijksmonument_bron",
-                "rijksbeschermd_gezicht_naam",
-                "grondslag_gemeentelijk_monument",
-            ]
-        )
+        return pd.DataFrame(columns=_RESULTAAT_KOLOMMEN), onbepaald
 
     # The filtering in _process_batch already separates the data correctly:
-    # - EWE/EWD rows go to rijksmonumenten_df
+    # - EWE rows go to rijksmonumenten_df (EWD only sets rijksmonument_voorbescherming)
     # - GG/GWA rows go to gemeentelijke_monumenten_df
     # We only remove truly duplicate rows (all columns identical) to preserve unique information
 
@@ -301,27 +565,9 @@ async def _query(
         rijksmonumenten_result = rijksmonumenten_result.drop_duplicates(keep="first")
 
     if not verblijfsobjecten_in_beschermd_gezicht_result.empty:
-        # Deduplicate (id, name) pairs so we only aggregate unique names per id.
-        df_bg = verblijfsobjecten_in_beschermd_gezicht_result.drop_duplicates(
-            subset=["identificatie", "rijksbeschermd_gezicht_naam"]
-        )
-        # Use numpy for aggregation
-        ids = df_bg["identificatie"].to_numpy(dtype=object)
-        names = df_bg["rijksbeschermd_gezicht_naam"].to_numpy(dtype=object)
-        # Sort by id so all rows with the same identificatie are contiguous.
-        order = np.argsort(ids)
-        ids, names = ids[order], names[order]
-        # Get start index of each group; end is start of next group or length.
-        unique_ids, group_start = np.unique(ids, return_index=True)
-        group_end = np.concatenate([group_start[1:], [len(ids)]])
-        # For each id, join its rijksbeschermd_gezicht names (drop NaNs) with ", ".
-        parts = []
-        for i in range(len(unique_ids)):
-            valid = names[group_start[i] : group_end[i]]
-            valid = valid[~pd.isna(valid)]
-            parts.append(", ".join(valid.astype(str)) or None)
-        verblijfsobjecten_in_beschermd_gezicht_result = pd.DataFrame(
-            {"identificatie": unique_ids, "rijksbeschermd_gezicht_naam": parts}
+        verblijfsobjecten_in_beschermd_gezicht_result = _voeg_namen_samen(
+            verblijfsobjecten_in_beschermd_gezicht_result,
+            "rijksbeschermd_gezicht_naam",
         )
 
     if not gemeentelijke_monumenten_result.empty:
@@ -329,8 +575,19 @@ async def _query(
             gemeentelijke_monumenten_result.drop_duplicates(keep="first")
         )
 
-    result = rijksmonumenten_result.merge(
-        verblijfsobjecten_in_beschermd_gezicht_result, on="identificatie", how="outer"
-    ).merge(gemeentelijke_monumenten_result, on="identificatie", how="outer")
+    if not provinciale_monumenten_result.empty:
+        provinciale_monumenten_result = _voeg_namen_samen(
+            provinciale_monumenten_result, "provinciaal_monument_omschrijving"
+        )
 
-    return result
+    result = (
+        rijksmonumenten_result.merge(
+            verblijfsobjecten_in_beschermd_gezicht_result,
+            on="identificatie",
+            how="outer",
+        )
+        .merge(gemeentelijke_monumenten_result, on="identificatie", how="outer")
+        .merge(provinciale_monumenten_result, on="identificatie", how="outer")
+    )
+
+    return result, onbepaald

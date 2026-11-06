@@ -504,6 +504,7 @@ dependencies = [
     { name = "aiohttp" },
     { name = "geopandas" },
     { name = "pandas" },
+    { name = "shapely" },
     { name = "tqdm" },
 ]
 
@@ -536,6 +537,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = "==0.24.*" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = "==5.*" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.9.5" },
+    { name = "shapely", specifier = ">=2.0.0" },
     { name = "tqdm", specifier = ">=4.66.5" },
 ]
 provides-extras = ["test", "dev"]
