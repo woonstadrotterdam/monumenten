@@ -611,19 +611,19 @@ async def _query(
     ) -> List[_BatchAntwoorden]:
         """Verwerk de batches; rce en brk_pb beperken zo nodig wie welke bron krijgt."""
         resultaten: List[_BatchAntwoorden] = []
-        onvolledig = 0
+        onvolledig_bepaald = 0
 
         async def _run_batch(batch: List[str]) -> None:
-            nonlocal onvolledig
+            nonlocal onvolledig_bepaald
             async with batch_semaphore:
                 result = await _verwerk_batch(batch, rce, brk_pb)
             if result is not None:
                 resultaten.append(result)
             # Ook een mislukte of overgeslagen batch is afgehandeld: de balk loopt vol,
-            # en ernaast staat hoeveel verblijfsobjecten een onvolledig resultaat hebben
-            onvolledig += uitval.aantal_onvolledig(batch)
+            # en ernaast staat hoeveel verblijfsobjecten onvolledig bepaald zijn
+            onvolledig_bepaald += uitval.aantal_onvolledig_bepaald(batch)
             voortgang.update(len(batch))
-            voortgang.set_postfix(onvolledig=onvolledig, refresh=False)
+            voortgang.set_postfix(onvolledig_bepaald=onvolledig_bepaald, refresh=False)
 
         with tqdm_asyncio(
             total=sum(len(batch) for batch in batches),

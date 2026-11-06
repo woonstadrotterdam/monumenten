@@ -2319,24 +2319,26 @@ def balken():
 
 
 @pytest.mark.asyncio
-async def test_voortgang_loopt_vol_en_telt_onvolledige_verblijfsobjecten(balken):
+async def test_voortgang_loopt_vol_en_telt_onvolledig_bepaalde_verblijfsobjecten(
+    balken,
+):
     """Ook een mislukte batch is afgehandeld: elke balk loopt vol, en ernaast staat
-    hoeveel verblijfsobjecten onvolledig zijn."""
+    hoeveel verblijfsobjecten onvolledig bepaald zijn."""
     with _mocked_sources() as client, _batch_faalt({_VO_GEMEENTE}):
         with pytest.warns(MonumentStatusOnbepaaldWarning):
             await client.process_from_list(_ALLE)
 
     assert [(b.desc, b.n, b.total, b.postfix) for b in balken] == [
         ("Adrespunten (BAG)", len(_ALLE), len(_ALLE), {}),
-        ("Monumentstatus", len(_ALLE), len(_ALLE), {"onvolledig": 1}),
-        ("Herkansing", 1, 1, {"onvolledig": 1}),
+        ("Monumentstatus", len(_ALLE), len(_ALLE), {"onvolledig_bepaald": 1}),
+        ("Herkansing", 1, 1, {"onvolledig_bepaald": 1}),
     ]
 
 
 def test_overgeslagen_batch_bij_kansloze_verwerking_wordt_vastgelegd():
     """Slaagt na de kansloze start toch nog een batch die al liep, dan is de
     verwerking niet meer kansloos en volgt er geen fout. De batches die intussen zijn
-    overgeslagen moeten daarom als onvolledig vastliggen, en niet stil False geven."""
+    overgeslagen moeten daarom als onvolledig bepaald vastliggen, en niet stil False geven."""
     uitval = Bronuitval()
     for nummer in range(MAX_CONSECUTIVE_FAILURES):
         uitval.registreer_mislukte_verwerking([f"id{nummer}"], ValueError("data"))
@@ -2459,12 +2461,12 @@ async def test_waarschuwing_zonder_adrespunt_telt_de_herkansing_mee(caplog):
     assert "1 van 5 verblijfsobjecten hebben geen adrespunt" in caplog.text
 
 
-def test_aantal_onvolledig_totaal_telt_elk_verblijfsobject_een_keer():
+def test_aantal_onvolledig_bepaald_totaal_telt_elk_verblijfsobject_een_keer():
     uitval = Bronuitval()
     fout = RuntimeError("503")
     uitval.registreer_fout(RCE, ["id1", "id2", "id3"], fout)
     uitval.registreer_fout(BRK_PB, ["id2", "id4"], fout)
     uitval.registreer_fout(VERWERKING, ["id4"], fout)
 
-    assert uitval.aantal_onvolledig_totaal() == 4
+    assert uitval.aantal_onvolledig_bepaald_totaal() == 4
     assert "van 4 verblijfsobject(en)" in str(uitval.waarschuwing())

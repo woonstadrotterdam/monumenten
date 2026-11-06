@@ -1,4 +1,4 @@
-"""De tabel "Geen antwoord van" in de README volgt _AFHANKELIJKHEDEN in de client."""
+"""De tabel "Hangt af van" in de README volgt _AFHANKELIJKHEDEN in de client."""
 
 from pathlib import Path
 
@@ -8,8 +8,8 @@ from monumenten.client import _AFHANKELIJKHEDEN
 
 _README = Path(__file__).parent.parent / "README.md"
 
-# Eerste woord van een rij in de tabel -> de bronnen die de rij beschrijft
-_BRONNEN_PER_RIJ = {
+# Eerste woord van een bron in de tabel -> de bronnen die het beschrijft
+_BRONNEN_PER_WOORD = {
     "RCE": {RCE},
     "BAG": {BAG},
     "BRK-PB": {BRK_PB},
@@ -22,33 +22,29 @@ def _cellen(regel: str) -> list[str]:
     return [cel.strip() for cel in regel.strip().strip("|").split("|")]
 
 
-def _readme_tabel() -> dict[str, dict[str, str]]:
-    """Geef per rij van de tabel de cel per status."""
+def _readme_tabel() -> dict[str, set[str]]:
+    """Geef per status in de tabel de bronnen waar zij van afhangt."""
     regels = _README.read_text().splitlines()
     start = next(
-        i for i, regel in enumerate(regels) if regel.startswith("| Geen antwoord van")
+        i
+        for i, regel in enumerate(regels)
+        if regel.startswith("| Status") and "Hangt af van" in regel
     )
-    statussen = [kop.strip("`") for kop in _cellen(regels[start])[1:]]
     tabel = {}
     for regel in regels[start + 2 :]:
         if not regel.startswith("|"):
             break
-        rij, *cellen = _cellen(regel)
-        tabel[rij.split()[0]] = dict(zip(statussen, cellen, strict=True))
+        status, bronnen = _cellen(regel)
+        tabel[status.strip("`")] = set().union(
+            *(_BRONNEN_PER_WOORD[bron.split()[0]] for bron in bronnen.split(", "))
+        )
     return tabel
 
 
 def test_readme_tabel_volgt_afhankelijkheden():
-    """Elke bron in de tabel maakt precies de statussen onbepaald die volgens
-    _AFHANKELIJKHEDEN van haar afhangen."""
-    tabel = _readme_tabel()
-
-    assert set(tabel) == set(_BRONNEN_PER_RIJ)
-    for rij, cellen in tabel.items():
-        assert set(cellen) == set(_AFHANKELIJKHEDEN), rij
-        for status, cel in cellen.items():
-            hangt_af = bool(_BRONNEN_PER_RIJ[rij] & _AFHANKELIJKHEDEN[status])
-            assert (cel != "bepaald") == hangt_af, (rij, status)
+    """Elke status in de tabel hangt af van precies de bronnen in
+    _AFHANKELIJKHEDEN."""
+    assert _readme_tabel() == _AFHANKELIJKHEDEN
 
 
 def test_elke_bron_in_afhankelijkheden_is_bekend():

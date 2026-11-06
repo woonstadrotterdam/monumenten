@@ -217,15 +217,15 @@ class Bronuitval:
         )
         return True
 
-    def aantal_onvolledig(self, verblijfsobject_ids: Iterable[str]) -> int:
-        """Tel de onvolledige verblijfsobjecten: een bron gaf tot nu toe geen
+    def aantal_onvolledig_bepaald(self, verblijfsobject_ids: Iterable[str]) -> int:
+        """Tel de onvolledig bepaalde verblijfsobjecten: een bron gaf tot nu toe geen
         antwoord, of hun verwerking mislukte.
 
         Args:
             verblijfsobject_ids (Iterable[str]): De verblijfsobject ID's
 
         Returns:
-            int: Hoeveel daarvan onvolledig zijn
+            int: Hoeveel daarvan onvolledig bepaald zijn
         """
         return sum(
             1
@@ -233,15 +233,15 @@ class Bronuitval:
             if any(verblijfsobject_id in ids for ids in self.mislukt.values())
         )
 
-    def aantal_onvolledig_totaal(self) -> int:
-        """Tel alle onvolledige verblijfsobjecten, zonder een kopie van hun ID's.
+    def aantal_onvolledig_bepaald_totaal(self) -> int:
+        """Tel alle onvolledig bepaalde verblijfsobjecten, zonder een kopie van hun ID's.
 
         Een verblijfsobject telt bij de eerste bron, van groot naar klein, waarvoor
         het in mislukt staat. Bij een uitval voor miljoenen verblijfsobjecten zou een
         unie van alle ID's alleen om te tellen veel geheugen kosten.
 
         Returns:
-            int: Hoeveel verblijfsobjecten onvolledig zijn
+            int: Hoeveel verblijfsobjecten onvolledig bepaald zijn
         """
         sets = sorted(self.mislukt.values(), key=len, reverse=True)
         return sum(
@@ -424,7 +424,7 @@ class Bronuitval:
         """
         if not self.mislukt:
             return None
-        aantal = self.aantal_onvolledig_totaal()
+        aantal = self.aantal_onvolledig_bepaald_totaal()
         return MonumentStatusOnbepaaldWarning(
             f"De monumentstatus van {aantal} verblijfsobject(en) kon niet volledig "
             "worden bepaald: een bron gaf, ook na retries, geen antwoord. De "

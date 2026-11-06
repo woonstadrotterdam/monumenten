@@ -21,7 +21,7 @@ from monumenten._processing import _query
 # en het provinciaal monument. Het beschermd gezicht en het provinciaal monument
 # worden na alle batches uit de adrespunten bepaald en hangen dus niet van de
 # verwerking van een batch af. De tabel
-# "Geen antwoord van" in de README beschrijft hetzelfde; een test houdt ze gelijk.
+# "Hangt af van" in de README beschrijft hetzelfde; een test houdt ze gelijk.
 _AFHANKELIJKHEDEN: Dict[str, FrozenSet[str]] = {
     "rijksmonument": frozenset({RCE, BAG, BRK_PB, VERWERKING}),
     "rijksmonument_voorbescherming": frozenset({BAG, BRK_PB, VERWERKING}),
