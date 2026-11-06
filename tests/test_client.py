@@ -5,7 +5,6 @@ from typing import Iterator
 from unittest.mock import AsyncMock, patch
 
 import geopandas as gpd
-import numpy as np
 import pandas as pd
 import pytest
 import pytest_asyncio
@@ -885,26 +884,41 @@ def _gevarieerd_resultaat() -> pd.DataFrame:
     return df
 
 
-def _vera_via_iterrows(client: MonumentenClient, result: pd.DataFrame) -> dict:
-    """De oorspronkelijke VERA-omzetting met ``iterrows``, als referentie.
+_BRON_ALS_LIJST = {
+    "RCE": ["RCE"],
+    "Kadaster": ["Kadaster"],
+    "RCE, Kadaster": ["RCE", "Kadaster"],
+}
+
+
+def _verwachte_vera(rij: dict) -> list | None:
+    """De VERA-referentiedata voor één rij, rechtstreeks uit de regels afgeleid.
 
     Args:
-        client (MonumentenClient): Client waarvan ``_naar_referentiedata`` gebruikt wordt
-        result (pd.DataFrame): Resultaat zoals ``process_from_df`` het geeft
+        rij (dict): Eén rij uit ``_gevarieerd_resultaat``
 
     Returns:
-        dict: VERA-referentiedata per verblijfsobject ID
+        list | None: De items in de volgorde RIJ, SGR, GEM, PRO, of ``None`` als het
+            provinciaal monument onbepaald is
     """
-    result = result.replace({pd.NA: None, pd.NaT: None, np.nan: None})
-    result["rijksmonument_bron"] = result["rijksmonument_bron"].apply(
-        lambda x: x.split(", ") if pd.notna(x) else None
-    )
-    result_indexed = result.set_index("bag_verblijfsobject_id")
-    result_indexed = result_indexed[~result_indexed.index.duplicated(keep="first")]
-    return {
-        verblijfsobject_id: client._naar_referentiedata(row)
-        for verblijfsobject_id, row in result_indexed.iterrows()
-    }
+    if pd.isna(rij["provinciaal_monument"]):
+        return None
+    verwacht = []
+    if rij["rijksmonument"]:
+        verwacht.append(
+            {
+                "code": "RIJ",
+                "naam": "Rijksmonument",
+                "bron": _BRON_ALS_LIJST[rij["rijksmonument_bron"]],
+            }
+        )
+    if rij["rijksbeschermd_gezicht"]:
+        verwacht.append({"code": "SGR", "naam": "Rijksbeschermd stadsgezicht"})
+    if rij["gemeentelijk_monument"]:
+        verwacht.append({"code": "GEM", "naam": "Gemeentelijk monument"})
+    if rij["provinciaal_monument"]:
+        verwacht.append({"code": "PRO", "naam": "Provinciaal monument"})
+    return verwacht
 
 
 @contextmanager
@@ -919,17 +933,23 @@ def _mock_process_from_df(result: pd.DataFrame) -> Iterator[None]:
 
 
 @pytest.mark.asyncio
-async def test_process_from_list_vera_gelijk_aan_iterrows(client: MonumentenClient):
-    """De VERA-uitvoer is precies gelijk aan die van de oorspronkelijke iterrows-lus."""
+async def test_process_from_list_vera_alle_combinaties(client: MonumentenClient):
+    """Elke combinatie van statussen geeft de VERA-items volgens de regels.
+
+    Voorbescherming levert geen item op; bij een dubbel verblijfsobject telt de
+    eerste rij, en de volgorde van de keys is die van de invoer.
+    """
     result = _gevarieerd_resultaat()
     with _mock_process_from_df(result):
         vera = await client.process_from_list(
             result["bag_verblijfsobject_id"].tolist(), to_vera=True
         )
 
-    verwacht = _vera_via_iterrows(client, result)
-    assert vera == verwacht
-    assert list(vera) == list(verwacht)
+    eerste_rijen = result.drop_duplicates("bag_verblijfsobject_id").to_dict("records")
+    assert list(vera) == [rij["bag_verblijfsobject_id"] for rij in eerste_rijen]
+    for rij in eerste_rijen:
+        vbo_id = rij["bag_verblijfsobject_id"]
+        assert vera[vbo_id] == _verwachte_vera(rij), vbo_id
     # Er zitten lijsten en None tussen, anders test de vergelijking weinig
     assert any(v is None for v in vera.values())
     assert any(v == [] for v in vera.values())
