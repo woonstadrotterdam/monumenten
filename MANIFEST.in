@@ -1,0 +1,2 @@
+# De snelheidsmeting hoort niet in het pakket op PyPI
+prune benchmarks
