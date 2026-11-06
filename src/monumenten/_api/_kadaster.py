@@ -9,7 +9,7 @@ import geopandas as gpd
 from monumenten._api._backoff import AfgekaptAntwoordError, met_retries
 from monumenten._bronfouten import BAG, BRK_PB, Bronuitval
 
-# PDOK WFS endpoints following the BAG + BRK-PB two-stage approach
+# De PDOK WFS-endpoints van de twee stappen: eerst de BAG, dan de BRK-PB
 _BAG_ENDPOINT = "https://service.pdok.nl/kadaster/bag/wfs/v2_0"
 _BRK_PB_ENDPOINT = (
     "https://service.pdok.nl/kadaster/brk-publiekrechtelijke-beperkingen-wkpb/wfs/v1_0"
@@ -27,7 +27,7 @@ _WFS_MAX_FEATURES = 1000
 
 _RD = "EPSG:28992"
 
-# Stage 1 – BAG: verblijfsobject ID -> adrespunt
+# Stap 1 – BAG: verblijfsobject ID -> adrespunt
 _BAG_VERBLIJFSOBJECTEN_QUERY_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 <wfs:GetFeature service="WFS" version="2.0.0" outputFormat="application/json"
     xmlns:wfs="http://www.opengis.net/wfs/2.0"
@@ -48,7 +48,7 @@ _IDENTIFICATIE_FILTER_TEMPLATE = (
     "</fes:PropertyIsEqualTo>"
 )
 
-# Stage 2 – BRK-PB: adrespunten -> beperkingen
+# Stap 2 – BRK-PB: adrespunten -> beperkingen
 # Een beperking geldt voor haar beperkingsgebied (BAG-pand, BGT-object, handmatige
 # contour of het perceel zelf). De WFS geeft alle monumentbeperkingen terug waarvan
 # het gebied minstens één van de adrespunten raakt; welk adrespunt binnen welk gebied
@@ -206,7 +206,7 @@ async def _query_beperkingen(
     adrespunten: _Adrespunten,
     uitval: Bronuitval,
 ) -> List[Dict[str, Any]]:
-    """Stage 2: vraag de BRK-PB om de beperkingen bij de adrespunten.
+    """Stap 2: vraag de BRK-PB om de beperkingen bij de adrespunten.
 
     Eerst gaan alle requests de deur uit (zie _vraag_beperkingen), daarna wordt per
     request bepaald binnen welke beperkingen de adrespunten liggen. Een fout bij dat
@@ -320,7 +320,7 @@ async def _query_adrespunten(
     *,
     voortgang: Optional[Callable[[int], object]] = None,
 ) -> _Adrespunten:
-    """Stage 1: vraag de BAG om het adrespunt van de verblijfsobjecten.
+    """Stap 1: vraag de BAG om het adrespunt van de verblijfsobjecten.
 
     Per request gaan er maximaal _MAX_PER_BAG_REQUEST verblijfsobjecten mee. Retries,
     splitsen bij falen en overslaan bij een storing: zie Bronuitval.bevraag.

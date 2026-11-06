@@ -194,6 +194,7 @@ class Bronuitval:
             verblijfsobject_ids (List[str]): De verblijfsobject ID's van de request
             vraag (Callable[[List[str]], Awaitable[List[T]]]): Doet de request voor
                 een deel van de ID's en geeft de rijen van het antwoord
+            _diepte (int): Interne recursiediepte bij het splitsen; standaard 0
 
         Returns:
             List[T]: De rijen van alle requests die antwoord gaven, in de volgorde van

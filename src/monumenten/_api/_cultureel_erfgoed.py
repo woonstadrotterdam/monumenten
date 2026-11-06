@@ -58,10 +58,9 @@ async def _sparql(
         context (str): Wat er wordt opgehaald, voor de logregels
 
     Returns:
-        List[Dict[str, Any]]: De rijen van het antwoord
-
-    Raises:
-        Exception: De fout van de laatste poging, ook als het antwoord geen lijst is
+        List[Dict[str, Any]]: De rijen van het antwoord. Een antwoord dat geen lijst
+            is telt als mislukte poging; blijft het uit, dan volgt de fout van de
+            laatste poging.
     """
 
     async def post() -> List[Dict[str, Any]]:
@@ -120,9 +119,6 @@ async def _query_beschermde_gezichten(
 
     Returns:
         List[Dict[str, Any]]: Per gezicht de naam en de WKT-geometrie
-
-    Raises:
-        Exception: De fout van de laatste poging
     """
     return await _sparql(
         session, _BESCHERMDE_GEZICHTEN_QUERY, "beschermde gezichten query"
