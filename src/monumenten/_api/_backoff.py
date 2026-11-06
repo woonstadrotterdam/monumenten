@@ -5,7 +5,7 @@ Een request wordt bij een tijdelijke fout (HTTP 429 of 5xx, of een netwerkfout) 
 RETRY_SLEEP_SECONDS één keer herhaald; bij een 429 wordt de Retry-After van de bron
 gevolgd, anders RATE_LIMIT_SLEEP_SECONDS. Een andere 4xx wordt niet herhaald.
 
-Splitsen (zie _kadaster en _cultureel_erfgoed): faalt een request ook na de retry,
+Splitsen (zie _bronfouten.Bronuitval.bevraag): faalt een request ook na de retry,
 dan wordt de set ID's gehalveerd en elk deel opnieuw geprobeerd, behalve bij een 429,
 omdat splitsen dan alleen meer requests oplevert. Splitsen helpt alleen als een
 kleinere request wel kan lukken. Een bron waarvan MAX_CONSECUTIVE_FAILURES requests

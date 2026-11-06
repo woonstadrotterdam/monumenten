@@ -33,15 +33,14 @@ def _response(error=None):
     ("headers", "expected_sleep"),
     [(None, RATE_LIMIT_SLEEP_SECONDS), ({"Retry-After": "7"}, 7)],
 )
-async def test_429_waits_for_retry_after_or_default(headers, expected_sleep):
+async def test_429_waits_for_retry_after_or_default(headers, expected_sleep, klok):
     session = MagicMock()
     session.post = MagicMock(side_effect=[_response(_error(429, headers)), _response()])
-    sleep = AsyncMock()
+    start = klok.nu
 
-    with patch("monumenten._api._backoff.asyncio.sleep", sleep):
-        assert await _post_wfs_json(session, _BAG_ENDPOINT, "q", "test") == []
+    assert await _post_wfs_json(session, _BAG_ENDPOINT, "q", "test") == []
 
-    sleep.assert_awaited_once_with(expected_sleep)
+    assert klok.nu - start == expected_sleep
 
 
 @pytest.mark.asyncio

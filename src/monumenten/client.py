@@ -156,12 +156,20 @@ class MonumentenClient:
 
         Raises:
             RuntimeError: Als de client niet als context manager wordt gebruikt
-            ValueError: Als er geen enkel geldig verblijfsobject ID is
+            ValueError: Als er geen enkel geldig verblijfsobject ID is, of als de
+                DataFrame al een kolom heeft die process_from_df toevoegt
             BronFoutError: Als een bron voor geen enkel verblijfsobject antwoord gaf
         """
 
         if not self._session:
             raise RuntimeError("Client must be used as a context manager")
+
+        bestaand = [kolom for kolom in _UITVOERKOLOMMEN if kolom in df.columns]
+        if bestaand:
+            raise ValueError(
+                "De DataFrame heeft al kolommen die process_from_df toevoegt: "
+                + ", ".join(bestaand)
+            )
 
         # verblijfsobject_id's moeten 16 cijfers lang zijn, en cijfers 5 en 6 moeten '01', '02' of '03' zijn
         ids = df[verblijfsobject_id_col]

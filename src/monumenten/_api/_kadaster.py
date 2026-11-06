@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import math
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
 import aiohttp
 import geopandas as gpd
@@ -114,6 +114,13 @@ _Adrespunten = Dict[str, Tuple[float, float]]
 _HULPPUNT_VERSCHUIVING_M = 0.01
 
 logger = logging.getLogger("monumenten.api.kadaster")
+
+_T = TypeVar("_T")
+
+
+def _in_groepen(items: List[_T], grootte: int) -> List[List[_T]]:
+    """Verdeel een lijst in opeenvolgende groepen van hooguit ``grootte``."""
+    return [items[i : i + grootte] for i in range(0, len(items), grootte)]
 
 
 async def _post_wfs_json(
@@ -247,8 +254,8 @@ def _verdeel_in_requests(
     if len(punten) > _MAX_PER_BRK_PB_REQUEST:
         return [
             request
-            for i in range(0, len(punten), _MAX_PER_BRK_PB_REQUEST)
-            for request in _verdeel_in_requests(punten[i : i + _MAX_PER_BRK_PB_REQUEST])
+            for groep in _in_groepen(punten, _MAX_PER_BRK_PB_REQUEST)
+            for request in _verdeel_in_requests(groep)
         ]
     xs, ys = zip(*(punt for _, punt in punten))
     omhullende_km2 = (max(xs) - min(xs)) * (max(ys) - min(ys)) / 1e6
@@ -365,9 +372,6 @@ async def _query_adrespunten(
         return gevonden
 
     delen = await asyncio.gather(
-        *(
-            groep(identificaties[i : i + _MAX_PER_BAG_REQUEST])
-            for i in range(0, len(identificaties), _MAX_PER_BAG_REQUEST)
-        )
+        *(groep(ids) for ids in _in_groepen(identificaties, _MAX_PER_BAG_REQUEST))
     )
     return dict(paar for deel in delen for paar in deel)

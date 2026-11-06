@@ -25,6 +25,7 @@ from monumenten._api._cultureel_erfgoed import _query_rijksmonumenten
 from monumenten._api._kadaster import (
     _MAX_PER_BAG_REQUEST,
     _WFS_MAX_FEATURES,
+    _in_groepen,
     _koppel_beperkingen,
     _punten_voor_query,
     _query_adrespunten,
@@ -55,6 +56,7 @@ from monumenten._processing import (
     _process_batch,
     _query,
     _rce_frame,
+    _voeg_namen_samen,
 )
 from monumenten.client import MonumentenClient
 
@@ -1907,6 +1909,38 @@ async def test_client_onverwachte_batchfout_herstelt_in_herkansing():
 
     assert not result[_STATUSSEN].isna().any().any()
     assert bool(result.loc[2, "gemeentelijk_monument"]) is True
+
+
+@pytest.mark.asyncio
+async def test_client_weigert_dataframe_met_uitvoerkolom():
+    """Een DataFrame die al een kolom heeft die process_from_df toevoegt (zoals een
+    eerder resultaat) geeft een duidelijke fout, voordat een bron wordt bevraagd."""
+    df = pd.DataFrame({_ID_KOLOM: _ALLE, "rijksmonument_nummer": "1"})
+    with _mocked_sources() as client:
+        with pytest.raises(ValueError, match="rijksmonument_nummer"):
+            await client.process_from_df(df, _ID_KOLOM)
+
+
+def test_voeg_namen_samen_slaat_lege_waarden_over():
+    """Een lege naam telt niet mee; een verblijfsobject met alleen lege namen krijgt
+    geen rij, en dus pd.NA na de merge."""
+    df = pd.DataFrame(
+        {
+            "identificatie": ["a", "a", "a", "b", "c"],
+            "naam": ["x", None, "y", float("nan"), "z"],
+        }
+    )
+    samen = _voeg_namen_samen(df, "naam")
+    assert samen.to_dict("records") == [
+        {"identificatie": "a", "naam": "x, y"},
+        {"identificatie": "c", "naam": "z"},
+    ]
+
+
+def test_in_groepen():
+    assert _in_groepen([], 2) == []
+    assert _in_groepen([1, 2, 3, 4, 5], 2) == [[1, 2], [3, 4], [5]]
+    assert _in_groepen([1, 2], 5) == [[1, 2]]
 
 
 @pytest.mark.asyncio

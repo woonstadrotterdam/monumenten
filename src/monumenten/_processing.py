@@ -22,6 +22,7 @@ from monumenten._api._cultureel_erfgoed import (
 from monumenten._api._kadaster import (
     _RD,
     _Adrespunten,
+    _in_groepen,
     _query_adrespunten,
     _query_beperkingen,
 )
@@ -425,15 +426,17 @@ def _voeg_namen_samen(df: pd.DataFrame, kolom: str) -> pd.DataFrame:
     """Voeg per identificatie de unieke waarden van ``kolom`` samen met ", ".
 
     Args:
-        df (pd.DataFrame): Rijen met kolommen ``identificatie`` en ``kolom``
+        df (pd.DataFrame): Rijen met kolommen ``identificatie`` en ``kolom``; een
+            lege waarde telt niet mee
         kolom (str): Naam van de kolom die wordt samengevoegd
 
     Returns:
-        pd.DataFrame: Eén rij per identificatie, met de kolommen ``identificatie``
-            en ``kolom``
+        pd.DataFrame: Eén rij per identificatie met een waarde, met de kolommen
+            ``identificatie`` en ``kolom``
     """
     return (
-        df.drop_duplicates(subset=["identificatie", kolom])
+        df.dropna(subset=[kolom])
+        .drop_duplicates(subset=["identificatie", kolom])
         .groupby("identificatie", sort=False)[kolom]
         .agg(", ".join)
         .reset_index()
@@ -450,10 +453,7 @@ def _voeg_frames_samen(frames: List[pd.DataFrame], leeg: pd.DataFrame) -> pd.Dat
 
 
 def _in_batches(verblijfsobject_ids: List[str]) -> List[List[str]]:
-    return [
-        verblijfsobject_ids[i : i + _QUERY_BATCH_GROOTTE]
-        for i in range(0, len(verblijfsobject_ids), _QUERY_BATCH_GROOTTE)
-    ]
+    return _in_groepen(verblijfsobject_ids, _QUERY_BATCH_GROOTTE)
 
 
 def _sorteer_ruimtelijk(
