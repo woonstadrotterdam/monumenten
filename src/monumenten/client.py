@@ -54,9 +54,7 @@ class MonumentenClient:
         if self._owns_session and self._session:
             await self._session.close()
 
-    def _naar_referentiedata(
-        self, row: pd.Series[bool]
-    ) -> Optional[List[Dict[str, object]]]:
+    def _naar_referentiedata(self, row: Any) -> Optional[List[Dict[str, object]]]:
         # Met een niet-bepaalde status zou de lijst onvolledig zijn
         if row.provinciaal_monument is None:
             return None
@@ -284,8 +282,11 @@ class MonumentenClient:
 
         return cast(
             Dict[str, Optional[List[Dict[str, str]]]],
+            # itertuples maakt per rij een namedtuple in plaats van een pd.Series,
+            # wat bij miljoenen rijen vele malen sneller is. _naar_referentiedata
+            # leest de rij via attributen, dus een namedtuple werkt hetzelfde.
             {
-                verblijfsobject_id: self._naar_referentiedata(row)
-                for verblijfsobject_id, row in result_indexed.iterrows()
+                row.Index: self._naar_referentiedata(row)
+                for row in result_indexed.itertuples(name="Rij")
             },
         )
