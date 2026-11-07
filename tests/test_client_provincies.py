@@ -1,5 +1,9 @@
 """Live tests voor provinciale monumenten (Noord-Holland en Drenthe)."""
 
+import os
+import subprocess  # nosec B404
+import sys
+
 import aiohttp
 import pandas as pd
 import pytest
@@ -102,3 +106,34 @@ async def test_provinciegrenzen_pdok():
     assert drenthe.contains(Point(239495.0, 556475.0))  # Kerkbrink 7, Rolde
     # Leiden ligt in de bbox van Noord-Holland, maar niet in de provincie
     assert not noord_holland.contains(Point(93911.705, 464260.065))
+
+
+def test_drenthe_zonder_systeembundel():
+    # CI draait op Linux, waar de systeembundel Sectigo Root R46 wel heeft. Op
+    # macOS mist /etc/ssl/cert.pem die root, waar kaartportaal.drenthe.nl op
+    # eindigt. Met een lege systeembundel faalt deze test als de client certifi
+    # niet meer laadt. aiohttp leest de CA-paden bij de import, daarom een apart
+    # proces.
+    script = (
+        "import asyncio\n"
+        "from monumenten import MonumentenClient\n"
+        "async def main():\n"
+        "    async with MonumentenClient() as client:\n"
+        "        r = await client.process_from_list(['1680010000004810'])\n"
+        "    print(r['1680010000004810']['provinciaal_monument'])\n"
+        "asyncio.run(main())\n"
+    )
+
+    uitvoer = subprocess.run(  # nosec B603
+        [sys.executable, "-c", script],
+        env={
+            **os.environ,
+            "SSL_CERT_FILE": "/geen-bundel",
+            "SSL_CERT_DIR": "/geen-map",
+        },
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+    assert uitvoer.stdout.strip() == "True", uitvoer.stderr[-2000:]

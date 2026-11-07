@@ -26,6 +26,7 @@ license = {file = "LICENSE"}
 dependencies = [
     "aiocache>=0.12.3",
     "aiohttp>=3.10.10",
+    "certifi>=2024.2.2",
     "tqdm>=4.66.5",
     "pandas>=2.0.0",
     "geopandas>=1.0.1",
