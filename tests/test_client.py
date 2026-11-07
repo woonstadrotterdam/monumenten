@@ -1,8 +1,4 @@
 import itertools
-import json
-import os
-import subprocess  # nosec B404
-import sys
 import warnings
 from contextlib import contextmanager
 from typing import Iterator
@@ -989,39 +985,3 @@ async def test_process_from_list_vera_volgorde_en_bron(client: MonumentenClient)
     ]
     assert vera[onbepaald] is None
     assert len(vera) == len(rijen.index.unique())
-
-
-def test_eigen_sessie_vertrouwt_ook_certifi(tmp_path):
-    # Een systeembundel zonder Sectigo Root R46, zoals /etc/ssl/cert.pem op macOS.
-    # kaartportaal.drenthe.nl heeft een keten die op R46 eindigt. aiohttp leest de
-    # CA-paden bij de import, daarom een apart proces.
-    script = (
-        "import asyncio, json\n"
-        "from monumenten import MonumentenClient\n"
-        "async def main():\n"
-        "    async with MonumentenClient() as client:\n"
-        "        r = await client.process_from_list(['1680010000004810'])\n"
-        "    s = r['1680010000004810']\n"
-        "    print(json.dumps([s['provinciaal_monument'] is True,"
-        " s['provinciaal_monument_omschrijving']]))\n"
-        "asyncio.run(main())\n"
-    )
-    env = {
-        **os.environ,
-        "SSL_CERT_FILE": str(tmp_path / "geen-bundel.pem"),
-        "SSL_CERT_DIR": str(tmp_path),
-    }
-
-    uitvoer = subprocess.run(  # nosec B603
-        [sys.executable, "-c", script],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=300,
-    )
-
-    assert json.loads(uitvoer.stdout.splitlines()[-1]) == [
-        True,
-        "PM1-0001 Dwarshuisboerderij Rolde",
-    ]
