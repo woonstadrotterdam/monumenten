@@ -16,14 +16,17 @@ _CULTUREEL_ERFGOED_SPARQL_ENDPOINT = (
 )
 
 # Noemt de RCE een verblijfsobject bij meer dan één rijksmonument, dan telt het
-# numeriek hoogste nummer. ceo:rijksmonumentnummer is een string: een kale MAX
-# vergelijkt alfabetisch, en dan wint "6936" van "520165".
+# numeriek laagste nummer. Dat is meestal de eerste inschrijving en het hoofdobject;
+# hogere nummers zijn vaak later ingeschreven onderdelen, zoals een tuin, beeld of
+# bijgebouw. Bij Dorpsstraat 5 in Aarle-Rixtel is 6936 de kerk en 520165 het beeld
+# ervoor. ceo:rijksmonumentnummer is een string, dus de vergelijking moet numeriek:
+# alfabetisch is "520165" lager dan "6936".
 _RIJKSMONUMENTEN_QUERY_TEMPLATE = """
 PREFIX ceo:<https://linkeddata.cultureelerfgoed.nl/def/ceo#>
 PREFIX bag:<http://bag.basisregistraties.overheid.nl/bag/id/>
 PREFIX rn2:<https://data.cultureelerfgoed.nl/term/id/rn/2/>
 PREFIX xsd:<http://www.w3.org/2001/XMLSchema#>
-SELECT ?identificatie (STR(MAX(xsd:integer(?nummer))) as ?rijksmonument_nummer)
+SELECT ?identificatie (STR(MIN(xsd:integer(?nummer))) as ?rijksmonument_nummer)
 WHERE {{
     ?monument ceo:heeftJuridischeStatus rn2:b2d9a59a-fe1e-4552-9a05-3c2acddff864 ;
               ceo:rijksmonumentnummer ?nummer ;

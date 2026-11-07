@@ -21,12 +21,12 @@ async def client():
 
 
 @pytest.mark.asyncio
-async def test_rijksmonument_nummer_is_numeriek_hoogste(client: MonumentenClient):
-    """#70: de RCE noemt dit verblijfsobject bij rijksmonument 6936 en 520165.
-    Alfabetisch wint 6936, numeriek 520165."""
+async def test_rijksmonument_nummer_is_numeriek_laagste(client: MonumentenClient):
+    """#70: de RCE noemt Dorpsstraat 5 in Aarle-Rixtel bij rijksmonument 6936, de
+    kerk, en 520165, het beeld ervoor. Het laagste nummer is het gebouw zelf."""
     result = await client.process_from_list(["1659010000003181"])
 
-    assert result["1659010000003181"]["rijksmonument_nummer"] == "520165"
+    assert result["1659010000003181"]["rijksmonument_nummer"] == "6936"
 
 
 @pytest.mark.asyncio
@@ -235,11 +235,12 @@ async def test_process_from_df(client: MonumentenClient):
     # Test combined rijksmonument and beschermd gezicht
     assert result.iloc[2]["bag_verblijfsobject_id"] == "0599010000183527"
     assert bool(result.iloc[2]["rijksmonument"]) is True
-    assert result.iloc[2]["rijksmonument_nummer"] == "32807"
+    # Twee pakhuizen in één blok (32741 en 32807): het laagste nummer telt
+    assert result.iloc[2]["rijksmonument_nummer"] == "32741"
     assert result.iloc[2]["rijksmonument_bron"] == "RCE, Kadaster"
     assert (
         result.iloc[2]["rijksmonument_url"]
-        == "https://monumentenregister.cultureelerfgoed.nl/monumenten/32807"
+        == "https://monumentenregister.cultureelerfgoed.nl/monumenten/32741"
     )
     assert bool(result.iloc[2]["rijksbeschermd_gezicht"]) is True
     assert (

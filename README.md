@@ -245,7 +245,7 @@ Alle beperkingen van de RCE (grondslagcodes EWE en EWD) zijn met type `BRK` vast
 
 ### Rijksmonumentnummer
 
-- **Bron RCE (of "RCE, Kadaster"):** het nummer van het monument dat de RCE bij het verblijfsobject noemt. Noemt zij het bij meer dan één monument, dan het numeriek hoogste nummer.
+- **Bron RCE (of "RCE, Kadaster"):** het nummer van het monument dat de RCE bij het verblijfsobject noemt. Noemt zij het bij meer dan één monument, dan het numeriek laagste nummer: meestal de eerste inschrijving en het hoofdobject, en niet een later ingeschreven onderdeel zoals een tuin, beeld of bijgebouw.
 - **Bron "Kadaster":** het Kadaster levert geen monumentnummer, wel de akte waarmee het monument in de openbare registers is ingeschreven (`gebaseerdOpStuk`, bijvoorbeeld `HYP4 82963/052`). De RCE legt per monument dezelfde akte vast. Het verblijfsobject krijgt het nummer van het monument met die akte; de bron blijft "Kadaster".
 
 Het nummer via de akte blijft leeg als het niet eenduidig is:

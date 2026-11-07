@@ -205,10 +205,11 @@ async def test_rijksmonumenten_splits_on_failure():
 
 
 @pytest.mark.asyncio
-async def test_rijksmonumenten_kiest_numeriek_hoogste_nummer():
-    """#70: ceo:rijksmonumentnummer is een string. Bij een verblijfsobject in twee
-    rijksmonumenten won alfabetisch "6936" van "520165"; de query moet numeriek
-    vergelijken."""
+async def test_rijksmonumenten_kiest_numeriek_laagste_nummer():
+    """#70: bij een verblijfsobject in meer dan één rijksmonument telt het numeriek
+    laagste nummer, meestal de eerste inschrijving en het hoofdobject. Ook MIN moet
+    numeriek vergelijken: ceo:rijksmonumentnummer is een string, en alfabetisch is
+    "520165" lager dan "6936"."""
     queries = []
 
     def post(*args, **kwargs):
@@ -221,7 +222,7 @@ async def test_rijksmonumenten_kiest_numeriek_hoogste_nummer():
     await _query_rijksmonumenten(session, ["1659010000003181"], Bronuitval())
 
     (query,) = queries
-    assert "MAX(xsd:integer(?nummer))" in query
+    assert "MIN(xsd:integer(?nummer))" in query
 
 
 @pytest.mark.asyncio
