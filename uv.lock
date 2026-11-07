@@ -502,6 +502,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiocache" },
     { name = "aiohttp" },
+    { name = "certifi" },
     { name = "geopandas" },
     { name = "pandas" },
     { name = "shapely" },
@@ -528,6 +529,7 @@ test = [
 requires-dist = [
     { name = "aiocache", specifier = ">=0.12.3" },
     { name = "aiohttp", specifier = ">=3.10.10" },
+    { name = "certifi", specifier = ">=2024.2.2" },
     { name = "geopandas", specifier = ">=1.0.1" },
     { name = "monumenten", extras = ["test"], marker = "extra == 'dev'" },
     { name = "pandas", specifier = ">=2.0.0" },

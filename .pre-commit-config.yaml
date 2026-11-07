@@ -46,6 +46,7 @@ repos:
         additional_dependencies:
           - "pandas-stubs>=2.0.0"
           - "aiohttp>=3.10.10"
+          - "certifi>=2024.2.2"
           - "types-tqdm>=4.66.5"
           # numpy 2.5+ stubs gebruiken Python 3.12-syntax; wij ondersteunen nog 3.11
           - "numpy<2.5"
