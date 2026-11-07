@@ -23,3 +23,11 @@ _Avoid_: Onbekend, ontbrekend, False
 **Onvolledig bepaald verblijfsobject**:
 Een verblijfsobject waarvan de monumentstatussen niet volledig bepaald konden worden, omdat ten minste één bron geen antwoord gaf of de verwerking mislukte. Het verblijfsobject zelf is niet onvolledig. Alleen de statussen die van die bron afhangen en niet gevonden zijn, zijn daardoor een **Onbepaalde status**; de rest is gewoon `True` of `False`.
 _Avoid_: Onvolledig verblijfsobject, onbepaald verblijfsobject, mislukt verblijfsobject
+
+**Akte**:
+Het stuk in de openbare registers van het Kadaster waarmee een rijksmonument is ingeschreven. De RCE legt per monument dezelfde akte vast, zodat een rijksmonument dat het Kadaster vindt via de akte een monumentnummer krijgt.
+_Avoid_: Stuk, gebaseerdOpStuk, kadasterdeel
+
+**Rijksmonumentbron**:
+De registratie die een verblijfsobject als rijksmonument aanwijst: de RCE als zij het verblijfsobject noemt, het Kadaster als het in een gebied met een rijksmonument-beperking ligt. Een monumentnummer dat via de **Akte** is gevonden, maakt de RCE geen bron.
+_Avoid_: Herkomst, nummerbron

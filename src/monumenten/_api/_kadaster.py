@@ -65,6 +65,8 @@ _BRK_PB_BEPERKINGEN_QUERY_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
   <wfs:Query typeNames="wkpb:pb_multipolygon" srsName="urn:ogc:def:crs:EPSG::28992">
     <wfs:PropertyName>grondslagCode</wfs:PropertyName>
     <wfs:PropertyName>grondslagOmschrijving</wfs:PropertyName>
+    <!-- De akte, bijvoorbeeld "HYP4 82963/052"; de RCE legt per rijksmonument dezelfde vast -->
+    <wfs:PropertyName>gebaseerdOpStuk</wfs:PropertyName>
     <wfs:PropertyName>geom</wfs:PropertyName>
     <fes:Filter>
       <fes:And>
@@ -194,6 +196,7 @@ def _koppel_beperkingen(
             "identificatie",
             "grondslagCode",
             "grondslagOmschrijving",
+            "gebaseerdOpStuk",
         ]
     ).astype(object)
     return [
@@ -201,8 +204,9 @@ def _koppel_beperkingen(
             "identificatie": identificatie,
             "grondslagcode": grondslagcode,
             "grondslag_gemeentelijk_monument": grondslag,
+            "akte": akte,
         }
-        for identificatie, grondslagcode, grondslag in (
+        for identificatie, grondslagcode, grondslag, akte in (
             gekoppeld.where(gekoppeld.notna(), None).itertuples(index=False)
         )
     ]
