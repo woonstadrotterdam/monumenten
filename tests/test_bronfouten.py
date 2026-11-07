@@ -14,6 +14,7 @@ from monumenten._bronfouten import (
     VERWERKING,
     BronFoutError,
     Bronuitval,
+    GeenAdrespuntWarning,
 )
 
 pytestmark = pytest.mark.usefixtures("klok")
@@ -236,3 +237,25 @@ def test_aantal_onvolledig_bepaald_totaal_telt_elk_verblijfsobject_een_keer():
 
     assert uitval.aantal_onvolledig_bepaald_totaal() == 4
     assert "van 4 verblijfsobject(en)" in str(uitval.waarschuwing())
+
+
+def test_waarschuwing_zonder_adrespunt():
+    """Geen waarschuwing als elk verblijfsobject een adrespunt kreeg; anders één
+    met alle ID's gesorteerd in het attribuut en de eerste tien in de melding."""
+    uitval = Bronuitval()
+    assert uitval.waarschuwing_zonder_adrespunt() is None
+
+    ids = [f"0599010000{i:06d}" for i in range(12, 0, -1)]
+    uitval.zonder_adrespunt = set(ids)
+    waarschuwing = uitval.waarschuwing_zonder_adrespunt()
+
+    assert isinstance(waarschuwing, GeenAdrespuntWarning)
+    assert isinstance(waarschuwing, UserWarning)
+    assert waarschuwing.verblijfsobject_ids == {BAG: sorted(ids)}
+    melding = str(waarschuwing)
+    assert melding.startswith("12 verblijfsobject(en) staan niet in de BAG")
+    assert "0599010000000001" in melding
+    assert "0599010000000011" not in melding
+    assert melding.endswith("en 2 andere")
+    # Geen uitval: de onbepaald-waarschuwing blijft weg
+    assert uitval.waarschuwing() is None

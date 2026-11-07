@@ -37,7 +37,11 @@ _MAX_IDS_IN_MELDING = 10
 
 
 class _MetVerblijfsobjectIds(Exception):
-    """Geeft een fout of waarschuwing per bron de verblijfsobject ID's zonder antwoord."""
+    """Geeft een fout of waarschuwing per bron de betrokken verblijfsobject ID's.
+
+    Alle fouten en waarschuwingen van de package hebben zo hetzelfde attribuut
+    ``verblijfsobject_ids``: een dict van bron naar gesorteerde ID's.
+    """
 
     def __init__(
         self,
@@ -73,6 +77,23 @@ class MonumentStatusOnbepaaldWarning(_MetVerblijfsobjectIds, UserWarning):
         verblijfsobject_ids (Optional[Dict[str, List[str]]]): Per bron ("RCE",
             "BAG", "BRK-PB", "verwerking" of een provincie zoals "Noord-Holland")
             de gesorteerde verblijfsobject ID's zonder antwoord
+    """
+
+
+class GeenAdrespuntWarning(_MetVerblijfsobjectIds, UserWarning):
+    """Een deel van de verblijfsobjecten staat niet in de BAG van PDOK.
+
+    De BAG gaf wel antwoord, maar zonder adrespunt: meestal is het verblijfsobject
+    nooit gebouwd (status "Niet gerealiseerd verblijfsobject"), en die staan niet in
+    de BAG WFS. Zonder adrespunt zijn er geen Kadaster-beperkingen, geen
+    rijksbeschermd gezicht en geen provinciaal monument te vinden; die statussen
+    zijn ``False`` en niet ``pd.NA``, omdat de bron wel antwoord gaf.
+    ``rijksmonument`` kan nog ``True`` zijn via de RCE.
+
+    Args:
+        melding (str): Omschrijving van de waarschuwing
+        verblijfsobject_ids (Optional[Dict[str, List[str]]]): Onder "BAG" de
+            gesorteerde verblijfsobject ID's zonder adrespunt
     """
 
 
@@ -112,6 +133,9 @@ class Bronuitval:
         self.mislukt: Dict[str, Set[str]] = {}
         # Bron in mislukt -> de laatste fout waardoor zij geen antwoord gaf
         self.laatste_fout: Dict[str, Exception] = {}
+        # Geen uitval: de BAG gaf antwoord, maar kende deze verblijfsobjecten niet.
+        # Hier vastgelegd zodat de client ze in een eigen waarschuwing kan noemen.
+        self.zonder_adrespunt: Set[str] = set()
 
     def registreer_antwoord(self, bron: str, aantal: int) -> None:
         """Leg vast dat een bron voor een aantal verblijfsobjecten antwoord gaf.
@@ -481,6 +505,29 @@ class Bronuitval:
             "statussen die van die bron afhangen zijn pd.NA. "
             + self._beschrijf(self.mislukt),
             _ids_per_bron(self.mislukt),
+        )
+
+    def waarschuwing_zonder_adrespunt(self) -> Optional[GeenAdrespuntWarning]:
+        """Geef de waarschuwing voor de verblijfsobjecten zonder adrespunt.
+
+        Returns:
+            Optional[GeenAdrespuntWarning]: De waarschuwing, of ``None`` als elk
+                verblijfsobject een adrespunt kreeg
+        """
+        if not self.zonder_adrespunt:
+            return None
+        ids = sorted(self.zonder_adrespunt)
+        genoemd = ", ".join(ids[:_MAX_IDS_IN_MELDING])
+        if len(ids) > _MAX_IDS_IN_MELDING:
+            genoemd += f" en {len(ids) - _MAX_IDS_IN_MELDING} andere"
+        return GeenAdrespuntWarning(
+            f"{len(ids)} verblijfsobject(en) staan niet in de BAG van PDOK, "
+            "meestal omdat ze nooit gebouwd zijn (status 'Niet gerealiseerd "
+            "verblijfsobject'). Zonder adrespunt zijn rijksbeschermd_gezicht, "
+            "gemeentelijk_monument, provinciaal_monument, "
+            "rijksmonument_voorbescherming en de Kadaster-bron van rijksmonument "
+            f"False; rijksmonument kan nog True zijn via de RCE: {genoemd}",
+            {BAG: ids},
         )
 
     def _beschrijf(self, mislukt: Dict[str, Set[str]]) -> str:

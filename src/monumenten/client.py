@@ -135,6 +135,10 @@ class MonumentenClient:
                 gaf, de verwerking van een batch onverwacht mislukte of de monumenten
                 van de provincie niet opgehaald konden worden. In dat geval volgt ook
                 één ``MonumentStatusOnbepaaldWarning`` met per bron de betrokken ID's.
+                Een verblijfsobject dat niet in de BAG van PDOK staat (meestal
+                "Niet gerealiseerd verblijfsobject") krijgt ``False`` voor de
+                statussen die het adrespunt nodig hebben; die ID's noemt één
+                ``GeenAdrespuntWarning``.
 
         Raises:
             RuntimeError: Als de client niet als context manager wordt gebruikt
@@ -165,9 +169,12 @@ class MonumentenClient:
             self._session,
             valid_id_df.loc[:, verblijfsobject_id_col].drop_duplicates().tolist(),
         )
-        waarschuwing = uitval.waarschuwing()
-        if waarschuwing is not None:
-            warnings.warn(waarschuwing, stacklevel=2)
+        for waarschuwing in (
+            uitval.waarschuwing(),
+            uitval.waarschuwing_zonder_adrespunt(),
+        ):
+            if waarschuwing is not None:
+                warnings.warn(waarschuwing, stacklevel=2)
         merged = pd.merge(
             valid_id_df,
             results,

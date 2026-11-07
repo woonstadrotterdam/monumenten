@@ -21,7 +21,11 @@ from monumenten._api._cultureel_erfgoed import (
     _query_rijksmonumenten,
 )
 from monumenten._api._kadaster import (
+    _GEMEENTELIJK_GRONDSLAGCODES,
     _RD,
+    _RELEVANTE_GRONDSLAGCODES,
+    _RIJKSMONUMENT_GRONDSLAGCODES,
+    _VOORBESCHERMING_GRONDSLAGCODES,
     _Adrespunten,
     _query_adrespunten,
     _query_beperkingen,
@@ -45,14 +49,6 @@ _BATCH_CONCURRENCY = 4
 # Bereik van RD-coördinaten in Nederland: minx, miny, maxx, maxy
 _RD_BEREIK = (0, 300_000, 300_000, 650_000)
 
-# Kadaster grondslagcodes (publiekrechtelijke beperkingen, BRK)
-# EWE: inschrijving in het rijksmonumentenregister -> rijksmonument (art. 1.1 Erfgoedwet)
-_RIJKSMONUMENT_GRONDSLAGCODES = ["EWE"]
-# EWD: toezending ontwerpbesluit aanwijzing (voorbescherming) -> nog geen rijksmonument
-_VOORBESCHERMING_GRONDSLAGCODES = ["EWD"]
-# GG/GWA: gemeentelijk monument (GWA bundelt voorbescherming, aanwijzing en afschrift)
-_GEMEENTELIJK_GRONDSLAGCODES = ["GG", "GWA"]
-
 _WGS84 = "EPSG:4326"
 
 # Marge om de provinciegrens. Enkele Drentse monumentvlakken steken tot 1,3 m
@@ -61,14 +57,6 @@ _WGS84 = "EPSG:4326"
 # kandidaten, een te krappe geeft stil False.
 _GRENS_BUFFER_METER = 100
 
-
-# Alle grondslagcodes waar een status van afhangt; andere beperkingen vallen per batch
-# al weg, zodat bij miljoenen verblijfsobjecten alleen deze rijen bewaard blijven
-_RELEVANTE_GRONDSLAGCODES = (
-    _RIJKSMONUMENT_GRONDSLAGCODES
-    + _VOORBESCHERMING_GRONDSLAGCODES
-    + _GEMEENTELIJK_GRONDSLAGCODES
-)
 
 _RCE_KOLOMMEN = ["identificatie", "rijksmonument_nummer"]
 _BEPERKING_KOLOMMEN = [
@@ -101,6 +89,8 @@ def _beperkingen_frame(beperkingen: List[Dict[str, Any]]) -> DataFrame:
     beperkingen_df = pd.DataFrame(beperkingen, columns=_BEPERKING_KOLOMMEN).astype(
         {"identificatie": "string"}
     )
+    # Andere beperkingen vallen per batch al weg, zodat bij miljoenen
+    # verblijfsobjecten alleen de rijen bewaard blijven waar een status van afhangt
     return beperkingen_df[
         beperkingen_df["grondslagcode"].isin(_RELEVANTE_GRONDSLAGCODES)
     ].reset_index(drop=True)
@@ -737,16 +727,19 @@ async def _query(
     uitval.controleer()
 
     # Na de herkansing: pas dan is bekend welke verblijfsobjecten echt niet in de
-    # BAG staan. Voor wie de BAG geen antwoord gaf volgt pd.NA en de waarschuwing.
+    # BAG staan. Voor wie de BAG geen antwoord gaf volgt pd.NA en de waarschuwing;
+    # wie de BAG niet kent, noemt de client in een GeenAdrespuntWarning.
     bag_mislukt = uitval.mislukt.get(BAG, set())
-    zonder_adrespunt = sum(
-        1 for i in verblijfsobject_ids if i not in adrespunten and i not in bag_mislukt
-    )
-    if zonder_adrespunt:
+    uitval.zonder_adrespunt = {
+        i for i in verblijfsobject_ids if i not in adrespunten and i not in bag_mislukt
+    }
+    if uitval.zonder_adrespunt:
+        # Ook in de log, voor wie warnings niet opvangt (zoals een pipeline die
+        # alleen de log bewaart)
         logger.warning(
-            "%d van %d verblijfsobjecten hebben geen adrespunt uit de BAG; die krijgen "
-            "geen Kadaster-beperking, geen beschermd gezicht en geen provinciaal monument",
-            zonder_adrespunt,
+            "%d van %d verblijfsobjecten staan niet in de BAG van PDOK en hebben geen "
+            "adrespunt; zie GeenAdrespuntWarning",
+            len(uitval.zonder_adrespunt),
             len(verblijfsobject_ids),
         )
 
@@ -778,7 +771,7 @@ async def _query(
 
     # The derivation already separates the data correctly:
     # - EWE rows go to rijksmonumenten (EWD only sets rijksmonument_voorbescherming)
-    # - GG/GWA rows go to gemeentelijke monumenten
+    # - GWA rows go to gemeentelijke monumenten
     # We only remove truly duplicate rows (all columns identical) to preserve unique information
 
     if not rijksmonumenten_result.empty:
