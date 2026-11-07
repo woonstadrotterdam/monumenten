@@ -211,7 +211,7 @@ flowchart TB
 | **EWD** | Erfgoedwet: Ontwerpbesluit aanwijzing (voorbescherming)                                              | Voorbescherming rijksmonument (geen rijksmonument) |
 | **GWA** | Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing en afschrift in één code) | Gemeentelijk monument                              |
 
-Andere monumentcodes komen in de BRK-PB niet voor: op 6 november 2026 hadden alle 118.808 beperkingen met "monument" in de grondslagomschrijving een van deze drie codes. Een dagelijkse test tegen de live BRK-PB faalt zodra er een beperking bij komt met "monument", "erfgoed", "beschermd", "cultu" of "gezicht" in de omschrijving en een andere code; alleen de gedoogplichten voor archeologisch onderzoek (`EW` en `EWC`) zijn bewust uitgezonderd. De oude code `GG` (Gemeentewet: Besluit monument) werd tot en met 3.0.0b1 ook bevraagd, maar had geen enkele beperking.
+De gedoogplichten voor archeologisch onderzoek (`EW` en `EWC`) zijn ook erfgoedcodes, maar geven geen monumentstatus en worden niet bevraagd.
 
 ### Beperkingsgebied
 
@@ -230,7 +230,7 @@ Hoe nauwkeurig dat werkt, hangt af van hoe het beperkingsgebied is vastgelegd. H
 
 Alle beperkingen van de RCE (grondslagcodes EWE en EWD) zijn met type `BRK` vastgelegd. Bij een rijksmonument met bron "Kadaster" kan het daarom zo zijn dat niet dit gebouw, maar een ander gebouw op hetzelfde perceel het eigenlijke monument is.
 
-Een adrespunt dat net buiten het beperkingsgebied ligt, hoort vrijwel altijd bij een buurpand. Gemeten op 6 november 2026, op 380 adressen die door deze regel hun rijksmonumentstatus verloren: van de 91 adressen op 1 tot 3 m van het gebied lag bij 59 minder dan een tiende van het eigen pand in het gebied, en de RCE bevestigde de status bij minder dan een op de tien. Een marge om het gebied zou dus vooral buurpanden de status geven. Wel mist de regel een klein aantal adressen in een groot pand dat grotendeels in het gebied ligt, terwijl het adrespunt erbuiten valt (5% van de verdwenen rijksmonumenten, 3% van de verdwenen gemeentelijke monumenten).
+Er geldt geen marge rond het gebied: een adrespunt dat net buiten het gebied ligt, hoort meestal bij een buurpand. Daardoor mist de package wel een monument in een groot pand dat grotendeels in het gebied ligt, terwijl het adrespunt erbuiten valt.
 
 ### Endpoints
 
@@ -288,7 +288,7 @@ De BAG staat overal bij omdat zij het adrespunt levert. Een rijksmonument dat de
 
 - De statuskolommen hebben het nullable pandas-dtype `boolean`. In `process_from_list` is een niet-bepaalde status `None`; in VERA-referentiedataformaat is dan de hele value van het verblijfsobject `None` in plaats van een lijst, omdat die lijst onvolledig zou zijn.
 - Blijft `rijksmonument` `True` doordat één bron de status geeft terwijl de andere geen antwoord gaf, dan noemt `rijksmonument_bron` alleen de bron die antwoord gaf.
-- Een ID dat niet in de BAG voorkomt is geen fout maar een geldig leeg antwoord. Zonder adrespunt zijn `rijksmonument_voorbescherming`, `rijksbeschermd_gezicht`, `gemeentelijk_monument` en `provinciaal_monument` `False`, en `rijksmonument` alleen `True` als de RCE het verblijfsobject koppelt. Er volgt één `GeenAdrespuntWarning`, met de ID's onder `"BAG"` in het attribuut `verblijfsobject_ids` (net als bij de andere waarschuwingen een dict van bron naar ID's), en een logregel met het aantal. Meestal gaat het om verblijfsobjecten die nooit gebouwd zijn (status "Niet gerealiseerd verblijfsobject"): die staan niet in de BAG WFS van PDOK. In de BAG-extract van 8 oktober 2026 waren dat er 77.019.
+- Een ID dat niet in de BAG van PDOK voorkomt, meestal een verblijfsobject dat nooit gebouwd is, is geen fout maar een geldig leeg antwoord. Zonder adrespunt is `rijksmonument` alleen `True` als de RCE het verblijfsobject koppelt; de andere statussen zijn `False`. De ID's staan in een `GeenAdrespuntWarning`, onder `"BAG"` in `verblijfsobject_ids`.
 
 Wie bij gedeeltelijk falen liever een fout krijgt dan een resultaat met `pd.NA`, maakt van de waarschuwing een fout:
 
