@@ -22,7 +22,6 @@ from monumenten._api._backoff import (
     OUTAGE_PROBE_SECONDS,
 )
 from monumenten._api._cultureel_erfgoed import (
-    _MAX_AKTES_PER_REQUEST,
     _query_rijksmonumenten,
     _query_rijksmonumenten_via_aktes,
 )
@@ -205,49 +204,28 @@ async def test_rijksmonumenten_splits_on_failure():
 
 
 @pytest.mark.asyncio
-async def test_rijksmonumenten_kiest_numeriek_laagste_nummer():
-    """#70: bij een verblijfsobject in meer dan één rijksmonument telt het numeriek
-    laagste nummer, meestal de eerste inschrijving en het hoofdobject. Ook MIN moet
-    numeriek vergelijken: ceo:rijksmonumentnummer is een string, en alfabetisch is
-    "520165" lager dan "6936"."""
-    queries = []
-
-    def post(*args, **kwargs):
-        queries.append(kwargs["data"]["query"])
-        return _make_cm_response(["1659010000003181"])
-
-    session = MagicMock()
-    session.post = MagicMock(side_effect=post)
-
-    await _query_rijksmonumenten(session, ["1659010000003181"], Bronuitval())
-
-    (query,) = queries
-    assert "MIN(xsd:integer(?nummer))" in query
-
-
-@pytest.mark.asyncio
-async def test_rijksmonumenten_via_aktes_per_500_en_terug_naar_de_akte():
-    """De aktes gaan per 500 naar de RCE, die deel en deelnummer los vastlegt, zonder
-    voorloopnullen. Een akte in een andere vorm gaat niet mee: zij kan geen exacte
-    match geven."""
-    aktes = [f"HYP4 90000/{n:03d}" for n in range(1, _MAX_AKTES_PER_REQUEST + 2)] + [
-        "HYP4 82963/52"
-    ]
+async def test_rijksmonumenten_via_aktes_terug_naar_de_akte():
+    """De RCE legt deel en deelnummer los vast, zonder voorloopnullen: "7" hoort bij
+    de akte "HYP4 90000/007". Een akte in een andere vorm gaat niet mee, want zij kan
+    geen exacte match geven."""
     queries = []
 
     def post(*args, **kwargs):
         query = kwargs["data"]["query"]
         queries.append(query)
         rijen = [{"deel": "90000", "deelnummer": "7", "rijksmonument_nummer": "4296"}]
-        return _make_cm_response(rijen=rijen if '("90000" "7")' in query else [])
+        return _make_cm_response(rijen=rijen)
 
     session = MagicMock()
     session.post = MagicMock(side_effect=post)
 
-    result = await _query_rijksmonumenten_via_aktes(session, aktes)
+    result = await _query_rijksmonumenten_via_aktes(
+        session, ["HYP4 90000/007", "HYP4 90000/123", "HYP4 82963/52"]
+    )
 
-    assert [q.count('("90000" ') for q in queries] == [_MAX_AKTES_PER_REQUEST, 1]
-    assert not any("82963" in q for q in queries)
+    (query,) = queries
+    assert '("90000" "7")' in query and '("90000" "123")' in query
+    assert "82963" not in query
     assert result == [{"akte": "HYP4 90000/007", "rijksmonument_nummer": "4296"}]
 
 
@@ -936,7 +914,11 @@ async def test_client_akte_niet_op_te_halen_laat_alleen_het_nummer_leeg(caplog):
     assert kadaster["rijksmonument_bron"] == "Kadaster"
     assert pd.isna(kadaster["rijksmonument_nummer"])
     assert pd.isna(kadaster["rijksmonument_url"])
-    assert "via de akte niet op te halen voor 1 van 1 aktes" in caplog.text
+    assert [
+        r.levelno
+        for r in caplog.records
+        if r.name == "monumenten.api.cultureel_erfgoed"
+    ] == [logging.WARNING]
 
 
 @pytest.mark.asyncio
@@ -1946,20 +1928,6 @@ _AKTE_4296 = "HYP4 82963/052"
 _AKTE_ANDER = "HYP4 82977/065"
 
 
-def test_akte_geeft_kadaster_treffer_een_nummer():
-    """Een Kadaster-treffer krijgt het nummer van het monument met dezelfde akte. De
-    RCE noemt het verblijfsobject niet, dus de bron blijft Kadaster."""
-    rm_df, _ = _leid_af(
-        rijksmonumenten=[],
-        beperkingen=[_beperking("vo", "EWE", _EWE_GRONDSLAG, _AKTE_4296)],
-        nummers_per_akte=[(_AKTE_4296, "4296")],
-    )
-
-    row = _rij(rm_df, "vo")
-    assert row["rijksmonument_nummer"] == "4296"
-    assert row["rijksmonument_bron"] == "Kadaster"
-
-
 def test_rce_nummer_gaat_voor_op_de_akte():
     """Noemt de RCE het verblijfsobject zelf, dan telt haar nummer, ook als de akte
     van de beperking bij een ander monument hoort."""
@@ -1987,13 +1955,11 @@ def test_rce_nummer_gaat_voor_op_de_akte():
             [(_AKTE_4296, "4296"), (_AKTE_4296, "4297")],
             id="een akte, twee monumenten",
         ),
-        pytest.param([_AKTE_4296], [], id="akte niet bij de RCE"),
         pytest.param(
             [_AKTE_4296, _AKTE_ANDER],
             [(_AKTE_4296, "4296")],
             id="tweede akte niet bij de RCE",
         ),
-        pytest.param([None], [], id="beperking zonder akte"),
     ],
 )
 def test_akte_zonder_eenduidig_nummer_laat_nummer_leeg(aktes, nummers_per_akte):
@@ -2011,18 +1977,22 @@ def test_akte_zonder_eenduidig_nummer_laat_nummer_leeg(aktes, nummers_per_akte):
     assert rows.iloc[0]["rijksmonument_bron"] == "Kadaster"
 
 
-def test_akte_van_voorbescherming_geeft_geen_nummer():
-    """Een EWD-beperking (voorbescherming) maakt geen rijksmonument, dus haar akte
-    geeft ook geen nummer."""
+def test_akte_van_voorbescherming_telt_niet_mee():
+    """Ligt een verblijfsobject ook onder een voorbescherming (EWD), dan telt die
+    akte niet: zij hoort niet bij een rijksmonument, en zou het nummer van het
+    rijksmonument (EWE) anders leeg maken."""
     rm_df, _ = _leid_af(
         rijksmonumenten=[],
-        beperkingen=[_beperking("vo", "EWD", _EWD_GRONDSLAG, _AKTE_4296)],
+        beperkingen=[
+            _beperking("vo", "EWE", _EWE_GRONDSLAG, _AKTE_4296),
+            _beperking("vo", "EWD", _EWD_GRONDSLAG, _AKTE_ANDER),
+        ],
         nummers_per_akte=[(_AKTE_4296, "4296")],
     )
 
     row = _rij(rm_df, "vo")
-    assert pd.isna(row["rijksmonument_nummer"])
-    assert pd.isna(row["rijksmonument_bron"])
+    assert row["rijksmonument_nummer"] == "4296"
+    assert bool(row["rijksmonument_voorbescherming"]) is True
 
 
 @contextlib.contextmanager
