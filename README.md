@@ -64,6 +64,12 @@ flowchart TB
             R5["rijksmonumentnummer"]
         end
 
+        subgraph RCE_AK["Rijksmonumenten via akte"]
+            A1["Monument"]
+            A2["kadasterdeel +<br>kadasterdeelnummer"]
+            A3["rijksmonumentnummer"]
+        end
+
         subgraph RCE_BG["Beschermde Gezichten Query"]
             G1["Gezicht"]
             G2["GezichtGeometrie"]
@@ -88,6 +94,7 @@ flowchart TB
             K6["grondslagCode"]
             K7["grondslagOmschrijving"]
             K8["Beperkingsgebied"]
+            K9["gebaseerdOpStuk<br>(akte)"]
         end
 
     end
@@ -151,6 +158,13 @@ flowchart TB
     K5 -->|"grondslagCode"| K6
     K5 -->|"grondslagOmschrijving"| K7
     K5 -->|"geom"| K8
+    K5 -->|"gebaseerdOpStuk"| K9
+
+    %% RCE Rijksmonumenten via akte (alleen voor Kadaster-treffers zonder RCE-nummer)
+    K9 -->|"VALUES (?deel ?deelnummer)"| A2
+    A1 -->|"ceo:kadasterdeel/ceo:kadasterdeelnummer"| A2
+    A1 -->|"ceo:rijksmonumentnummer"| A3
+    A3 --> P1
 
     %% Processing
     B2 --> P0
@@ -228,6 +242,17 @@ Hoe nauwkeurig dat werkt, hangt af van hoe het beperkingsgebied is vastgelegd. H
 | `BRK`                             | het hele perceel (of meerdere percelen), zonder aan te geven welk gebouw bedoeld is | alle adressen waarvan het adrespunt op het perceel ligt; gebouwen op hetzelfde perceel zijn niet te onderscheiden |
 
 Alle beperkingen van de RCE (grondslagcodes EWE en EWD) zijn met type `BRK` vastgelegd. Bij een rijksmonument met bron "Kadaster" kan het daarom zo zijn dat niet dit gebouw, maar een ander gebouw op hetzelfde perceel het eigenlijke monument is.
+
+### Rijksmonumentnummer
+
+- **Bron RCE (of "RCE, Kadaster"):** het nummer van het monument dat de RCE bij het verblijfsobject noemt. Noemt zij het bij meer dan één monument, dan het numeriek hoogste nummer.
+- **Bron "Kadaster":** het Kadaster levert geen monumentnummer, wel de akte waarmee het monument in de openbare registers is ingeschreven (`gebaseerdOpStuk`, bijvoorbeeld `HYP4 82963/052`). De RCE legt per monument dezelfde akte vast. Het verblijfsobject krijgt het nummer van het monument met die akte; de bron blijft "Kadaster".
+
+Het nummer via de akte blijft leeg als het niet eenduidig is:
+
+- de aktes van het verblijfsobject horen bij meer dan één monument, meestal omdat er meerdere monumenten op hetzelfde perceel staan;
+- de RCE legt de akte bij meer dan één monument vast, of bij geen enkel monument (bijvoorbeeld door een afwijkend kadasterdeel);
+- de RCE gaf geen antwoord op de vraag naar de akte. Dat staat dan in de log; de status `rijksmonument` blijft gewoon `True`, en er volgt geen `MonumentStatusOnbepaaldWarning`.
 
 ### Endpoints
 

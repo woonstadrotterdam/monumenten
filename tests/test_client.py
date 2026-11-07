@@ -21,6 +21,15 @@ async def client():
 
 
 @pytest.mark.asyncio
+async def test_rijksmonument_nummer_is_numeriek_hoogste(client: MonumentenClient):
+    """#70: de RCE noemt dit verblijfsobject bij rijksmonument 6936 en 520165.
+    Alfabetisch wint 6936, numeriek 520165."""
+    result = await client.process_from_list(["1659010000003181"])
+
+    assert result["1659010000003181"]["rijksmonument_nummer"] == "520165"
+
+
+@pytest.mark.asyncio
 async def test_process_from_list(client: MonumentenClient):
     bag_verblijfsobject_ids = [
         "0599010000360091",  # rijksmonument
@@ -111,12 +120,12 @@ async def test_process_from_list(client: MonumentenClient):
         == "Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift)"
     )
 
-    # Test rijksmonument volgens kadaster maar niet RCE
+    # Test rijksmonument volgens kadaster maar niet RCE: het nummer komt via de akte
     assert "0599010000341377" in result
     assert isinstance(result["0599010000341377"], dict)
     assert result["0599010000341377"]["rijksmonument"] is True
     assert result["0599010000341377"]["rijksmonument_bron"] == ["Kadaster"]
-    assert result["0599010000341377"]["rijksmonument_nummer"] is None
+    assert result["0599010000341377"]["rijksmonument_nummer"] == "513884"
     assert result["0599010000341377"]["rijksbeschermd_gezicht"] is False
     assert result["0599010000341377"]["rijksbeschermd_gezicht_naam"] is None
     assert result["0599010000341377"]["gemeentelijk_monument"] is False
@@ -257,11 +266,11 @@ async def test_process_from_df(client: MonumentenClient):
         == "Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift)"
     )
 
-    # Test rijksmonument volgens kadaster maar niet RCE
+    # Test rijksmonument volgens kadaster maar niet RCE: het nummer komt via de akte
     assert result.iloc[5]["bag_verblijfsobject_id"] == "0599010000341377"
     assert bool(result.iloc[5]["rijksmonument"]) is True
     assert result.iloc[5]["rijksmonument_bron"] == "Kadaster"
-    assert pd.isna(result.iloc[5]["rijksmonument_nummer"])
+    assert result.iloc[5]["rijksmonument_nummer"] == "513884"
     assert bool(result.iloc[5]["rijksbeschermd_gezicht"]) is False
     assert pd.isna(result.iloc[5]["rijksbeschermd_gezicht_naam"])
     assert bool(result.iloc[5]["gemeentelijk_monument"]) is False
@@ -334,8 +343,12 @@ async def test_process_from_list_duplicate_handling(client: MonumentenClient):
     assert result["1916010000074542"]["rijksmonument"] is True
     assert result["1916010000074542"]["gemeentelijk_monument"] is True
     assert result["1916010000074542"]["rijksmonument_bron"] == ["Kadaster"]
-    assert result["1916010000074542"]["rijksmonument_nummer"] is None
-    assert result["1916010000074542"]["rijksmonument_url"] is None
+    # Sluisplein 16; de RCE noemt alleen nummer 14, het Kadaster het hele perceel
+    assert result["1916010000074542"]["rijksmonument_nummer"] == "25718"
+    assert (
+        result["1916010000074542"]["rijksmonument_url"]
+        == "https://monumentenregister.cultureelerfgoed.nl/monumenten/25718"
+    )
     assert result["1916010000074542"]["grondslag_gemeentelijk_monument"] is not None
     assert (
         "Gemeentewet" in result["1916010000074542"]["grondslag_gemeentelijk_monument"]
@@ -401,7 +414,7 @@ async def test_process_from_df_duplicate_handling(client: MonumentenClient):
     assert bool(row["rijksmonument"]) is True
     assert bool(row["gemeentelijk_monument"]) is True
     assert row["rijksmonument_bron"] == "Kadaster"
-    assert pd.isna(row["rijksmonument_nummer"])
+    assert row["rijksmonument_nummer"] == "25718"
     assert not pd.isna(row["grondslag_gemeentelijk_monument"])
     assert "Gemeentewet" in row["grondslag_gemeentelijk_monument"]
     assert bool(row["rijksbeschermd_gezicht"]) is True

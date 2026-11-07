@@ -21,7 +21,11 @@ from monumenten._api._backoff import (
     MIN_BATCH_SIZE,
     OUTAGE_PROBE_SECONDS,
 )
-from monumenten._api._cultureel_erfgoed import _query_rijksmonumenten
+from monumenten._api._cultureel_erfgoed import (
+    _MAX_AKTES_PER_REQUEST,
+    _query_rijksmonumenten,
+    _query_rijksmonumenten_via_aktes,
+)
 from monumenten._api._kadaster import (
     _MAX_PER_BAG_REQUEST,
     _WFS_MAX_FEATURES,
@@ -52,6 +56,7 @@ from monumenten._processing import (
     _get_provinciegrenzen,
     _bepaal_beschermde_gezichten,
     _bepaal_rijks_en_gemeentelijke_monumenten,
+    _akte_nummers_frame,
     _beperkingen_frame,
     _process_batch,
     _query,
@@ -150,8 +155,11 @@ async def test_query_sorteert_batches_ruimtelijk(empty_geodataframe):
     assert set(result["identificatie"]) == {*adrespunten, "onbekend"}
 
 
-def _make_cm_response(identificaties=None, fail=False):
-    """Return a synchronous context manager mock for session.post(...)."""
+def _make_cm_response(identificaties=None, fail=False, rijen=None):
+    """Return a synchronous context manager mock for session.post(...).
+
+    The RCE answers with rijksmonument 1 for every identificatie, or with ``rijen``.
+    """
     resp = MagicMock()
     if fail:
         resp.raise_for_status = MagicMock(side_effect=RuntimeError("transient fail"))
@@ -162,6 +170,8 @@ def _make_cm_response(identificaties=None, fail=False):
                 {"identificatie": i, "rijksmonument_nummer": "1"}
                 for i in (identificaties or [])
             ]
+            if rijen is None
+            else rijen
         )
     resp.__aenter__ = AsyncMock(return_value=resp)
     resp.__aexit__ = AsyncMock(return_value=None)
@@ -192,6 +202,52 @@ async def test_rijksmonumenten_splits_on_failure():
     assert len(post_calls) == 3
     assert len(result) == 2
     assert {r["identificatie"] for r in result} == {"id1", "id2"}
+
+
+@pytest.mark.asyncio
+async def test_rijksmonumenten_kiest_numeriek_hoogste_nummer():
+    """#70: ceo:rijksmonumentnummer is een string. Bij een verblijfsobject in twee
+    rijksmonumenten won alfabetisch "6936" van "520165"; de query moet numeriek
+    vergelijken."""
+    queries = []
+
+    def post(*args, **kwargs):
+        queries.append(kwargs["data"]["query"])
+        return _make_cm_response(["1659010000003181"])
+
+    session = MagicMock()
+    session.post = MagicMock(side_effect=post)
+
+    await _query_rijksmonumenten(session, ["1659010000003181"], Bronuitval())
+
+    (query,) = queries
+    assert "MAX(xsd:integer(?nummer))" in query
+
+
+@pytest.mark.asyncio
+async def test_rijksmonumenten_via_aktes_per_500_en_terug_naar_de_akte():
+    """De aktes gaan per 500 naar de RCE, die deel en deelnummer los vastlegt, zonder
+    voorloopnullen. Een akte in een andere vorm gaat niet mee: zij kan geen exacte
+    match geven."""
+    aktes = [f"HYP4 90000/{n:03d}" for n in range(1, _MAX_AKTES_PER_REQUEST + 2)] + [
+        "HYP4 82963/52"
+    ]
+    queries = []
+
+    def post(*args, **kwargs):
+        query = kwargs["data"]["query"]
+        queries.append(query)
+        rijen = [{"deel": "90000", "deelnummer": "7", "rijksmonument_nummer": "4296"}]
+        return _make_cm_response(rijen=rijen if '("90000" "7")' in query else [])
+
+    session = MagicMock()
+    session.post = MagicMock(side_effect=post)
+
+    result = await _query_rijksmonumenten_via_aktes(session, aktes)
+
+    assert [q.count('("90000" ') for q in queries] == [_MAX_AKTES_PER_REQUEST, 1]
+    assert not any("82963" in q for q in queries)
+    assert result == [{"akte": "HYP4 90000/007", "rijksmonument_nummer": "4296"}]
 
 
 def _bag_response(identificaties):
@@ -355,6 +411,7 @@ def test_koppel_beperkingen_alleen_binnen_beperkingsgebied():
         "properties": {
             "grondslagCode": "GWA",
             "grondslagOmschrijving": "Gemeentewet: Aanwijzing gemeentelijk monument",
+            "gebaseerdOpStuk": "HYP4 12345/001",
         },
         "geometry": {
             "type": "Polygon",
@@ -371,11 +428,13 @@ def test_koppel_beperkingen_alleen_binnen_beperkingsgebied():
             "identificatie": "binnen",
             "grondslagcode": "GWA",
             "grondslag_gemeentelijk_monument": "Gemeentewet: Aanwijzing gemeentelijk monument",
+            "akte": "HYP4 12345/001",
         },
         {
             "identificatie": "buiten",
             "grondslagcode": None,
             "grondslag_gemeentelijk_monument": None,
+            "akte": None,
         },
     ]
 
@@ -419,7 +478,7 @@ async def test_process_batch_zonder_adrespunten_houdt_rce_rijksmonumenten():
             AsyncMock(), ["ligplaats", "onbekend"], {}, Bronuitval()
         )
     rijksmonumenten, gemeentelijk = _bepaal_rijks_en_gemeentelijke_monumenten(
-        rce_df, beperkingen_df
+        rce_df, beperkingen_df, _akte_nummers_frame([])
     )
 
     assert rijksmonumenten.to_dict("records") == [
@@ -710,7 +769,7 @@ def _pos(vo_id):
     return f"<gml:pos>{x} {y}</gml:pos>"
 
 
-def _beperking_feature(vo_id, grondslagcode, grondslag):
+def _beperking_feature(vo_id, grondslagcode, grondslag, akte=None):
     """A beperking whose gebied is a small square around the adrespunt."""
     x, y = _ADRESPUNT[vo_id]
     return {
@@ -718,6 +777,7 @@ def _beperking_feature(vo_id, grondslagcode, grondslag):
         "properties": {
             "grondslagCode": grondslagcode,
             "grondslagOmschrijving": grondslag,
+            "gebaseerdOpStuk": akte,
         },
         "geometry": {
             "type": "Polygon",
@@ -737,24 +797,33 @@ def _beperking_feature(vo_id, grondslagcode, grondslag):
 _BEPERKINGEN = {
     _VO_GEMEENTE: _beperking_feature(_VO_GEMEENTE, "GWA", "Gemeentewet: Aanwijzing"),
     _VO_KADASTER_RIJKS: _beperking_feature(
-        _VO_KADASTER_RIJKS, "EWE", "Erfgoedwet: Afschrift"
+        _VO_KADASTER_RIJKS, "EWE", "Erfgoedwet: Afschrift", "HYP4 82963/052"
     ),
 }
+# The RCE registers rijksmonument 4296 with the akte of the EWE above
+_RCE_AKTE = {"deel": "82963", "deelnummer": "52", "rijksmonument_nummer": "4296"}
 
 
 @contextlib.contextmanager
-def _mocked_sources(rce_down=(), bag_down=(), brk_pb_down=()):
+def _mocked_sources(rce_down=(), bag_down=(), brk_pb_down=(), rce_aktes_down=False):
     """Yield a client whose sources are mocked for the verblijfsobjecten above.
 
     A source fails every request that contains one of its ``*_down`` IDs, so after
     splitting exactly those IDs stay unanswered. The collections are read at every
-    request: a test can bring a source back by emptying its list.
+    request: a test can bring a source back by emptying its list. With
+    ``rce_aktes_down`` the RCE fails every request for the aktes.
     """
 
     def rce_post(*args, **kwargs):
         query = kwargs["data"]["query"]
         if any(vo_id in query for vo_id in rce_down):
             return _make_cm_response(fail=True)
+        if "kadasterdeel" in query:
+            if rce_aktes_down:
+                return _make_cm_response(fail=True)
+            return _make_cm_response(
+                rijen=[_RCE_AKTE] if '("82963" "52")' in query else []
+            )
         return _make_cm_response([i for i in (_VO_RIJKS,) if i in query])
 
     async def kadaster_post(session, endpoint, query, context):
@@ -840,6 +909,33 @@ async def test_client_all_sources_answer():
         "Kadaster",
         "",
     ]
+    # The rijksmonument that only the Kadaster finds gets its number via the akte
+    assert list(result["rijksmonument_nummer"].fillna("")) == ["1", "", "", "4296", ""]
+    assert result["rijksmonument_url"].iloc[3] == (
+        "https://monumentenregister.cultureelerfgoed.nl/monumenten/4296"
+    )
+
+
+@pytest.mark.asyncio
+async def test_client_akte_niet_op_te_halen_laat_alleen_het_nummer_leeg(caplog):
+    """Zonder nummer via de akte blijft de status gelijk: geen pd.NA en geen
+    MonumentStatusOnbepaaldWarning, alleen een leeg nummer en een logregel."""
+    with (
+        _mocked_sources(rce_aktes_down=True) as client,
+        warnings.catch_warnings(),
+        caplog.at_level(logging.WARNING),
+    ):
+        warnings.simplefilter("error", MonumentStatusOnbepaaldWarning)
+        result = await client.process_from_df(
+            pd.DataFrame({_ID_KOLOM: _ALLE}), _ID_KOLOM
+        )
+
+    kadaster = result.iloc[3]
+    assert bool(kadaster["rijksmonument"]) is True
+    assert kadaster["rijksmonument_bron"] == "Kadaster"
+    assert pd.isna(kadaster["rijksmonument_nummer"])
+    assert pd.isna(kadaster["rijksmonument_url"])
+    assert "via de akte niet op te halen voor 1 van 1 aktes" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1692,11 +1788,12 @@ async def test_query_provinciaal_samen_met_rijks_en_gemeentelijk():
 # ---------------------------------------------------------------------------
 
 
-def _beperking(identificatie, grondslagcode=None, grondslag=None):
+def _beperking(identificatie, grondslagcode=None, grondslag=None, akte=None):
     return {
         "identificatie": identificatie,
         "grondslagcode": grondslagcode,
         "grondslag_gemeentelijk_monument": grondslag,
+        "akte": akte,
     }
 
 
@@ -1710,10 +1807,18 @@ _EWE_GRONDSLAG = (
 )
 
 
-def _leid_af(rijksmonumenten, beperkingen):
-    """De rijks- en gemeentelijke monumenten uit de antwoorden van RCE en BRK-PB."""
+def _leid_af(rijksmonumenten, beperkingen, nummers_per_akte=()):
+    """De rijks- en gemeentelijke monumenten uit de antwoorden van RCE en BRK-PB, en
+    de monumentnummers die de RCE bij de aktes vond, als (akte, nummer)."""
     return _bepaal_rijks_en_gemeentelijke_monumenten(
-        _rce_frame(rijksmonumenten), _beperkingen_frame(beperkingen)
+        _rce_frame(rijksmonumenten),
+        _beperkingen_frame(beperkingen),
+        _akte_nummers_frame(
+            [
+                {"akte": akte, "rijksmonument_nummer": nummer}
+                for akte, nummer in nummers_per_akte
+            ]
+        ),
     )
 
 
@@ -1828,6 +1933,94 @@ async def test_process_batch_geen_bron_is_none(empty_geodataframe):
     )
 
     row = _rij(rm_df, "vo_rce")
+    assert pd.isna(row["rijksmonument_bron"])
+
+
+# ---------------------------------------------------------------------------
+# Rijksmonumentnummer via de akte (#69)
+# ---------------------------------------------------------------------------
+
+# Rijksmonument 4296 (Prinsengracht 263): kadasterdeel 82963, kadasterdeelnummer 52
+_AKTE_4296 = "HYP4 82963/052"
+_AKTE_ANDER = "HYP4 82977/065"
+
+
+def test_akte_geeft_kadaster_treffer_een_nummer():
+    """Een Kadaster-treffer krijgt het nummer van het monument met dezelfde akte. De
+    RCE noemt het verblijfsobject niet, dus de bron blijft Kadaster."""
+    rm_df, _ = _leid_af(
+        rijksmonumenten=[],
+        beperkingen=[_beperking("vo", "EWE", _EWE_GRONDSLAG, _AKTE_4296)],
+        nummers_per_akte=[(_AKTE_4296, "4296")],
+    )
+
+    row = _rij(rm_df, "vo")
+    assert row["rijksmonument_nummer"] == "4296"
+    assert row["rijksmonument_bron"] == "Kadaster"
+
+
+def test_rce_nummer_gaat_voor_op_de_akte():
+    """Noemt de RCE het verblijfsobject zelf, dan telt haar nummer, ook als de akte
+    van de beperking bij een ander monument hoort."""
+    rm_df, _ = _leid_af(
+        rijksmonumenten=[{"identificatie": "vo", "rijksmonument_nummer": "12345"}],
+        beperkingen=[_beperking("vo", "EWE", _EWE_GRONDSLAG, _AKTE_4296)],
+        nummers_per_akte=[(_AKTE_4296, "4296")],
+    )
+
+    row = _rij(rm_df, "vo")
+    assert row["rijksmonument_nummer"] == "12345"
+    assert row["rijksmonument_bron"] == "RCE, Kadaster"
+
+
+@pytest.mark.parametrize(
+    ("aktes", "nummers_per_akte"),
+    [
+        pytest.param(
+            [_AKTE_4296, _AKTE_ANDER],
+            [(_AKTE_4296, "4296"), (_AKTE_ANDER, "5905")],
+            id="twee aktes, twee monumenten",
+        ),
+        pytest.param(
+            [_AKTE_4296],
+            [(_AKTE_4296, "4296"), (_AKTE_4296, "4297")],
+            id="een akte, twee monumenten",
+        ),
+        pytest.param([_AKTE_4296], [], id="akte niet bij de RCE"),
+        pytest.param(
+            [_AKTE_4296, _AKTE_ANDER],
+            [(_AKTE_4296, "4296")],
+            id="tweede akte niet bij de RCE",
+        ),
+        pytest.param([None], [], id="beperking zonder akte"),
+    ],
+)
+def test_akte_zonder_eenduidig_nummer_laat_nummer_leeg(aktes, nummers_per_akte):
+    """Alleen een eenduidig nummer telt. Bij twijfel blijft het nummer leeg; het
+    verblijfsobject blijft een rijksmonument met bron Kadaster."""
+    rm_df, _ = _leid_af(
+        rijksmonumenten=[],
+        beperkingen=[_beperking("vo", "EWE", _EWE_GRONDSLAG, akte) for akte in aktes],
+        nummers_per_akte=nummers_per_akte,
+    )
+
+    rows = rm_df[rm_df["identificatie"] == "vo"].drop_duplicates()
+    assert len(rows) == 1
+    assert pd.isna(rows.iloc[0]["rijksmonument_nummer"])
+    assert rows.iloc[0]["rijksmonument_bron"] == "Kadaster"
+
+
+def test_akte_van_voorbescherming_geeft_geen_nummer():
+    """Een EWD-beperking (voorbescherming) maakt geen rijksmonument, dus haar akte
+    geeft ook geen nummer."""
+    rm_df, _ = _leid_af(
+        rijksmonumenten=[],
+        beperkingen=[_beperking("vo", "EWD", _EWD_GRONDSLAG, _AKTE_4296)],
+        nummers_per_akte=[(_AKTE_4296, "4296")],
+    )
+
+    row = _rij(rm_df, "vo")
+    assert pd.isna(row["rijksmonument_nummer"])
     assert pd.isna(row["rijksmonument_bron"])
 
 

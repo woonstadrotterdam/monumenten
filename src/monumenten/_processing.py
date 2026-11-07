@@ -18,6 +18,7 @@ from tqdm.asyncio import tqdm_asyncio
 from monumenten._api._cultureel_erfgoed import (
     _query_beschermde_gezichten,
     _query_rijksmonumenten,
+    _query_rijksmonumenten_via_aktes,
 )
 from monumenten._api._kadaster import (
     _RD,
@@ -74,7 +75,9 @@ _BEPERKING_KOLOMMEN = [
     "identificatie",
     "grondslagcode",
     "grondslag_gemeentelijk_monument",
+    "akte",
 ]
+_AKTE_NUMMER_KOLOMMEN = ["akte", "rijksmonument_nummer"]
 
 # De antwoorden van de RCE en de BRK-PB voor een batch. De statussen worden pas na
 # de herkansing afgeleid, uit de antwoorden van alle batches: zo hoeft de herkansing
@@ -97,12 +100,18 @@ def _rce_frame(rijksmonumenten: List[Dict[str, Any]]) -> pd.DataFrame:
 
 
 def _beperkingen_frame(beperkingen: List[Dict[str, Any]]) -> pd.DataFrame:
+    # De akte als object, ook als geen enkele beperking er een heeft: anders wordt de
+    # kolom float en lukt het koppelen aan de nummers per akte niet
     beperkingen_df = pd.DataFrame(beperkingen, columns=_BEPERKING_KOLOMMEN).astype(
-        {"identificatie": "string"}
+        {"identificatie": "string", "akte": "object"}
     )
     return beperkingen_df[
         beperkingen_df["grondslagcode"].isin(_RELEVANTE_GRONDSLAGCODES)
     ].reset_index(drop=True)
+
+
+def _akte_nummers_frame(akte_nummers: List[Dict[str, Any]]) -> pd.DataFrame:
+    return pd.DataFrame(akte_nummers, columns=_AKTE_NUMMER_KOLOMMEN, dtype="string")
 
 
 def _lege_provinciale_monumenten() -> pd.DataFrame:
@@ -149,13 +158,18 @@ async def _process_batch(
 
 
 def _bepaal_rijks_en_gemeentelijke_monumenten(
-    rce_df: pd.DataFrame, beperkingen_df: pd.DataFrame
+    rce_df: pd.DataFrame, beperkingen_df: pd.DataFrame, akte_nummers_df: pd.DataFrame
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Leid de rijks- en gemeentelijke monumenten af uit de antwoorden.
+
+    Een rijksmonument dat alleen het Kadaster vindt, krijgt het nummer via zijn akte
+    (zie _nummers_via_akte). De bron blijft dan Kadaster.
 
     Args:
         rce_df (pd.DataFrame): De rijksmonumenten van de RCE
         beperkingen_df (pd.DataFrame): De beperkingen van de BRK-PB
+        akte_nummers_df (pd.DataFrame): Per akte de rijksmonumentnummers die de RCE
+            bij die akte vond
 
     Returns:
         Tuple[pd.DataFrame, pd.DataFrame]: De rijksmonumenten (met bron en voorbescherming)
@@ -196,6 +210,13 @@ def _bepaal_rijks_en_gemeentelijke_monumenten(
 
     rijksmonumenten_df = rijksmonumenten_df.drop(columns=["grondslagcode"])
 
+    alleen_kadaster = rijksmonumenten_df["rijksmonument_bron"] == "Kadaster"
+    rijksmonumenten_df.loc[alleen_kadaster, "rijksmonument_nummer"] = (
+        rijksmonumenten_df.loc[alleen_kadaster, "identificatie"]
+        .map(_nummers_via_akte(beperkingen_df, akte_nummers_df))
+        .astype("string")
+    )
+
     # Voorbescherming (EWD) is geen rijksmonument in de zin van art. 1.1 Erfgoedwet
     # en telt dus niet mee voor rijksmonument/rijksmonument_bron. Wel apart teruggeven.
     voorbescherming_df = (
@@ -217,6 +238,37 @@ def _bepaal_rijks_en_gemeentelijke_monumenten(
     ][["identificatie", "grondslag_gemeentelijk_monument"]]
 
     return rijksmonumenten_df, gemeentelijke_monumenten_df
+
+
+def _nummers_via_akte(
+    beperkingen_df: pd.DataFrame, akte_nummers_df: pd.DataFrame
+) -> pd.Series[str]:
+    """Bepaal per verblijfsobject het rijksmonumentnummer via de aktes van zijn
+    rijksmonument-beperkingen.
+
+    Alleen een eenduidig nummer telt: elke akte van het verblijfsobject moet bij de
+    RCE gevonden zijn, en samen bij precies één monument horen. Meerdere aktes op één
+    adrespunt horen in de praktijk bij verschillende monumenten op hetzelfde perceel;
+    welk daarvan het verblijfsobject is, weet het Kadaster niet.
+
+    Args:
+        beperkingen_df (pd.DataFrame): De beperkingen van de BRK-PB
+        akte_nummers_df (pd.DataFrame): Per akte de rijksmonumentnummers die de RCE
+            bij die akte vond
+
+    Returns:
+        pd.Series[str]: Het nummer per identificatie, alleen voor verblijfsobjecten
+            met een eenduidig nummer
+    """
+    aktes = beperkingen_df[
+        beperkingen_df["grondslagcode"].isin(_RIJKSMONUMENT_GRONDSLAGCODES)
+    ][["identificatie", "akte"]].drop_duplicates()
+    # Een akte zonder nummer bij de RCE geeft na de left merge een leeg nummer
+    gekoppeld = aktes.merge(
+        akte_nummers_df.astype({"akte": "object"}), on="akte", how="left"
+    ).groupby("identificatie")["rijksmonument_nummer"]
+    eenduidig = (gekoppeld.count() == gekoppeld.size()) & (gekoppeld.nunique() == 1)
+    return gekoppeld.first()[eenduidig]
 
 
 def _bepaal_beschermde_gezichten(
@@ -482,6 +534,52 @@ def _sorteer_ruimtelijk(
     )
 
 
+async def _haal_akte_nummers(
+    session: aiohttp.ClientSession,
+    rce_df: pd.DataFrame,
+    beperkingen_df: pd.DataFrame,
+    uitval: Bronuitval,
+) -> pd.DataFrame:
+    """Haal bij de RCE de nummers op bij de aktes van rijksmonumenten die alleen het
+    Kadaster vindt.
+
+    Na alle batches en de herkansing, in één keer: dan is bekend welke
+    verblijfsobjecten de RCE zelf een nummer gaf. Heeft de RCE nog een storing, dan
+    wordt zij niet opnieuw belast; die verblijfsobjecten houden een leeg nummer.
+
+    Args:
+        session (aiohttp.ClientSession): De sessie voor HTTP requests
+        rce_df (pd.DataFrame): De rijksmonumenten van de RCE
+        beperkingen_df (pd.DataFrame): De beperkingen van de BRK-PB
+        uitval (Bronuitval): De uitval van de aanroep, om een storing van de RCE te zien
+
+    Returns:
+        pd.DataFrame: Per akte de rijksmonumentnummers die de RCE bij die akte vond
+    """
+    met_rce_nummer = rce_df.loc[rce_df["rijksmonument_nummer"].notna(), "identificatie"]
+    aktes = sorted(
+        set(
+            beperkingen_df.loc[
+                beperkingen_df["grondslagcode"].isin(_RIJKSMONUMENT_GRONDSLAGCODES)
+                & ~beperkingen_df["identificatie"].isin(met_rce_nummer)
+                & beperkingen_df["akte"].notna(),
+                "akte",
+            ]
+        )
+    )
+    if not aktes:
+        return _akte_nummers_frame([])
+    if uitval.in_storing(RCE):
+        logger.warning(
+            "De RCE heeft een storing: de rijksmonumentnummers bij %d aktes worden "
+            "niet opgehaald; rijksmonumenten die alleen het Kadaster vindt, houden "
+            "daar een leeg nummer",
+            len(aktes),
+        )
+        return _akte_nummers_frame([])
+    return _akte_nummers_frame(await _query_rijksmonumenten_via_aktes(session, aktes))
+
+
 class _Aanroep:
     """Eén aanroep van _query: de bronnen, de adrespunten en de verwerking per batch.
 
@@ -739,10 +837,15 @@ async def _query(
             len(verblijfsobject_ids),
         )
 
+    rce_df = _voeg_frames_samen([a[0] for a in antwoorden], _rce_frame([]))
+    beperkingen_df = _voeg_frames_samen(
+        [a[1] for a in antwoorden], _beperkingen_frame([])
+    )
     rijksmonumenten, gemeentelijke_monumenten = (
         _bepaal_rijks_en_gemeentelijke_monumenten(
-            _voeg_frames_samen([a[0] for a in antwoorden], _rce_frame([])),
-            _voeg_frames_samen([a[1] for a in antwoorden], _beperkingen_frame([])),
+            rce_df,
+            beperkingen_df,
+            await _haal_akte_nummers(session, rce_df, beperkingen_df, uitval),
         )
     )
     # Uit alle adrespunten en niet per batch, na de herkansing: dan zijn ook de
