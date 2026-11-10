@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import functools
 import operator
+import ssl
 import warnings
 from typing import Any, Dict, FrozenSet, List, Optional, Protocol, Union, cast
 
 import aiohttp
 import numpy as np
 import pandas as pd
+import truststore
 
 from monumenten._api._provincies import PROVINCIES
 from monumenten._bronfouten import BAG, BRK_PB, RCE, VERWERKING
@@ -61,6 +63,22 @@ class _StatusRij(Protocol):
     provinciaal_monument: Optional[bool]
 
 
+def _ssl_context() -> ssl.SSLContext:
+    """Geeft een SSL-context die de certificaatopslag van het besturingssysteem gebruikt.
+
+    De standaardbundel van Python mist soms een root-CA. Op macOS mist
+    ``/etc/ssl/cert.pem`` bijvoorbeeld Sectigo Root R46, waar de keten van
+    kaartportaal.drenthe.nl op eindigt; de Keychain heeft die wel. Met truststore
+    vertrouwt de client wat het systeem vertrouwt, ook CA's die beheer in de
+    Keychain of de Windows-opslag zet. Op Linux gebruikt truststore de
+    OpenSSL-bundel van het systeem, net als Python zelf.
+
+    Returns:
+        ssl.SSLContext: De context voor de sessie die de client zelf aanmaakt.
+    """
+    return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+
 class MonumentenClient:
     """Client voor het ophalen van monumentgegevens van verschillende Nederlandse overheids-API's.
 
@@ -75,7 +93,9 @@ class MonumentenClient:
 
     async def __aenter__(self) -> "MonumentenClient":
         if self._owns_session:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(ssl=_ssl_context())
+            )
         return self
 
     async def __aexit__(
