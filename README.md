@@ -59,9 +59,15 @@ flowchart TB
         subgraph RCE_RM["Rijksmonumenten Query"]
             R1["Monument"]
             R2["BasisregistratieRelatie"]
-            R3["BAGRelatie"]
+            R3["BAGRelatie<br>(zonder situering)"]
             R4["verblijfsobjectIdentificatie"]
             R5["rijksmonumentnummer"]
+        end
+
+        subgraph RCE_AK["Rijksmonumenten via akte"]
+            A1["Monument"]
+            A2["kadasterdeel +<br>kadasterdeelnummer"]
+            A3["rijksmonumentnummer"]
         end
 
         subgraph RCE_BG["Beschermde Gezichten Query"]
@@ -88,6 +94,7 @@ flowchart TB
             K6["grondslagCode"]
             K7["grondslagOmschrijving"]
             K8["Beperkingsgebied"]
+            K9["gebaseerdOpStuk<br>(akte)"]
         end
 
     end
@@ -151,6 +158,13 @@ flowchart TB
     K5 -->|"grondslagCode"| K6
     K5 -->|"grondslagOmschrijving"| K7
     K5 -->|"geom"| K8
+    K5 -->|"gebaseerdOpStuk"| K9
+
+    %% RCE Rijksmonumenten via akte (alleen voor Kadaster-treffers zonder RCE-nummer)
+    K9 -->|"VALUES (?deel ?deelnummer)"| A2
+    A1 -->|"ceo:kadasterdeel/ceo:kadasterdeelnummer"| A2
+    A1 -->|"ceo:rijksmonumentnummer"| A3
+    A3 --> P1
 
     %% Processing
     B2 --> P0
@@ -232,6 +246,28 @@ Alle beperkingen van de RCE (grondslagcodes EWE en EWD) zijn met type `BRK` vast
 
 Er geldt geen marge rond het gebied: een adrespunt dat net buiten het gebied ligt, hoort meestal bij een buurpand. Daardoor mist de package wel een monument in een groot pand dat grotendeels in het gebied ligt, terwijl het adrespunt erbuiten valt.
 
+### Rijksmonumentnummer
+
+- **Bron RCE (of "RCE, Kadaster"):** het nummer van het monument dat de RCE bij het verblijfsobject noemt. Noemt zij het bij meer dan één monument, dan het numeriek laagste nummer. Dat is een heuristiek: de monumenten zijn dan meestal gelijkwaardig, zoals twee panden in één blok of een kerk en haar toren, en geen van de nummers is het enige juiste.
+- **Bron "Kadaster":** het Kadaster levert geen monumentnummer, wel de akte waarmee het monument in de openbare registers is ingeschreven (`gebaseerdOpStuk`, bijvoorbeeld `HYP4 82963/052`). De RCE legt per monument dezelfde akte vast. Het verblijfsobject krijgt het nummer van het monument met die akte; de bron blijft "Kadaster".
+
+Het nummer via de akte blijft leeg als het niet eenduidig is:
+
+- de aktes van het verblijfsobject horen bij meer dan één monument, meestal omdat er meerdere monumenten op hetzelfde perceel staan;
+- de RCE legt de akte bij meer dan één monument vast, of bij geen enkel monument (bijvoorbeeld door een afwijkend kadasterdeel);
+- de RCE gaf geen antwoord op de vraag naar de akte. Dat staat dan in de log; de status `rijksmonument` blijft gewoon `True`, en er volgt geen `MonumentStatusOnbepaaldWarning`.
+
+### Situering
+
+De RCE koppelt een verblijfsobject soms met een situering aan een monument: "bij" of "tegenover". Zij gebruikt het adres dan als plaatsaanduiding voor een monument zonder eigen adres, zoals een brug, hek, beeld of grenspaal. Het verblijfsobject is het monument niet.
+
+Een koppeling met een situering telt daarom niet:
+
+- **Status:** noemt de RCE een verblijfsobject alleen met een situering, dan is de RCE geen bron. Het verblijfsobject is alleen een rijksmonument als het Kadaster dat bevestigt; de bron is dan "Kadaster" en het nummer komt via de akte.
+- **Nummer:** noemt de RCE een verblijfsobject bij meer dan één monument, dan tellen alleen de monumenten zonder situering. Bij Dorpsstraat 5 in Aarle-Rixtel is 6936 de kerk en staat 520165, het beeld ervoor, er "bij"; het nummer is 6936.
+
+De situering is niet altijd juist. Is het verblijfsobject toch het monument zelf, dan ligt het vrijwel altijd op het beschermde perceel en bevestigt het Kadaster de status. Een verblijfsobject zonder adrespunt in de BAG kan het Kadaster niet bevestigen.
+
 ### Endpoints
 
 | Bron                | Type       | Endpoint                                                                            |
@@ -256,19 +292,17 @@ De provinciale services staan hieronder bij [Provinciale monumenten](#provincial
 
 ### Retry-gedrag
 
-Aanroepen naar Kadaster (BAG, BRK-PB) en RCE gebruiken een gedeelde retry-logica: maximaal 2 pogingen per request, bij mislukking 3 seconden wachten. Alleen tijdelijke fouten worden herhaald (HTTP 429, 500, 502, 503, 504 en netwerk-/verbindingsfouten); permanente 4xx worden direct doorgegeven. Faalt een aanroep na retries, dan wordt de set IDs/adrespunten in tweeën gedeeld en elk deel opnieuw geprobeerd (recursief, per API, tot min. 1 ID of max. splitdiepte 10). Blijft een aanroep ook dan falen, dan heeft de bron voor die verblijfsobjecten geen antwoord gegeven (zie [Als een bron geen antwoord geeft](#als-een-bron-geen-antwoord-geeft)).
+Aanroepen naar Kadaster (BAG, BRK-PB) en RCE gebruiken een gedeelde retry-logica: maximaal 2 pogingen per request, bij mislukking 3 seconden wachten. Alleen tijdelijke fouten worden herhaald (HTTP 429, 500, 502, 503, 504 en netwerk-/verbindingsfouten); permanente 4xx worden direct doorgegeven. Faalt een aanroep na retries, dan wordt de set IDs/adrespunten in tweeën gedeeld en elk deel opnieuw geprobeerd (recursief, per bron, tot min. 1 ID of max. splitdiepte 10). Blijft een aanroep ook dan falen, dan heeft de bron voor die verblijfsobjecten geen antwoord gegeven (zie [Als een bron geen antwoord geeft](#als-een-bron-geen-antwoord-geeft)).
 
-Ligt een bron plat, dan stopt de package na 10 mislukte requests op rij met splitsen en slaat die bron over, met elke 10 seconden een proefrequest om te zien of zij weer antwoord geeft. Aan het einde van de aanroep krijgen de verblijfsobjecten waarvoor een bron geen antwoord gaf één herkansing bij die bron. Een korte storing kost daardoor meestal geen verblijfsobjecten.
-
-Gaf een bron nog geen enkel antwoord, dan krijgt zij 30 seconden proefrequests voordat de aanroep stopt. Een korte hapering aan het begin van een aanroep, waarin de requests die tegelijk onderweg zijn samen falen, stopt de aanroep zo niet. Een fout die bij de request hoort en niet bij de bron (een 4xx of een afgekapt antwoord) telt pas mee als splitsen niet meer kan: één verblijfsobject dat altijd faalt, maakt dan alleen dat verblijfsobject onbepaald.
+Heeft een bron een storing, dan stopt de package na 10 mislukte requests op rij met splitsen en slaat die bron over, met elke 10 seconden een proefrequest om te zien of zij weer antwoord geeft. Aan het einde van de aanroep krijgen de verblijfsobjecten waarvoor een bron geen antwoord gaf één herkansing bij die bron. Een korte storing kost daardoor meestal geen verblijfsobjecten, ook niet aan het begin van een aanroep. Een fout die bij de request hoort en niet bij de bron (een 4xx of een afgekapt antwoord) telt pas mee als splitsen niet meer kan: één verblijfsobject dat altijd faalt, maakt dan alleen dat verblijfsobject onbepaald.
 
 ### Als een bron geen antwoord geeft
 
 Een status die niet bepaald kon worden, is iets anders dan geen monumentstatus. De package geeft daarom nooit `False` voor een status die een bron niet heeft kunnen bevestigen of ontkennen:
 
-- **Een bron geeft helemaal geen antwoord** (bijvoorbeeld bij een storing): de aanroep stopt met een `BronFoutError`. De melding noemt de bron (`RCE`, `BAG` of `BRK-PB`) en de laatste fout; het attribuut `verblijfsobject_ids` bevat per bron de ID's zonder antwoord.
+- **Een bron geeft helemaal geen antwoord** (bijvoorbeeld bij een storing): de aanroep stopt na de herkansing met een `BronFoutError`. De melding noemt de bron (`RCE`, `BAG` of `BRK-PB`) en de laatste fout; het attribuut `verblijfsobject_ids` bevat per bron de ID's zonder antwoord.
 - **Een bron geeft voor een deel van de verblijfsobjecten geen antwoord**, ook niet na de herkansing: het resultaat komt terug met `pd.NA` voor de statussen die niet bepaald konden worden, en er volgt één `MonumentStatusOnbepaaldWarning`. Die noemt per bron de laatste fout en de betrokken ID's, die ook in het attribuut `verblijfsobject_ids` staan.
-- **De verwerking van een batch mislukt** (bijvoorbeeld door data die de package niet verwacht): de aanroep gaat door en de waarschuwing noemt de bron `verwerking`. Mislukken de eerste batches allemaal, dan is er iets mis met de package zelf en stopt de aanroep met de oorspronkelijke fout.
+- **De verwerking van een batch mislukt** (bijvoorbeeld door data die de package niet verwacht): de aanroep gaat door en de waarschuwing noemt de bron `verwerking`. Mislukt de verwerking van elke batch, dan is er iets mis met de package zelf en stopt de aanroep met de oorspronkelijke fout.
 
 Elke status hangt af van een aantal bronnen (zie de tabel hieronder). Per verblijfsobject is een status:
 
