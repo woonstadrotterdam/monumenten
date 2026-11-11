@@ -53,7 +53,11 @@ T = TypeVar("T")
 
 
 class _MetVerblijfsobjectIds(Exception):
-    """Geeft een fout of waarschuwing per bron de verblijfsobject ID's zonder antwoord."""
+    """Geeft een fout of waarschuwing per bron de betrokken verblijfsobject ID's.
+
+    Alle fouten en waarschuwingen van de package hebben zo hetzelfde attribuut
+    ``verblijfsobject_ids``: een dict van bron naar gesorteerde ID's.
+    """
 
     def __init__(
         self,
@@ -89,6 +93,25 @@ class MonumentStatusOnbepaaldWarning(_MetVerblijfsobjectIds, UserWarning):
         verblijfsobject_ids (Optional[Dict[str, List[str]]]): Per bron ("RCE",
             "BAG", "BRK-PB", "verwerking" of een provincie zoals "Noord-Holland")
             de gesorteerde verblijfsobject ID's zonder antwoord
+    """
+
+
+class GeenAdrespuntWarning(_MetVerblijfsobjectIds, UserWarning):
+    """Voor een deel van de verblijfsobjecten gaf de BAG van PDOK geen adrespunt.
+
+    De BAG gaf wel antwoord, maar zonder adrespunt: meestal is het verblijfsobject
+    nooit gebouwd (status "Niet gerealiseerd verblijfsobject"), en die staan niet in
+    de BAG WFS. Voor deze ID's kunnen de monumentstatussen niet via de locatie
+    worden gecontroleerd. Een koppeling aan een rijksmonument via de RCE is wel
+    mogelijk.
+
+    De waarschuwing noemt geen statuswaarden: die staan in het resultaat. Mislukte
+    de verwerking van een ID, dan meldt ``MonumentStatusOnbepaaldWarning`` dat.
+
+    Args:
+        melding (str): Omschrijving van de waarschuwing
+        verblijfsobject_ids (Optional[Dict[str, List[str]]]): Onder "BAG" de
+            gesorteerde verblijfsobject ID's zonder adrespunt
     """
 
 
@@ -138,6 +161,9 @@ class Bronuitval:
 
     def __init__(self) -> None:
         self._bronnen: Dict[str, _Bron] = {}
+        # Geen uitval: de BAG gaf antwoord, maar kende deze verblijfsobjecten niet.
+        # Hier vastgelegd zodat de client ze in een eigen waarschuwing kan noemen.
+        self.zonder_adrespunt: Set[str] = set()
 
     def _bron(self, naam: str) -> _Bron:
         return self._bronnen.setdefault(naam, _Bron())
@@ -475,6 +501,27 @@ class Bronuitval:
             "statussen die van die bron afhangen zijn pd.NA. "
             + self._beschrijf(mislukt),
             _ids_per_bron(mislukt),
+        )
+
+    def waarschuwing_zonder_adrespunt(self) -> Optional[GeenAdrespuntWarning]:
+        """Geef de waarschuwing voor de verblijfsobjecten zonder adrespunt.
+
+        Returns:
+            Optional[GeenAdrespuntWarning]: De waarschuwing, of ``None`` als elk
+                verblijfsobject een adrespunt kreeg
+        """
+        if not self.zonder_adrespunt:
+            return None
+        ids = sorted(self.zonder_adrespunt)
+        genoemd = ", ".join(ids[:_MAX_IDS_IN_MELDING])
+        if len(ids) > _MAX_IDS_IN_MELDING:
+            genoemd += f" en {len(ids) - _MAX_IDS_IN_MELDING} andere"
+        return GeenAdrespuntWarning(
+            f"Voor {len(ids)} verblijfsobject(en) heeft de BAG van PDOK geen "
+            "adrespunt teruggegeven. Voor deze ID's kunnen monumentstatussen niet "
+            "via locatie worden gecontroleerd. Een koppeling aan een rijksmonument "
+            f"via de RCE is wel mogelijk. Betrokken ID's: {genoemd}",
+            {BAG: ids},
         )
 
     def _beschrijf(self, mislukt: Dict[str, Set[str]]) -> str:

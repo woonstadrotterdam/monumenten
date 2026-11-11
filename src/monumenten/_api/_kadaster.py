@@ -48,6 +48,46 @@ _IDENTIFICATIE_FILTER_TEMPLATE = (
     "</fes:PropertyIsEqualTo>"
 )
 
+# Kadaster grondslagcodes (publiekrechtelijke beperkingen, BRK) waar een status van
+# afhangt. Alleen deze codes worden bij de BRK-PB opgevraagd. Een live test
+# (tests/test_grondslagcodes.py) faalt als de BRK-PB een monumentcode kent die hier
+# ontbreekt.
+# EWE: Erfgoedwet, afschrift inschrijving in het rijksmonumentenregister -> rijksmonument
+# (art. 1.1 Erfgoedwet)
+_RIJKSMONUMENT_GRONDSLAGCODES = ["EWE"]
+# EWD: Erfgoedwet, toezending ontwerpbesluit aanwijzing (voorbescherming) -> nog geen
+# rijksmonument, zie rijksmonument_voorbescherming
+_VOORBESCHERMING_GRONDSLAGCODES = ["EWD"]
+# GWA: Gemeentewet, aanwijzing gemeentelijk monument (bundelt voorbescherming,
+# aanwijzing en afschrift)
+_GEMEENTELIJK_GRONDSLAGCODES = ["GWA"]
+_RELEVANTE_GRONDSLAGCODES = (
+    _RIJKSMONUMENT_GRONDSLAGCODES
+    + _VOORBESCHERMING_GRONDSLAGCODES
+    + _GEMEENTELIJK_GRONDSLAGCODES
+)
+
+
+def _grondslagcode_filter(codes: List[str]) -> str:
+    """Geef het FES-filter dat beperkingen met een van de grondslagcodes selecteert.
+
+    Args:
+        codes (List[str]): De grondslagcodes, minstens één
+
+    Returns:
+        str: Eén ``fes:PropertyIsEqualTo``, of bij meerdere codes een ``fes:Or``
+            daarvan (een ``fes:Or`` vereist minimaal twee filters)
+    """
+    filters = [
+        "<fes:PropertyIsEqualTo>"
+        "<fes:ValueReference>grondslagCode</fes:ValueReference>"
+        f"<fes:Literal>{code}</fes:Literal>"
+        "</fes:PropertyIsEqualTo>"
+        for code in codes
+    ]
+    return filters[0] if len(filters) == 1 else f"<fes:Or>{''.join(filters)}</fes:Or>"
+
+
 # Stap 2 – BRK-PB: adrespunten -> beperkingen
 # Een beperking geldt voor haar beperkingsgebied (BAG-pand, BGT-object, handmatige
 # contour of het perceel zelf). De WFS geeft alle monumentbeperkingen terug waarvan
@@ -70,28 +110,7 @@ _BRK_PB_BEPERKINGEN_QUERY_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
     <wfs:PropertyName>geom</wfs:PropertyName>
     <fes:Filter>
       <fes:And>
-        <fes:Or>
-          <!-- Besluit monument, Gemeentewet -->
-          <fes:PropertyIsEqualTo>
-            <fes:ValueReference>grondslagCode</fes:ValueReference>
-            <fes:Literal>GG</fes:Literal>
-          </fes:PropertyIsEqualTo>
-          <!-- Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing, afschrift) -->
-          <fes:PropertyIsEqualTo>
-            <fes:ValueReference>grondslagCode</fes:ValueReference>
-            <fes:Literal>GWA</fes:Literal>
-          </fes:PropertyIsEqualTo>
-          <!-- Erfgoedwet: Afschrift inschrijving monument of archeologisch monument in rijksmonumentenregister door minister OCW (= rijksmonument) -->
-          <fes:PropertyIsEqualTo>
-            <fes:ValueReference>grondslagCode</fes:ValueReference>
-            <fes:Literal>EWE</fes:Literal>
-          </fes:PropertyIsEqualTo>
-          <!-- Erfgoedwet: Toezending ontwerpbesluit aanwijzing rijksmonument door minister OCW (voorbescherming; geen rijksmonument, zie rijksmonument_voorbescherming) -->
-          <fes:PropertyIsEqualTo>
-            <fes:ValueReference>grondslagCode</fes:ValueReference>
-            <fes:Literal>EWD</fes:Literal>
-          </fes:PropertyIsEqualTo>
-        </fes:Or>
+        {grondslagcode_filter}
         <fes:Intersects>
           <fes:ValueReference>geom</fes:ValueReference>
           <gml:MultiPoint gml:id="adrespunten" srsName="urn:ogc:def:crs:EPSG::28992">
@@ -102,7 +121,7 @@ _BRK_PB_BEPERKINGEN_QUERY_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
     </fes:Filter>
   </wfs:Query>
 </wfs:GetFeature>
-"""
+""".replace("{grondslagcode_filter}", _grondslagcode_filter(_RELEVANTE_GRONDSLAGCODES))
 
 _ADRESPUNT_TEMPLATE = (
     "<gml:pointMember>"

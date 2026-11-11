@@ -146,12 +146,53 @@ async def test_query_sorteert_batches_ruimtelijk(empty_geodataframe):
         patch("monumenten._processing._QUERY_BATCH_GROOTTE", 2),
     ):
         async with aiohttp.ClientSession() as session:
-            result, _ = await _query(session, [*adrespunten, "onbekend"])
+            result, uitval = await _query(session, [*adrespunten, "onbekend"])
 
     assert {"rotterdam1", "rotterdam2"} in batches
     assert {"groningen1", "groningen2"} in batches
     # Een verblijfsobject zonder adrespunt wordt nog steeds verwerkt
     assert set(result["identificatie"]) == {*adrespunten, "onbekend"}
+    assert uitval.zonder_adrespunt == {"onbekend"}
+    assert uitval.mislukt == {}
+
+
+@pytest.mark.asyncio
+async def test_query_zonder_adrespunt_niet_bij_uitval_van_de_bag(
+    empty_geodataframe, caplog
+):
+    """Gaf de BAG voor een verblijfsobject geen antwoord, dan is het onbepaald en
+    telt het niet als verblijfsobject zonder adrespunt; alleen een verblijfsobject
+    dat de BAG niet kent wel."""
+
+    async def mock_adrespunten(session, identificaties, uitval, voortgang=None):
+        # Een antwoord voor de andere twee, anders ligt de BAG plat
+        uitval.registreer_antwoord(BAG, 2)
+        uitval.registreer_fout(BAG, ["bag_fout"], RuntimeError("503"))
+        return {"bekend": (92000.0, 437000.0)}
+
+    async def mock_process_batch(session, batch, brk_pb_adrespunten, uitval):
+        return _make_batch_result(batch)
+
+    with (
+        patch(
+            "monumenten._processing._get_beschermde_gezichten",
+            return_value=empty_geodataframe,
+        ),
+        patch(
+            "monumenten._processing._query_adrespunten", side_effect=mock_adrespunten
+        ),
+        patch("monumenten._processing._process_batch", side_effect=mock_process_batch),
+    ):
+        async with aiohttp.ClientSession() as session:
+            _, uitval = await _query(session, ["bekend", "onbekend", "bag_fout"])
+
+    assert uitval.zonder_adrespunt == {"onbekend"}
+    assert "bag_fout" in uitval.mislukt[BAG]
+    # Ook in de log, voor wie warnings niet opvangt
+    assert (
+        "Voor 1 van 3 verblijfsobjecten heeft de BAG van PDOK geen adrespunt"
+        in caplog.text
+    )
 
 
 def _make_cm_response(identificaties=None, fail=False, rijen=None):
@@ -529,7 +570,7 @@ async def test_beperkingen_afgekapt_antwoord_splitst():
         "features": [
             {
                 "type": "Feature",
-                "properties": {"grondslagCode": "GG", "grondslagOmschrijving": ""},
+                "properties": {"grondslagCode": "GWA", "grondslagOmschrijving": ""},
                 "geometry": {"type": "Point", "coordinates": [0, 0]},
             }
         ]
@@ -1703,7 +1744,7 @@ async def test_query_provinciaal_samen_met_rijks_en_gemeentelijk():
     beperkingen = [
         {
             "identificatie": "rolde_alles",
-            "grondslagcode": "GG",
+            "grondslagcode": "GWA",
             "grondslag_gemeentelijk_monument": "Gemeentewet",
         },
     ]

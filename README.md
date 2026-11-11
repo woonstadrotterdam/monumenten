@@ -115,7 +115,7 @@ flowchart TB
         P0["Spatial join<br>adrespunt ∈ beperkingsgebied"]
         P1["Merge rijksmonumenten<br>RCE nummer + Kadaster EWE"]
         P2["Spatial join<br>adrespunt ∈ gezicht WKT"]
-        P3["Filter gemeentelijke<br>grondslagcode GG/GWA"]
+        P3["Filter gemeentelijke<br>grondslagcode GWA"]
         P4["Spatial join<br>adrespunt ∈ monumentvlak"]
         P5["Filter voorbescherming<br>grondslagcode EWD"]
     end
@@ -178,7 +178,7 @@ flowchart TB
     B2 --> P2
     G3 --> P2
     G4 --> P2
-    P0 -->|"GG/GWA"| P3
+    P0 -->|"GWA"| P3
 
     %% Provincies (alleen bevraagd als een adrespunt in NH of DR ligt)
     B2 --> P4
@@ -196,12 +196,12 @@ flowchart TB
 
 ### Bronlogica per Monumenttype
 
-| Monumenttype                      | Primaire Bron     | Secundaire Bron | Logica                                                                                                                                                                                             |
-| --------------------------------- | ----------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Rijksmonument**                 | RCE               | Kadaster (EWE)  | `rijksmonument_bron` = "RCE, Kadaster" als beide, "RCE" of "Kadaster" als één. Kadaster telt alleen als het adrespunt binnen het beperkingsgebied ligt (zie [Beperkingsgebied](#beperkingsgebied)) |
-| **Rijksbeschermd Gezicht**        | RCE               | -               | Spatial join: verblijfsobject geometrie ∈ gezicht geometrie                                                                                                                                        |
-| **Gemeentelijk Monument**         | Kadaster (GG/GWA) | -               | Kadaster beperking met grondslagcode GG of GWA, alleen als het adrespunt binnen het beperkingsgebied ligt (zie [Beperkingsgebied](#beperkingsgebied))                                              |
-| **Voorbescherming rijksmonument** | Kadaster (EWD)    | -               | `rijksmonument_voorbescherming` = True; telt niet mee voor `rijksmonument` (art. 1.1 Erfgoedwet)                                                                                                   |
+| Monumenttype                      | Primaire Bron  | Secundaire Bron | Logica                                                                                                                                                                                             |
+| --------------------------------- | -------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Rijksmonument**                 | RCE            | Kadaster (EWE)  | `rijksmonument_bron` = "RCE, Kadaster" als beide, "RCE" of "Kadaster" als één. Kadaster telt alleen als het adrespunt binnen het beperkingsgebied ligt (zie [Beperkingsgebied](#beperkingsgebied)) |
+| **Rijksbeschermd Gezicht**        | RCE            | -               | Spatial join: verblijfsobject geometrie ∈ gezicht geometrie                                                                                                                                        |
+| **Gemeentelijk Monument**         | Kadaster (GWA) | -               | Kadaster beperking met grondslagcode GWA, alleen als het adrespunt binnen het beperkingsgebied ligt (zie [Beperkingsgebied](#beperkingsgebied))                                                    |
+| **Voorbescherming rijksmonument** | Kadaster (EWD) | -               | `rijksmonument_voorbescherming` = True; telt niet mee voor `rijksmonument` (art. 1.1 Erfgoedwet)                                                                                                   |
 
 ### Afkortingen
 
@@ -223,8 +223,9 @@ flowchart TB
 | ------- | ---------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
 | **EWE** | Erfgoedwet: Afschrift inschrijving rijksmonumentenregister                                           | Rijksmonument                                      |
 | **EWD** | Erfgoedwet: Ontwerpbesluit aanwijzing (voorbescherming)                                              | Voorbescherming rijksmonument (geen rijksmonument) |
-| **GG**  | Gemeentewet: Besluit monument                                                                        | Gemeentelijk monument                              |
 | **GWA** | Gemeentewet: Aanwijzing gemeentelijk monument (voorbescherming, aanwijzing en afschrift in één code) | Gemeentelijk monument                              |
+
+De gedoogplichten voor archeologisch onderzoek (`EW` en `EWC`) zijn ook erfgoedcodes, maar geven geen monumentstatus en worden niet bevraagd.
 
 ### Beperkingsgebied
 
@@ -242,6 +243,8 @@ Hoe nauwkeurig dat werkt, hangt af van hoe het beperkingsgebied is vastgelegd. H
 | `BRK`                             | het hele perceel (of meerdere percelen), zonder aan te geven welk gebouw bedoeld is | alle adressen waarvan het adrespunt op het perceel ligt; gebouwen op hetzelfde perceel zijn niet te onderscheiden |
 
 Alle beperkingen van de RCE (grondslagcodes EWE en EWD) zijn met type `BRK` vastgelegd. Bij een rijksmonument met bron "Kadaster" kan het daarom zo zijn dat niet dit gebouw, maar een ander gebouw op hetzelfde perceel het eigenlijke monument is.
+
+Er geldt geen marge rond het gebied: een adrespunt dat net buiten het gebied ligt, hoort meestal bij een buurpand. Daardoor mist de package wel een monument in een groot pand dat grotendeels in het gebied ligt, terwijl het adrespunt erbuiten valt.
 
 ### Rijksmonumentnummer
 
@@ -319,7 +322,7 @@ De BAG staat overal bij omdat zij het adrespunt levert. Een rijksmonument dat de
 
 - De statuskolommen hebben het nullable pandas-dtype `boolean`. In `process_from_list` is een niet-bepaalde status `None`; in VERA-referentiedataformaat is dan de hele value van het verblijfsobject `None` in plaats van een lijst, omdat die lijst onvolledig zou zijn.
 - Blijft `rijksmonument` `True` doordat één bron de status geeft terwijl de andere geen antwoord gaf, dan noemt `rijksmonument_bron` alleen de bron die antwoord gaf.
-- Een ID dat niet in de BAG voorkomt is geen fout maar een geldig leeg antwoord: de statussen uit het Kadaster zijn dan `False`.
+- Een ID waarvoor de BAG van PDOK geen adrespunt teruggeeft, meestal een verblijfsobject dat nooit gebouwd is, is geen fout maar een geldig leeg antwoord. Voor zo'n ID kunnen de statussen niet via de locatie worden gecontroleerd. Alleen een koppeling via de RCE kan `rijksmonument` `True` maken; lukt de verwerking, dan zijn de andere statussen `False`. Mislukt de verwerking ook na de herkansing, dan zijn de statussen `pd.NA` en volgt een `MonumentStatusOnbepaaldWarning`, zoals bij elk ander ID. De ID's zonder adrespunt staan in een `GeenAdrespuntWarning`, onder `"BAG"` in `verblijfsobject_ids`. Die waarschuwing noemt geen statuswaarden; die staan in het resultaat.
 
 Wie bij gedeeltelijk falen liever een fout krijgt dan een resultaat met `pd.NA`, maakt van de waarschuwing een fout:
 
@@ -357,7 +360,7 @@ Keuzes en beperkingen:
 
   Bij `<NA>` noemt de `MonumentStatusOnbepaaldWarning` de provincie als bron, met haar fout als oorzaak (zie [Als een bron geen antwoord geeft](#als-een-bron-geen-antwoord-geeft)). Noemt de oorzaak dat geen enkel vlak een bekende categorie of status heeft, dan is de service van de provincie gewijzigd en moet de package worden bijgewerkt. Uitval van een provincie stopt de aanroep nooit en raakt alleen `provinciaal_monument`.
 
-- **Combinaties.** Volgens de provinciale verordeningen kan een object niet tegelijk rijks- of gemeentelijk én provinciaal monument zijn. De package dwingt dat niet af, omdat de Kadaster-statussen per perceel gelden en dus ook buurgebouwen kunnen raken.
+- **Combinaties.** Volgens de provinciale verordeningen kan een object niet tegelijk rijks- of gemeentelijk én provinciaal monument zijn. De package dwingt dat niet af, omdat een rijksmonument uit het Kadaster (EWE) voor het hele perceel geldt en dus ook een ander gebouw op dat perceel kan raken.
 
 ## Tutorial
 
