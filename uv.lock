@@ -525,6 +525,11 @@ test = [
     { name = "pytest-cov" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "monumenten", extra = ["dev"] },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "aiocache", specifier = ">=0.12.3" },
@@ -543,6 +548,9 @@ requires-dist = [
     { name = "truststore", specifier = ">=0.10.0" },
 ]
 provides-extras = ["test", "dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "monumenten", extras = ["dev"] }]
 
 [[package]]
 name = "multidict"

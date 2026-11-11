@@ -36,6 +36,10 @@ plugins:
   - include-markdown:
   - mknotebooks
 
+# Instructies voor coding agents, niet voor de gebruikersdocumentatie.
+exclude_docs: |
+  agents/
+
 nav:
   - Home: index.md
   - Tutorial: tutorial.ipynb
