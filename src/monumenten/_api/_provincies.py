@@ -12,7 +12,6 @@ PDOK (Bestuurlijke Gebieden, afgeleid uit de BRK).
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
 from functools import lru_cache
@@ -22,12 +21,7 @@ import aiohttp
 from shapely.geometry import shape
 from shapely.geometry.base import BaseGeometry
 
-from monumenten._api._backoff import (
-    MAX_ATTEMPTS,
-    RETRY_SLEEP_SECONDS,
-    RETRYABLE_NETWORK_EXCEPTIONS,
-    RETRYABLE_STATUS_CODES,
-)
+from monumenten._api._backoff import RETRYABLE_NETWORK_EXCEPTIONS, met_retries
 from monumenten._api._kadaster import _RD
 
 logger = logging.getLogger("monumenten.api.provincies")
@@ -39,11 +33,13 @@ _PAGINA_GROOTTE = 250
 # vlakken per provincie).
 _MAX_PAGINAS = 400
 
-# Ook een afgebroken overdracht (ClientPayloadError) of verbroken verbinding
-# (ClientOSError) is tijdelijk.
+# Ook een afgebroken overdracht (ClientPayloadError), een verbroken verbinding
+# (ClientOSError) en een antwoord dat geen JSON is (ValueError), bijvoorbeeld een
+# onderhouds- of proxypagina met HTTP 200, zijn tijdelijk.
 _HERHAALBARE_FOUTEN: Tuple[Type[BaseException], ...] = (
     *RETRYABLE_NETWORK_EXCEPTIONS,
     aiohttp.ClientError,
+    ValueError,
 )
 
 _PROVINCIEGRENZEN_URL = "https://service.pdok.nl/kadaster/bestuurlijkegebieden/wfs/v1_0"
@@ -227,53 +223,35 @@ async def _get_json(
         ProvincialeMonumentenError: Als de service na alle pogingen geen geldig
             antwoord geeft.
     """
-    for poging in range(MAX_ATTEMPTS):
-        try:
-            async with session.get(url, params=params) as response:
-                response.raise_for_status()
-                # ArcGIS antwoordt met application/geo+json
-                data = await response.json(content_type=None)
-                if poging >= 1:
-                    logger.info(
-                        "Poging %d/%d voor %s geslaagd na eerdere mislukking",
-                        poging + 1,
-                        MAX_ATTEMPTS,
-                        context,
-                    )
-        except aiohttp.ClientResponseError as e:
-            if e.status not in RETRYABLE_STATUS_CODES or poging == MAX_ATTEMPTS - 1:
-                raise ProvincialeMonumentenError(
-                    f"Ophalen van {context} mislukt: HTTP {e.status}"
-                ) from e
-        except _HERHAALBARE_FOUTEN as e:
-            if poging == MAX_ATTEMPTS - 1:
-                raise ProvincialeMonumentenError(
-                    f"Ophalen van {context} mislukt (netwerk): {type(e).__name__}: {e}"
-                ) from e
-        except ValueError as e:
-            # Geen JSON, bijvoorbeeld een onderhouds- of proxypagina met HTTP 200
-            if poging == MAX_ATTEMPTS - 1:
-                raise ProvincialeMonumentenError(
-                    f"Ophalen van {context} mislukt: antwoord is geen JSON"
-                ) from e
-        else:
-            if not isinstance(data, dict):
-                raise ProvincialeMonumentenError(
-                    f"Onverwacht antwoord van {context}: {type(data).__name__}"
-                )
-            if "error" in data:
-                # ArcGIS meldt fouten met HTTP 200 en een error-object
-                raise ProvincialeMonumentenError(f"Fout van {context}: {data['error']}")
-            return data
-        logger.warning(
-            "Poging %d/%d voor %s mislukt. Opnieuw proberen over %ds...",
-            poging + 1,
-            MAX_ATTEMPTS,
-            context,
-            RETRY_SLEEP_SECONDS,
+
+    async def get() -> Any:
+        async with session.get(url, params=params) as response:
+            response.raise_for_status()
+            # ArcGIS antwoordt met application/geo+json
+            return await response.json(content_type=None)
+
+    try:
+        data = await met_retries(get, context, herhaalbaar=_HERHAALBARE_FOUTEN)
+    except aiohttp.ClientResponseError as e:
+        raise ProvincialeMonumentenError(
+            f"Ophalen van {context} mislukt: HTTP {e.status}"
+        ) from e
+    except ValueError as e:
+        raise ProvincialeMonumentenError(
+            f"Ophalen van {context} mislukt: antwoord is geen JSON"
+        ) from e
+    except _HERHAALBARE_FOUTEN as e:
+        raise ProvincialeMonumentenError(
+            f"Ophalen van {context} mislukt (netwerk): {type(e).__name__}: {e}"
+        ) from e
+    if not isinstance(data, dict):
+        raise ProvincialeMonumentenError(
+            f"Onverwacht antwoord van {context}: {type(data).__name__}"
         )
-        await asyncio.sleep(RETRY_SLEEP_SECONDS)
-    raise ProvincialeMonumentenError(f"Ophalen van {context} mislukt")
+    if "error" in data:
+        # ArcGIS meldt fouten met HTTP 200 en een error-object
+        raise ProvincialeMonumentenError(f"Fout van {context}: {data['error']}")
+    return data
 
 
 async def _query_provinciale_monumenten(

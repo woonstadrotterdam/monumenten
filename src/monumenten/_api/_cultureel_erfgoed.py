@@ -1,20 +1,11 @@
-import asyncio
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import aiohttp
 
-from monumenten._api._backoff import (
-    MAX_ATTEMPTS,
-    MAX_SPLIT_DEPTH,
-    MIN_BATCH_SIZE,
-    RETRYABLE_NETWORK_EXCEPTIONS,
-    RETRYABLE_STATUS_CODES,
-    RETRY_SLEEP_SECONDS,
-)
+from monumenten._api._backoff import RETRYABLE_NETWORK_EXCEPTIONS, met_retries
 from monumenten._bronfouten import RCE, Bronuitval
 
-# Create a module-level logger
 logger = logging.getLogger("monumenten.api.cultureel_erfgoed")
 
 _CULTUREEL_ERFGOED_SPARQL_ENDPOINT = (
@@ -51,215 +42,84 @@ WHERE {{
 }}
 """
 
-_cultureel_erfgoed_semaphore: Optional[asyncio.Semaphore] = None
+
+class _GeenLijstError(RuntimeError):
+    """De RCE gaf geen lijst terug: dat is geen antwoord, dus ook geen leeg resultaat."""
 
 
-def _get_semaphore(loop: asyncio.AbstractEventLoop) -> asyncio.Semaphore:
-    """
-    Verkrijgt een semaphore voor het beperken van gelijktijdige aanvragen naar de Cultureel Erfgoed API.
+async def _sparql(
+    session: aiohttp.ClientSession, query: str, context: str
+) -> List[Dict[str, Any]]:
+    """Voer een SPARQL-query uit bij de RCE, met retries (zie _backoff).
 
     Args:
-        loop (asyncio.AbstractEventLoop): De asyncio event loop
+        session (aiohttp.ClientSession): De sessie voor HTTP requests
+        query (str): De SPARQL-query
+        context (str): Wat er wordt opgehaald, voor de logregels
 
     Returns:
-        asyncio.Semaphore: Een asyncio.Semaphore object dat het aantal gelijktijdige aanvragen beperkt tot 4
+        List[Dict[str, Any]]: De rijen van het antwoord. Een antwoord dat geen lijst
+            is telt als mislukte poging; blijft het uit, dan volgt de fout van de
+            laatste poging.
     """
-    global _cultureel_erfgoed_semaphore
-    if _cultureel_erfgoed_semaphore is None:
-        _cultureel_erfgoed_semaphore = asyncio.Semaphore(4)
-    return _cultureel_erfgoed_semaphore
+
+    async def post() -> List[Dict[str, Any]]:
+        async with session.post(
+            _CULTUREEL_ERFGOED_SPARQL_ENDPOINT, data={"query": query, "format": "json"}
+        ) as response:
+            response.raise_for_status()
+            resultaat = await response.json()
+        if not isinstance(resultaat, list):
+            raise _GeenLijstError(f"Onverwacht antwoord van de RCE: {resultaat!r:.200}")
+        return resultaat
+
+    return await met_retries(
+        post, context, herhaalbaar=(*RETRYABLE_NETWORK_EXCEPTIONS, _GeenLijstError)
+    )
 
 
 async def _query_rijksmonumenten(
     session: aiohttp.ClientSession,
     identificaties: List[str],
     uitval: Bronuitval,
-    *,
-    _depth: int = 0,
 ) -> List[Dict[str, Any]]:
-    """
-    Voert een SPARQL-query uit om rijksmonumenten op te halen voor gegeven BAG-identificaties.
-    Bij falen na retries wordt de batch in tweeën gesplitst en opnieuw geprobeerd,
-    behalve als de RCE gestoord is: dan wordt de request overgeslagen (zie Bronuitval).
+    """Haal de rijksmonumenten op voor BAG-identificaties.
+
+    Retries, splitsen bij falen en overslaan bij een storing: zie Bronuitval.bevraag.
 
     Args:
-        session (aiohttp.ClientSession): De aiohttp ClientSession voor het uitvoeren van de HTTP-aanvraag
-        identificaties (List[str]): Lijst van BAG-identificaties waarvoor rijksmonumenten worden opgezocht
-        uitval (Bronuitval): Hierin wordt vastgelegd voor welke identificaties de RCE
-            wel en, ook na retries en splitsen, geen antwoord gaf
-        _depth (int): Interne recursiediepte bij batch-splitsing; standaard 0.
+        session (aiohttp.ClientSession): De sessie voor HTTP requests
+        identificaties (List[str]): De verblijfsobject ID's
+        uitval (Bronuitval): Hierin legt de RCE vast voor welke identificaties zij
+            wel en geen antwoord gaf
 
     Returns:
-        List[Dict[str, Any]]: Lijst van dictionaries met informatie over gevonden rijksmonumenten
-
-    Raises:
-        aiohttp.ClientResponseError: Bij niet-herhaalbare HTTP-fouten of na uitgeputte retries.
-        asyncio.TimeoutError: Bij time-out na uitgeputte retries.
-        aiohttp.ClientConnectorError: Bij verbindingsfout na uitgeputte retries.
-        aiohttp.ServerDisconnectedError: Bij server-verbreking na uitgeputte retries.
+        List[Dict[str, Any]]: Per gevonden rijksmonument de identificatie en het
+            rijksmonument_nummer
     """
-    if not identificaties:
-        # Bijvoorbeeld een batch in de herkansing die alleen de BRK-PB nodig heeft
-        return []
-    try:
-        async with _get_semaphore(asyncio.get_running_loop()):
-            if uitval.sla_over_bij_storing(RCE, identificaties):
-                return []
-            identificaties_str = " ".join(
-                f'"{identificatie}"' for identificatie in identificaties
-            )
-            query = _RIJKSMONUMENTEN_QUERY_TEMPLATE.format(
-                identificaties=identificaties_str
-            )
-            data = {"query": query, "format": "json"}
-            last_error: Optional[BaseException] = None
-            for poging in range(MAX_ATTEMPTS):
-                try:
-                    async with session.post(
-                        _CULTUREEL_ERFGOED_SPARQL_ENDPOINT, data=data
-                    ) as response:
-                        response.raise_for_status()
-                        resultaat = await response.json()
-                        if isinstance(resultaat, list):
-                            if poging >= 1:
-                                logger.info(
-                                    "Poging %d/%d voor rijksmonumenten query geslaagd na eerdere mislukking",
-                                    poging + 1,
-                                    MAX_ATTEMPTS,
-                                )
-                            if _depth > 0:
-                                logger.info(
-                                    "Rijksmonumenten query geslaagd na splitsing (depth %d)",
-                                    _depth,
-                                )
-                            uitval.registreer_antwoord(RCE, len(identificaties))
-                            return resultaat
-                        else:
-                            logger.warning(
-                                "Unexpected response format on attempt %d: %s",
-                                poging + 1,
-                                resultaat,
-                            )
-                except aiohttp.ClientResponseError as e:
-                    last_error = e
-                    if e.status not in RETRYABLE_STATUS_CODES:
-                        raise
-                    if poging == MAX_ATTEMPTS - 1:
-                        raise
-                    logger.warning(
-                        "Poging %d/%d voor rijksmonumenten query mislukt: %s. Opnieuw proberen over %ds...",
-                        poging + 1,
-                        MAX_ATTEMPTS,
-                        str(e),
-                        RETRY_SLEEP_SECONDS,
-                    )
-                    await asyncio.sleep(RETRY_SLEEP_SECONDS)
-                except RETRYABLE_NETWORK_EXCEPTIONS as e:
-                    last_error = e
-                    if poging == MAX_ATTEMPTS - 1:
-                        raise
-                    logger.warning(
-                        "Poging %d/%d voor rijksmonumenten query mislukt (netwerk): %s. Opnieuw proberen over %ds...",
-                        poging + 1,
-                        MAX_ATTEMPTS,
-                        str(e),
-                        RETRY_SLEEP_SECONDS,
-                    )
-                    await asyncio.sleep(RETRY_SLEEP_SECONDS)
-            if last_error is not None:
-                raise last_error
-            # Geen fout maar ook geen lijst: dat is geen antwoord, dus geen leeg resultaat
-            raise RuntimeError("Onverwacht response formaat van de RCE")
-    except Exception as e:
-        kan_kleiner = len(identificaties) > MIN_BATCH_SIZE and _depth < MAX_SPLIT_DEPTH
-        uitval.registreer_mislukte_request(RCE, e, kan_kleiner=kan_kleiner)
-        if kan_kleiner and not uitval.is_gestoord(RCE):
-            mid = len(identificaties) // 2
-            logger.info(
-                "Rijksmonumenten query mislukt, splitsen in 2 batches van %d en %d IDs (depth %d)",
-                mid,
-                len(identificaties) - mid,
-                _depth + 1,
-            )
-            left = await _query_rijksmonumenten(
-                session, identificaties[:mid], uitval, _depth=_depth + 1
-            )
-            right = await _query_rijksmonumenten(
-                session, identificaties[mid:], uitval, _depth=_depth + 1
-            )
-            return left + right
-        logger.warning(
-            "Rijksmonumenten query definitief overgeslagen voor %d IDs",
-            len(identificaties),
+
+    async def vraag(ids: List[str]) -> List[Dict[str, Any]]:
+        query = _RIJKSMONUMENTEN_QUERY_TEMPLATE.format(
+            identificaties=" ".join(f'"{i}"' for i in ids)
         )
-        uitval.registreer_fout(RCE, identificaties, e)
-        return []
+        return await _sparql(session, query, "rijksmonumenten query")
+
+    # Een lege lijst: bijvoorbeeld een batch in de herkansing die alleen de BRK-PB
+    # nodig heeft
+    return await uitval.bevraag(RCE, identificaties, vraag)
 
 
 async def _query_beschermde_gezichten(
     session: aiohttp.ClientSession,
 ) -> List[Dict[str, Any]]:
-    """
-    Voert een SPARQL-query uit om beschermde stads- en dorpsgezichten op te halen.
+    """Haal alle rijksbeschermde stads- en dorpsgezichten op, met hun geometrie.
 
     Args:
-        session (aiohttp.ClientSession): De aiohttp ClientSession voor het uitvoeren van de HTTP-aanvraag
+        session (aiohttp.ClientSession): De sessie voor HTTP requests
 
     Returns:
-        List[Dict[str, Any]]: Lijst van dictionaries met informatie over beschermde stads- en dorpsgezichten
-
-    Raises:
-        aiohttp.ClientResponseError: Bij fouten in de HTTP-aanvraag na alle pogingen
+        List[Dict[str, Any]]: Per gezicht de naam en de WKT-geometrie
     """
-    data = {"query": _BESCHERMDE_GEZICHTEN_QUERY, "format": "json"}
-    last_error: Optional[BaseException] = None
-    for poging in range(MAX_ATTEMPTS):
-        try:
-            async with session.post(
-                _CULTUREEL_ERFGOED_SPARQL_ENDPOINT, data=data
-            ) as response:
-                response.raise_for_status()
-                resultaat = await response.json()
-                if isinstance(resultaat, list):
-                    if poging >= 1:
-                        logger.info(
-                            "Poging %d/%d voor beschermde gezichten query geslaagd na eerdere mislukking",
-                            poging + 1,
-                            MAX_ATTEMPTS,
-                        )
-                    return resultaat
-                else:
-                    logger.warning(
-                        "Onverwacht response formaat bij poging %d: %s",
-                        poging + 1,
-                        resultaat,
-                    )
-        except aiohttp.ClientResponseError as e:
-            last_error = e
-            if e.status not in RETRYABLE_STATUS_CODES:
-                raise
-            if poging == MAX_ATTEMPTS - 1:
-                raise
-            logger.warning(
-                "Poging %d/%d voor beschermde gezichten query mislukt: %s. Opnieuw proberen over %ds...",
-                poging + 1,
-                MAX_ATTEMPTS,
-                str(e),
-                RETRY_SLEEP_SECONDS,
-            )
-            await asyncio.sleep(RETRY_SLEEP_SECONDS)
-        except RETRYABLE_NETWORK_EXCEPTIONS as e:
-            last_error = e
-            if poging == MAX_ATTEMPTS - 1:
-                raise
-            logger.warning(
-                "Poging %d/%d voor beschermde gezichten query mislukt (netwerk): %s. Opnieuw proberen over %ds...",
-                poging + 1,
-                MAX_ATTEMPTS,
-                str(e),
-                RETRY_SLEEP_SECONDS,
-            )
-            await asyncio.sleep(RETRY_SLEEP_SECONDS)
-    if last_error is not None:
-        raise last_error
-    return []
+    return await _sparql(
+        session, _BESCHERMDE_GEZICHTEN_QUERY, "beschermde gezichten query"
+    )

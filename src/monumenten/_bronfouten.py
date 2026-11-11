@@ -6,14 +6,28 @@ import asyncio
 import heapq
 import logging
 import time
-from collections import Counter
-from typing import Dict, FrozenSet, Iterable, List, NoReturn, Optional, Set
+from asyncio import Semaphore
+from dataclasses import dataclass, field
+from typing import (
+    Awaitable,
+    Callable,
+    Dict,
+    FrozenSet,
+    Iterable,
+    List,
+    Optional,
+    Set,
+    TypeVar,
+)
 
 from monumenten._api._backoff import (
     MAX_CONSECUTIVE_FAILURES,
-    OUTAGE_GIVE_UP_SECONDS,
+    MAX_PARALLELLE_REQUESTS,
+    MAX_SPLIT_DEPTH,
+    MIN_BATCH_SIZE,
     OUTAGE_PROBE_SECONDS,
     is_fout_van_de_request,
+    is_rate_limited,
 )
 
 logger = logging.getLogger("monumenten.bronfouten")
@@ -29,11 +43,13 @@ VERWERKING = "verwerking"
 # stopt de aanroep, en haar uitval krijgt een herkansing. Een provincie die niet op te
 # halen is, maakt alleen provinciaal_monument onbepaald.
 BATCHBRONNEN: FrozenSet[str] = frozenset({RCE, BAG, BRK_PB, VERWERKING})
-# De externe bronnen onder de batchbronnen: alleen die kunnen gestoord raken of plat
-# liggen. De verwerking kent geen storing en geen proefrequest.
+# De externe bronnen onder de batchbronnen: alleen die kunnen een storing hebben.
+# De verwerking kent geen storing en geen proefrequest.
 _EXTERNE_BATCHBRONNEN: FrozenSet[str] = BATCHBRONNEN - {VERWERKING}
 
 _MAX_IDS_IN_MELDING = 10
+
+T = TypeVar("T")
 
 
 class _MetVerblijfsobjectIds(Exception):
@@ -58,7 +74,7 @@ class BronFoutError(_MetVerblijfsobjectIds, RuntimeError):
         melding (str): Omschrijving van de fout
         verblijfsobject_ids (Optional[Dict[str, List[str]]]): Per bron zonder
             antwoord ("RCE", "BAG" of "BRK-PB") de gesorteerde verblijfsobject ID's
-            zonder antwoord, ook uit batches die daarna zijn overgeslagen
+            zonder antwoord
     """
 
 
@@ -76,6 +92,32 @@ class MonumentStatusOnbepaaldWarning(_MetVerblijfsobjectIds, UserWarning):
     """
 
 
+@dataclass
+class _Bron:
+    """De toestand van één bron binnen één aanroep."""
+
+    # Voor zoveel verblijfsobjecten gaf de bron antwoord
+    beantwoord: int = 0
+    # Zoveel requests mislukten er achter elkaar, zonder antwoord ertussen
+    fouten_op_rij: int = 0
+    # De laatste fout van de reeks mislukte requests; None zonder storing
+    storing: Optional[Exception] = None
+    # Tijdstip (time.monotonic) vanaf wanneer een proefrequest mag
+    proef_vanaf: float = 0.0
+    # De verblijfsobject ID's waarvoor de bron, ook na retries en splitsen, geen
+    # antwoord gaf
+    mislukt: Set[str] = field(default_factory=set)
+    # De laatste fout waardoor de bron geen antwoord gaf
+    laatste_fout: Optional[Exception] = None
+    # Beperkt het aantal gelijktijdige requests aan de bron. Per aanroep en niet per
+    # proces: een semaphore bindt zich aan de event loop waarin zij voor het eerst
+    # moet wachten, en een tweede asyncio.run in hetzelfde proces zou op een
+    # gedeelde semaphore een RuntimeError krijgen.
+    semaphore: Semaphore = field(
+        default_factory=lambda: Semaphore(MAX_PARALLELLE_REQUESTS)
+    )
+
+
 class Bronuitval:
     """Houdt per bron bij voor welke verblijfsobjecten zij wel en geen antwoord gaf.
 
@@ -83,14 +125,11 @@ class Bronuitval:
     antwoord; alleen een fout die na retries en splitsen overblijft is uitval.
 
     Splitsen helpt alleen als een kleinere query wel lukt. Een bron waarvan
-    MAX_CONSECUTIVE_FAILURES requests achter elkaar mislukken is daarom gestoord: er
-    wordt niet meer gesplitst en zij wordt overgeslagen, op één proefrequest per
-    OUTAGE_PROBE_SECONDS na. Een antwoord beëindigt de storing. Is een bron die nog
-    nooit antwoord gaf na OUTAGE_GIVE_UP_SECONDS nog steeds gestoord, dan ligt zij
-    plat: de aanroep kan niet meer slagen en er volgt geen proefrequest meer. Tot dan
-    kan een proefrequest haar redden; een korte hapering aan het begin van een
-    aanroep, waarin de requests die tegelijk onderweg zijn samen falen, legt de bron
-    zo niet plat.
+    MAX_CONSECUTIVE_FAILURES requests achter elkaar mislukken heeft daarom een
+    storing: er wordt niet meer gesplitst en zij wordt overgeslagen, op één
+    proefrequest per OUTAGE_PROBE_SECONDS na. Een antwoord beëindigt de storing. Wat
+    tijdens de storing is overgeslagen, krijgt aan het einde van de aanroep een
+    herkansing (zie _processing._query).
 
     Per bron wordt alleen de laatste fout bewaard. Een fout houdt via zijn traceback
     de frames van zijn request vast; bij een lange storing in een aanroep met
@@ -98,158 +137,268 @@ class Bronuitval:
     """
 
     def __init__(self) -> None:
-        self._beantwoord: Counter[str] = Counter()
-        self._fouten_op_rij: Counter[str] = Counter()
-        # Gestoorde bron -> laatste fout van de reeks mislukte requests
-        self._storing: Dict[str, Exception] = {}
-        # Gestoorde bron -> tijdstip (time.monotonic) vanaf wanneer een proefrequest mag
-        self._proef_vanaf: Dict[str, float] = {}
-        # Gestoorde bron -> tijdstip (time.monotonic) waarop de storing begon
-        self._gestoord_sinds: Dict[str, float] = {}
-        self._plat: Set[str] = set()
-        # Bron -> verblijfsobject ID's waarvoor zij, ook na retries en splitsen,
-        # geen antwoord gaf
-        self.mislukt: Dict[str, Set[str]] = {}
-        # Bron in mislukt -> de laatste fout waardoor zij geen antwoord gaf
-        self.laatste_fout: Dict[str, Exception] = {}
+        self._bronnen: Dict[str, _Bron] = {}
 
-    def registreer_antwoord(self, bron: str, aantal: int) -> None:
-        """Leg vast dat een bron voor een aantal verblijfsobjecten antwoord gaf.
+    def _bron(self, naam: str) -> _Bron:
+        return self._bronnen.setdefault(naam, _Bron())
 
-        Een antwoord beëindigt een storing, behalve bij een bron die plat ligt: daar
-        zijn al batches voor overgeslagen.
+    @property
+    def mislukt(self) -> Dict[str, Set[str]]:
+        """Per bron de verblijfsobject ID's waarvoor zij, ook na retries en splitsen,
+        geen antwoord gaf; alleen bronnen met zulke ID's."""
+        return {
+            naam: bron.mislukt for naam, bron in self._bronnen.items() if bron.mislukt
+        }
+
+    @property
+    def laatste_fout(self) -> Dict[str, Exception]:
+        """Per bron in ``mislukt`` de laatste fout waardoor zij geen antwoord gaf."""
+        return {
+            naam: bron.laatste_fout
+            for naam, bron in self._bronnen.items()
+            if bron.mislukt and bron.laatste_fout is not None
+        }
+
+    def semaphore(self, bron: str) -> Semaphore:
+        """Geef de semaphore die het aantal gelijktijdige requests aan een bron beperkt.
 
         Args:
-            bron (str): De bron die antwoord gaf
+            bron (str): De bron
+
+        Returns:
+            Semaphore: De semaphore van de bron, met MAX_PARALLELLE_REQUESTS plaatsen
+        """
+        return self._bron(bron).semaphore
+
+    async def bevraag(
+        self,
+        bron: str,
+        verblijfsobject_ids: List[str],
+        vraag: Callable[[List[str]], Awaitable[List[T]]],
+        *,
+        _diepte: int = 0,
+    ) -> List[T]:
+        """Bevraag een bron voor verblijfsobjecten, met splitsen bij falen.
+
+        ``vraag`` doet één request voor de gegeven ID's en geeft de rijen van het
+        antwoord. Er lopen hooguit MAX_PARALLELLE_REQUESTS requests per bron tegelijk.
+        Heeft de bron een storing, dan wordt de request overgeslagen, op de
+        proefrequest na. Mislukt de request, ook na haar retries, dan wordt de set
+        ID's gehalveerd en elk deel opnieuw gevraagd, behalve bij een rate limit (429),
+        omdat splitsen dan alleen meer requests oplevert, bij een storing, bij één ID
+        of op de maximale splitsdiepte: dan krijgen de ID's geen antwoord. Antwoord en
+        uitval worden hier vastgelegd.
+
+        Args:
+            bron (str): De bron
+            verblijfsobject_ids (List[str]): De verblijfsobject ID's van de request
+            vraag (Callable[[List[str]], Awaitable[List[T]]]): Doet de request voor
+                een deel van de ID's en geeft de rijen van het antwoord
+            _diepte (int): Interne recursiediepte bij het splitsen; standaard 0
+
+        Returns:
+            List[T]: De rijen van alle requests die antwoord gaven, in de volgorde van
+                de ID's
+        """
+        if not verblijfsobject_ids:
+            return []
+        try:
+            async with self.semaphore(bron):
+                if self.sla_over_bij_storing(bron, verblijfsobject_ids):
+                    return []
+                rijen = await vraag(verblijfsobject_ids)
+        except Exception as fout:
+            kan_kleiner = (
+                not is_rate_limited(fout)
+                and len(verblijfsobject_ids) > MIN_BATCH_SIZE
+                and _diepte < MAX_SPLIT_DEPTH
+            )
+            self.registreer_mislukte_request(bron, fout, kan_kleiner=kan_kleiner)
+            if kan_kleiner and not self.in_storing(bron):
+                mid = len(verblijfsobject_ids) // 2
+                logger.info(
+                    "%s: request mislukt (%s: %s), splitsen in twee requests van %d en "
+                    "%d verblijfsobjecten (diepte %d)",
+                    bron,
+                    type(fout).__name__,
+                    fout,
+                    mid,
+                    len(verblijfsobject_ids) - mid,
+                    _diepte + 1,
+                )
+                return [
+                    *await self.bevraag(
+                        bron, verblijfsobject_ids[:mid], vraag, _diepte=_diepte + 1
+                    ),
+                    *await self.bevraag(
+                        bron, verblijfsobject_ids[mid:], vraag, _diepte=_diepte + 1
+                    ),
+                ]
+            logger.warning(
+                "%s: request definitief overgeslagen voor %d verblijfsobjecten",
+                bron,
+                len(verblijfsobject_ids),
+            )
+            self.registreer_fout(bron, verblijfsobject_ids, fout)
+            return []
+        if _diepte > 0:
+            logger.info("%s: request geslaagd na splitsen (diepte %d)", bron, _diepte)
+        self.registreer_antwoord(bron, len(verblijfsobject_ids))
+        return rijen
+
+    def registreer_antwoord(self, naam: str, aantal: int) -> None:
+        """Leg vast dat een bron voor een aantal verblijfsobjecten antwoord gaf.
+
+        Een antwoord beëindigt een storing.
+
+        Args:
+            naam (str): De bron die antwoord gaf
             aantal (int): Aantal verblijfsobjecten waarvoor het antwoord geldt
         """
-        self._beantwoord[bron] += aantal
-        self._fouten_op_rij[bron] = 0
-        if bron in self._storing and bron not in self._plat:
-            del self._storing[bron]
-            del self._proef_vanaf[bron]
-            del self._gestoord_sinds[bron]
-            logger.info("%s geeft weer antwoord en wordt weer bevraagd.", bron)
+        bron = self._bron(naam)
+        bron.beantwoord += aantal
+        bron.fouten_op_rij = 0
+        if bron.storing is not None:
+            bron.storing = None
+            logger.info("%s geeft weer antwoord en wordt weer bevraagd.", naam)
 
     def registreer_mislukte_request(
-        self, bron: str, fout: Exception, *, kan_kleiner: bool = False
+        self, naam: str, fout: Exception, *, kan_kleiner: bool = False
     ) -> None:
         """Tel een request die na retries mislukte.
 
         Een fout die bij de request hoort, zoals een 4xx of een afgekapt antwoord,
         telt niet zolang de request nog kleiner kan: splitsen zoekt dan het
         verblijfsobject waar het aan ligt. Anders zou één verblijfsobject dat altijd
-        faalt, op weg naar beneden, de hele bron als gestoord laten gelden.
+        faalt, op weg naar beneden, de hele bron een storing geven.
 
         Na MAX_CONSECUTIVE_FAILURES mislukte requests achter elkaar, zonder één
-        antwoord ertussen, is de bron gestoord. Mislukt daarna ook een proefrequest,
-        dan begint de pauze tot de volgende proefrequest opnieuw. Gaf de bron nog nooit
-        antwoord en duurt de storing dan al OUTAGE_GIVE_UP_SECONDS, dan ligt zij plat.
+        antwoord ertussen, heeft de bron een storing. Mislukt daarna ook een
+        proefrequest, dan begint de pauze tot de volgende proefrequest opnieuw.
 
         Args:
-            bron (str): De bron die geen antwoord gaf
+            naam (str): De bron die geen antwoord gaf
             fout (Exception): De fout die na retries overbleef
             kan_kleiner (bool): Of de request bij een fout nog gesplitst kan worden
         """
         if kan_kleiner and is_fout_van_de_request(fout):
             return
-        self._fouten_op_rij[bron] += 1
-        was_gestoord = bron in self._storing
-        if not was_gestoord and self._fouten_op_rij[bron] < MAX_CONSECUTIVE_FAILURES:
+        bron = self._bron(naam)
+        bron.fouten_op_rij += 1
+        had_storing = bron.storing is not None
+        if not had_storing and bron.fouten_op_rij < MAX_CONSECUTIVE_FAILURES:
             return
-        nu = time.monotonic()
-        self._storing[bron] = fout
-        self._proef_vanaf[bron] = nu + OUTAGE_PROBE_SECONDS
-        if not was_gestoord:
-            self._gestoord_sinds[bron] = nu
+        bron.storing = fout
+        bron.proef_vanaf = time.monotonic() + OUTAGE_PROBE_SECONDS
+        if not had_storing:
             logger.warning(
-                "%s is gestoord: %d requests achter elkaar mislukt (%s: %s). De bron "
-                "wordt overgeslagen; elke %d seconden volgt een proefrequest.",
-                bron,
+                "%s heeft een storing: %d requests achter elkaar mislukt (%s: %s). De "
+                "bron wordt overgeslagen; elke %d seconden volgt een proefrequest.",
+                naam,
                 MAX_CONSECUTIVE_FAILURES,
                 type(fout).__name__,
                 fout,
                 OUTAGE_PROBE_SECONDS,
             )
-            return
-        if (
-            bron not in self._plat
-            and not self._beantwoord[bron]
-            and nu - self._gestoord_sinds[bron] >= OUTAGE_GIVE_UP_SECONDS
-        ):
-            self._plat.add(bron)
-            logger.warning(
-                "%s gaf nog geen enkel antwoord en is al %d seconden gestoord (%s: %s); "
-                "de aanroep stopt.",
-                bron,
-                OUTAGE_GIVE_UP_SECONDS,
-                type(fout).__name__,
-                fout,
-            )
 
-    def registreer_mislukte_verwerking(
-        self, verblijfsobject_ids: Iterable[str], fout: Exception
+    def registreer_fout(
+        self, naam: str, verblijfsobject_ids: Iterable[str], fout: Exception
     ) -> None:
-        """Leg vast dat het verwerken van een batch onverwacht mislukte.
-
-        De statussen van de batch worden onbepaald en de batch krijgt een herkansing.
-        Een mislukte verwerking is geen storing van een bron: er volgt geen
-        proefrequest, en de andere batches worden gewoon verwerkt, tenzij de
-        verwerking kansloos is (zie verwerking_kansloos).
+        """Leg vast dat een bron voor verblijfsobjecten definitief geen antwoord gaf.
 
         Args:
-            verblijfsobject_ids (Iterable[str]): De verblijfsobject ID's van de batch
-            fout (Exception): De onverwachte fout
+            naam (str): De bron die geen antwoord gaf
+            verblijfsobject_ids (Iterable[str]): De betrokken verblijfsobject ID's
+            fout (Exception): De fout die na retries en splitsen overbleef
         """
-        self.registreer_fout(VERWERKING, verblijfsobject_ids, fout)
-        self._fouten_op_rij[VERWERKING] += 1
-        if (
-            self.verwerking_kansloos()
-            and self._fouten_op_rij[VERWERKING] == MAX_CONSECUTIVE_FAILURES
-        ):
-            logger.error(
-                "De verwerking van de eerste %d batches mislukte; de resterende "
-                "batches worden overgeslagen en de aanroep stopt.",
-                MAX_CONSECUTIVE_FAILURES,
-            )
+        bron = self._bron(naam)
+        bron.mislukt.update(verblijfsobject_ids)
+        bron.laatste_fout = fout
 
-    def verwerking_kansloos(self) -> bool:
-        """Geef aan of de eerste MAX_CONSECUTIVE_FAILURES batches allemaal mislukten.
+    def in_storing(self, naam: str) -> bool:
+        """Geef aan of een bron een storing heeft; er wordt dan niet gesplitst.
 
-        Dan is het vrijwel zeker een programmeerfout en geen probleem met de data van
-        één batch: de resterende batches hoeven niet meer verwerkt te worden, en
-        controleer geeft de oorspronkelijke fout.
+        Args:
+            naam (str): De bron
 
         Returns:
-            bool: Of de verwerking kansloos is
+            bool: Of de bron een storing heeft
         """
-        return (
-            not self._beantwoord[VERWERKING]
-            and self._fouten_op_rij[VERWERKING] >= MAX_CONSECUTIVE_FAILURES
-        )
+        return self._bron(naam).storing is not None
 
-    def sla_over_als_verwerking_kansloos(
-        self, verblijfsobject_ids: Iterable[str]
+    def bronnen_in_storing(self) -> List[str]:
+        """Geef de bronnen die op dit moment een storing hebben.
+
+        Returns:
+            List[str]: De bronnen met een storing
+        """
+        return [naam for naam, bron in self._bronnen.items() if bron.storing]
+
+    def sla_over_bij_storing(
+        self, naam: str, verblijfsobject_ids: Iterable[str]
     ) -> bool:
-        """Registreer een batch direct als mislukt als de verwerking kansloos is.
+        """Registreer verblijfsobjecten direct als mislukt als de bron een storing heeft.
 
-        De batch wordt vastgelegd met de laatste verwerkingsfout. Dat moet: slaagt
-        daarna toch nog een batch die al liep, dan is de verwerking niet meer
-        kansloos, geeft controleer geen fout, en zou een niet vastgelegde batch
-        voor al zijn verblijfsobjecten stil False opleveren.
+        Eén request per OUTAGE_PROBE_SECONDS wordt niet overgeslagen: die proefrequest
+        laat zien of de bron weer antwoord geeft.
 
         Args:
-            verblijfsobject_ids (Iterable[str]): De verblijfsobject ID's van de batch
+            naam (str): De bron die bevraagd zou worden
+            verblijfsobject_ids (Iterable[str]): De verblijfsobject ID's van de request
 
         Returns:
-            bool: Of de verwerking kansloos is; de batch moet dan worden overgeslagen
+            bool: Of de request moet worden overgeslagen
         """
-        if not self.verwerking_kansloos():
+        bron = self._bron(naam)
+        if bron.storing is None:
             return False
-        self.registreer_fout(
-            VERWERKING, verblijfsobject_ids, self.laatste_fout[VERWERKING]
-        )
+        if time.monotonic() >= bron.proef_vanaf:
+            # Dit is de proefrequest; de volgende mag pas na een nieuwe pauze
+            bron.proef_vanaf = time.monotonic() + OUTAGE_PROBE_SECONDS
+            return False
+        self.registreer_fout(naam, verblijfsobject_ids, bron.storing)
         return True
+
+    async def wacht_op_proefrequest(self) -> None:
+        """Wacht tot elke bron met een storing haar volgende proefrequest mag krijgen."""
+        wachttijd = (
+            max(
+                (bron.proef_vanaf for bron in self._bronnen.values() if bron.storing),
+                default=0.0,
+            )
+            - time.monotonic()
+        )
+        if wachttijd > 0:
+            await asyncio.sleep(wachttijd)
+
+    def herkansbaar(self) -> Dict[str, Set[str]]:
+        """Geef per bron de verblijfsobjecten die bij haar een herkansing verdienen.
+
+        Dat zijn de verblijfsobjecten waarvoor een batchbron geen antwoord gaf die op
+        dit moment geen storing heeft: een bron met een storing opnieuw bevragen heeft
+        geen zin. Alleen de bron die geen antwoord gaf wordt opnieuw bevraagd; wat de
+        andere bronnen al antwoordden blijft staan.
+
+        Returns:
+            Dict[str, Set[str]]: Per bron de verblijfsobject ID's
+        """
+        return {
+            naam: set(bron.mislukt)
+            for naam, bron in self._bronnen.items()
+            if naam in BATCHBRONNEN and bron.mislukt and bron.storing is None
+        }
+
+    def vergeet(self, naam: str, verblijfsobject_ids: Iterable[str]) -> None:
+        """Wis de uitval van een bron voor verblijfsobjecten die een herkansing krijgen.
+
+        De bron legt tijdens de herkansing opnieuw vast voor welke daarvan zij geen
+        antwoord gaf.
+
+        Args:
+            naam (str): De bron die de verblijfsobjecten opnieuw krijgt
+            verblijfsobject_ids (Iterable[str]): De verblijfsobject ID's
+        """
+        self._bron(naam).mislukt.difference_update(verblijfsobject_ids)
 
     def aantal_onvolledig_bepaald(self, verblijfsobject_ids: Iterable[str]) -> int:
         """Tel de onvolledig bepaalde verblijfsobjecten: een bron gaf tot nu toe geen
@@ -261,11 +410,8 @@ class Bronuitval:
         Returns:
             int: Hoeveel daarvan onvolledig bepaald zijn
         """
-        return sum(
-            1
-            for verblijfsobject_id in verblijfsobject_ids
-            if any(verblijfsobject_id in ids for ids in self.mislukt.values())
-        )
+        mislukt = list(self.mislukt.values())
+        return sum(1 for i in verblijfsobject_ids if any(i in ids for ids in mislukt))
 
     def aantal_onvolledig_bepaald_totaal(self) -> int:
         """Tel alle onvolledig bepaalde verblijfsobjecten, zonder een kopie van hun ID's.
@@ -283,187 +429,34 @@ class Bronuitval:
             for nummer, ids in enumerate(sets)
         )
 
-    def gestoord_zonder_antwoord(self, bron: str) -> bool:
-        """Geef aan of een bron gestoord is voor zij één antwoord gaf, maar nog niet
-        plat ligt: alleen een proefrequest kan haar nog redden.
-
-        Args:
-            bron (str): De bron
-
-        Returns:
-            bool: Of de bron gestoord is zonder ooit antwoord te hebben gegeven
-        """
-        return (
-            bron in self._storing
-            and not self._beantwoord[bron]
-            and bron not in self._plat
-        )
-
-    def is_gestoord(self, bron: str) -> bool:
-        """Geef aan of een bron gestoord is; er wordt dan niet gesplitst.
-
-        Args:
-            bron (str): De bron
-
-        Returns:
-            bool: Of de bron gestoord is
-        """
-        return bron in self._storing
-
-    def sla_over_bij_storing(
-        self, bron: str, verblijfsobject_ids: Iterable[str]
-    ) -> bool:
-        """Registreer verblijfsobjecten direct als mislukt als de bron gestoord is.
-
-        Eén request per OUTAGE_PROBE_SECONDS wordt niet overgeslagen: die proefrequest
-        laat zien of de bron weer antwoord geeft.
-
-        Args:
-            bron (str): De bron die bevraagd zou worden
-            verblijfsobject_ids (Iterable[str]): De verblijfsobject ID's van de request
-
-        Returns:
-            bool: Of de request moet worden overgeslagen
-        """
-        fout = self._storing.get(bron)
-        if fout is None:
-            return False
-        if bron not in self._plat and time.monotonic() >= self._proef_vanaf[bron]:
-            # Dit is de proefrequest; de volgende mag pas na een nieuwe pauze
-            self._proef_vanaf[bron] = time.monotonic() + OUTAGE_PROBE_SECONDS
-            return False
-        self.registreer_fout(bron, verblijfsobject_ids, fout)
-        return True
-
-    def sla_over_als_bron_plat_ligt(self, verblijfsobject_ids: Iterable[str]) -> bool:
-        """Registreer verblijfsobjecten direct als mislukt als een bron plat ligt.
-
-        Een bron die plat ligt maakt de aanroep kansloos, dus ook de andere bronnen
-        hoeven voor deze verblijfsobjecten niet meer bevraagd te worden. Dat is alleen
-        veilig omdat controleer daarna een BronFoutError geeft.
-
-        Args:
-            verblijfsobject_ids (Iterable[str]): De verblijfsobject ID's van de batch
-
-        Returns:
-            bool: Of een bron plat ligt; de batch moet dan worden overgeslagen
-        """
-        ids = list(verblijfsobject_ids)
-        for bron in self._plat:
-            self.registreer_fout(bron, ids, self._storing[bron])
-        return bool(self._plat)
-
-    def registreer_fout(
-        self, bron: str, verblijfsobject_ids: Iterable[str], fout: Exception
-    ) -> None:
-        """Leg vast dat een bron voor verblijfsobjecten definitief geen antwoord gaf.
-
-        Args:
-            bron (str): De bron die geen antwoord gaf
-            verblijfsobject_ids (Iterable[str]): De betrokken verblijfsobject ID's
-            fout (Exception): De fout die na retries en splitsen overbleef
-        """
-        self.mislukt.setdefault(bron, set()).update(verblijfsobject_ids)
-        self.laatste_fout[bron] = fout
-
-    def herkansbaar(self) -> Dict[str, Set[str]]:
-        """Geef per bron de verblijfsobjecten die bij haar een herkansing verdienen.
-
-        Dat zijn de verblijfsobjecten waarvoor een batchbron geen antwoord gaf die op
-        dit moment niet gestoord is: een gestoorde bron opnieuw bevragen heeft geen zin.
-        Alleen de bron die geen antwoord gaf wordt opnieuw bevraagd; wat de andere
-        bronnen al antwoordden blijft staan.
-
-        Returns:
-            Dict[str, Set[str]]: Per bron de verblijfsobject ID's
-        """
-        return {
-            bron: set(ids)
-            for bron, ids in self.mislukt.items()
-            if bron in BATCHBRONNEN and bron not in self._storing
-        }
-
-    def vergeet(self, bron: str, verblijfsobject_ids: Iterable[str]) -> None:
-        """Wis de uitval van een bron voor verblijfsobjecten die een herkansing krijgen.
-
-        De bron legt tijdens de herkansing opnieuw vast voor welke daarvan zij geen
-        antwoord gaf.
-
-        Args:
-            bron (str): De bron die de verblijfsobjecten opnieuw krijgt
-            verblijfsobject_ids (Iterable[str]): De verblijfsobject ID's
-        """
-        if bron not in self.mislukt:
-            return
-        self.mislukt[bron].difference_update(verblijfsobject_ids)
-        if not self.mislukt[bron]:
-            del self.mislukt[bron]
-            del self.laatste_fout[bron]
-
-    def gestoorde_bronnen(self) -> List[str]:
-        """Geef de bronnen die op dit moment gestoord zijn.
-
-        Returns:
-            List[str]: De gestoorde bronnen
-        """
-        return list(self._storing)
-
-    async def wacht_op_proefrequest(self) -> None:
-        """Wacht tot elke gestoorde bron haar volgende proefrequest mag krijgen."""
-        wachttijd = max(self._proef_vanaf.values(), default=0.0) - time.monotonic()
-        if wachttijd > 0:
-            await asyncio.sleep(wachttijd)
-
-    def controleer_tussentijds(self) -> None:
-        """Stop als de aanroep niet meer kan slagen, ook niet met de herkansing.
-
-        Dat is zo als een bron plat ligt, of als de verwerking kansloos is. Een bron
-        die alleen nog geen antwoord gaf, stopt de aanroep hier niet: bij een korte
-        hapering in een kleine aanroep, zoals voor één verblijfsobject, kan de
-        herkansing haar alsnog redden. Dat beoordeelt controleer na de herkansing.
-
-        Raises:
-            BronFoutError: Als een bron plat ligt
-            Exception: De oorspronkelijke fout als de verwerking kansloos is
-        """
-        plat = {bron: ids for bron, ids in self.mislukt.items() if bron in self._plat}
-        if plat:
-            self._stop_voor_bronnen(plat)
-        if self.verwerking_kansloos():
-            raise self.laatste_fout[VERWERKING]
-
     def controleer(self) -> None:
         """Stop als een bron of de verwerking voor geen enkel verblijfsobject slaagde.
 
-        Een bron die plat ligt gaat voor: zij kan de reden zijn dat geen batch werd
-        verwerkt. Ligt geen bron plat en lukte de verwerking van geen enkele batch,
-        dan is dat vrijwel zeker een programmeerfout: die fout zelf bereikt de
+        Een bron zonder enig antwoord gaat voor: zij kan de reden zijn dat geen batch
+        werd verwerkt. Gaf elke bron antwoord en lukte de verwerking van geen enkele
+        batch, dan is dat vrijwel zeker een programmeerfout: die fout zelf bereikt de
         aanroeper.
 
         Raises:
             BronFoutError: Als een bron voor alle bevraagde verblijfsobjecten faalde
-                of plat ligt
             Exception: De oorspronkelijke fout als de verwerking van geen enkele
                 batch lukte
         """
-        plat = {
-            bron: ids
-            for bron, ids in self.mislukt.items()
-            if bron in _EXTERNE_BATCHBRONNEN
-            and (bron in self._plat or not self._beantwoord[bron])
+        zonder_antwoord = {
+            naam: ids
+            for naam, ids in self.mislukt.items()
+            if naam in _EXTERNE_BATCHBRONNEN and not self._bron(naam).beantwoord
         }
-        if plat:
-            self._stop_voor_bronnen(plat)
-        if VERWERKING in self.mislukt and not self._beantwoord[VERWERKING]:
+        if zonder_antwoord:
+            raise BronFoutError(
+                "De monumentstatus kon niet worden bepaald: een bron gaf, ook na "
+                "retries, voor geen enkel bevraagd verblijfsobject antwoord. "
+                + self._beschrijf(zonder_antwoord),
+                _ids_per_bron(zonder_antwoord),
+            ) from self.laatste_fout[next(iter(zonder_antwoord))]
+        verwerking = self._bron(VERWERKING)
+        if verwerking.mislukt and not verwerking.beantwoord:
             raise self.laatste_fout[VERWERKING]
-
-    def _stop_voor_bronnen(self, plat: Dict[str, Set[str]]) -> NoReturn:
-        raise BronFoutError(
-            "De monumentstatus kon niet worden bepaald: een bron gaf, ook na "
-            "retries, voor geen enkel bevraagd verblijfsobject antwoord. "
-            + self._beschrijf(plat),
-            _ids_per_bron(plat),
-        ) from self.laatste_fout[next(iter(plat))]
 
     def waarschuwing(self) -> Optional[MonumentStatusOnbepaaldWarning]:
         """Geef de waarschuwing voor de verblijfsobjecten zonder antwoord.
@@ -472,27 +465,28 @@ class Bronuitval:
             Optional[MonumentStatusOnbepaaldWarning]: De waarschuwing, of ``None``
                 als elke bron voor elk verblijfsobject antwoord gaf
         """
-        if not self.mislukt:
+        mislukt = self.mislukt
+        if not mislukt:
             return None
         aantal = self.aantal_onvolledig_bepaald_totaal()
         return MonumentStatusOnbepaaldWarning(
             f"De monumentstatus van {aantal} verblijfsobject(en) kon niet volledig "
             "worden bepaald: een bron gaf, ook na retries, geen antwoord. De "
             "statussen die van die bron afhangen zijn pd.NA. "
-            + self._beschrijf(self.mislukt),
-            _ids_per_bron(self.mislukt),
+            + self._beschrijf(mislukt),
+            _ids_per_bron(mislukt),
         )
 
     def _beschrijf(self, mislukt: Dict[str, Set[str]]) -> str:
         """Som per bron de laatste fout en de verblijfsobjecten zonder antwoord op."""
         delen = []
-        for bron, ids in mislukt.items():
-            fout = self.laatste_fout[bron]
+        for naam, ids in mislukt.items():
+            fout = self.laatste_fout[naam]
             genoemd = ", ".join(heapq.nsmallest(_MAX_IDS_IN_MELDING, ids))
             if len(ids) > _MAX_IDS_IN_MELDING:
                 genoemd += f" en {len(ids) - _MAX_IDS_IN_MELDING} andere"
             delen.append(
-                f"{bron} ({len(ids)} verblijfsobject(en), "
+                f"{naam} ({len(ids)} verblijfsobject(en), "
                 f"{type(fout).__name__}: {fout}): {genoemd}"
             )
         return "; ".join(delen)
