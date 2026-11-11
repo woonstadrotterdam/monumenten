@@ -59,7 +59,7 @@ flowchart TB
         subgraph RCE_RM["Rijksmonumenten Query"]
             R1["Monument"]
             R2["BasisregistratieRelatie"]
-            R3["BAGRelatie"]
+            R3["BAGRelatie<br>(zonder situering)"]
             R4["verblijfsobjectIdentificatie"]
             R5["rijksmonumentnummer"]
         end
@@ -245,7 +245,7 @@ Alle beperkingen van de RCE (grondslagcodes EWE en EWD) zijn met type `BRK` vast
 
 ### Rijksmonumentnummer
 
-- **Bron RCE (of "RCE, Kadaster"):** het nummer van het monument dat de RCE bij het verblijfsobject noemt. Noemt zij het bij meer dan één monument, dan het numeriek laagste nummer: meestal de eerste inschrijving en het hoofdobject, en niet een later ingeschreven onderdeel zoals een tuin, beeld of bijgebouw.
+- **Bron RCE (of "RCE, Kadaster"):** het nummer van het monument dat de RCE bij het verblijfsobject noemt. Noemt zij het bij meer dan één monument, dan het numeriek laagste nummer. Dat is een heuristiek: de monumenten zijn dan meestal gelijkwaardig, zoals twee panden in één blok of een kerk en haar toren, en geen van de nummers is het enige juiste.
 - **Bron "Kadaster":** het Kadaster levert geen monumentnummer, wel de akte waarmee het monument in de openbare registers is ingeschreven (`gebaseerdOpStuk`, bijvoorbeeld `HYP4 82963/052`). De RCE legt per monument dezelfde akte vast. Het verblijfsobject krijgt het nummer van het monument met die akte; de bron blijft "Kadaster".
 
 Het nummer via de akte blijft leeg als het niet eenduidig is:
@@ -253,6 +253,17 @@ Het nummer via de akte blijft leeg als het niet eenduidig is:
 - de aktes van het verblijfsobject horen bij meer dan één monument, meestal omdat er meerdere monumenten op hetzelfde perceel staan;
 - de RCE legt de akte bij meer dan één monument vast, of bij geen enkel monument (bijvoorbeeld door een afwijkend kadasterdeel);
 - de RCE gaf geen antwoord op de vraag naar de akte. Dat staat dan in de log; de status `rijksmonument` blijft gewoon `True`, en er volgt geen `MonumentStatusOnbepaaldWarning`.
+
+### Situering
+
+De RCE koppelt een verblijfsobject soms met een situering aan een monument: "bij" of "tegenover". Zij gebruikt het adres dan als plaatsaanduiding voor een monument zonder eigen adres, zoals een brug, hek, beeld of grenspaal. Het verblijfsobject is het monument niet.
+
+Een koppeling met een situering telt daarom niet:
+
+- **Status:** noemt de RCE een verblijfsobject alleen met een situering, dan is de RCE geen bron. Het verblijfsobject is alleen een rijksmonument als het Kadaster dat bevestigt; de bron is dan "Kadaster" en het nummer komt via de akte.
+- **Nummer:** noemt de RCE een verblijfsobject bij meer dan één monument, dan tellen alleen de monumenten zonder situering. Bij Dorpsstraat 5 in Aarle-Rixtel is 6936 de kerk en staat 520165, het beeld ervoor, er "bij"; het nummer is 6936.
+
+De situering is niet altijd juist. Is het verblijfsobject toch het monument zelf, dan ligt het vrijwel altijd op het beschermde perceel en bevestigt het Kadaster de status. Een verblijfsobject zonder adrespunt in de BAG kan het Kadaster niet bevestigen.
 
 ### Endpoints
 

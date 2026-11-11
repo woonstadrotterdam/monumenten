@@ -29,5 +29,9 @@ Het stuk in de openbare registers van het Kadaster waarmee een rijksmonument is 
 _Avoid_: Stuk, gebaseerdOpStuk, kadasterdeel
 
 **Rijksmonumentbron**:
-De registratie die een verblijfsobject als rijksmonument aanwijst: de RCE als zij het verblijfsobject noemt, het Kadaster als het in een gebied met een rijksmonument-beperking ligt. Een monumentnummer dat via de **Akte** is gevonden, maakt de RCE geen bron.
+De registratie die een verblijfsobject als rijksmonument aanwijst: de RCE als zij het verblijfsobject zonder **Situering** noemt, het Kadaster als het in een gebied met een rijksmonument-beperking ligt. Een monumentnummer dat via de **Akte** is gevonden, maakt de RCE geen bron.
 _Avoid_: Herkomst, nummerbron
+
+**Situering**:
+De aanduiding "bij" of "tegenover" waarmee de RCE een verblijfsobject aan een monument koppelt als het adres alleen een plaatsaanduiding is. Het monument staat dan bij dat adres; het verblijfsobject is het monument niet. Een koppeling met een situering maakt de RCE geen **Rijksmonumentbron**.
+_Avoid_: Ligging, nabijheid, bij-relatie

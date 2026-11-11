@@ -15,12 +15,16 @@ _CULTUREEL_ERFGOED_SPARQL_ENDPOINT = (
     "https://api.linkeddata.cultureelerfgoed.nl/datasets/rce/cho/sparql"
 )
 
-# Noemt de RCE een verblijfsobject bij meer dan één rijksmonument, dan telt het
-# numeriek laagste nummer. Dat is meestal de eerste inschrijving en het hoofdobject;
-# hogere nummers zijn vaak later ingeschreven onderdelen, zoals een tuin, beeld of
-# bijgebouw. Bij Dorpsstraat 5 in Aarle-Rixtel is 6936 de kerk en 520165 het beeld
-# ervoor. ceo:rijksmonumentnummer is een string, dus de vergelijking moet numeriek:
-# alfabetisch is "520165" lager dan "6936".
+# Een koppeling met een situering ("bij" of "tegenover") telt niet. De RCE gebruikt
+# het adres dan als plaatsaanduiding voor een monument zonder eigen adres, zoals een
+# brug, hek of beeld; het verblijfsobject is het monument niet. Bij Dorpsstraat 5 in
+# Aarle-Rixtel is 6936 de kerk en staat 520165, het beeld ervoor, er "bij".
+#
+# Noemt de RCE een verblijfsobject daarna nog bij meer dan één rijksmonument, dan
+# telt het numeriek laagste nummer. Dat is een heuristiek: de monumenten zijn dan
+# meestal gelijkwaardig, zoals twee panden in één blok of een kerk en haar toren, en
+# geen van de nummers is het enige juiste. ceo:rijksmonumentnummer is een string, dus
+# de vergelijking moet numeriek: alfabetisch is "520165" lager dan "6936".
 _RIJKSMONUMENTEN_QUERY_TEMPLATE = """
 PREFIX ceo:<https://linkeddata.cultureelerfgoed.nl/def/ceo#>
 PREFIX bag:<http://bag.basisregistraties.overheid.nl/bag/id/>
@@ -33,6 +37,7 @@ WHERE {{
               ceo:heeftBasisregistratieRelatie ?basisregistratieRelatie .
     ?basisregistratieRelatie ceo:heeftBAGRelatie ?bagRelatie .
     ?bagRelatie ceo:verblijfsobjectIdentificatie ?identificatie .
+    FILTER NOT EXISTS {{ ?bagRelatie ceo:heeftSituering ?situering }}
     VALUES ?identificatie {{ {identificaties} }}
 }}
 GROUP BY ?identificatie

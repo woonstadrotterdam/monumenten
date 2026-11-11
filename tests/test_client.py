@@ -22,11 +22,40 @@ async def client():
 
 @pytest.mark.asyncio
 async def test_rijksmonument_nummer_is_numeriek_laagste(client: MonumentenClient):
-    """#70: de RCE noemt Dorpsstraat 5 in Aarle-Rixtel bij rijksmonument 6936, de
-    kerk, en 520165, het beeld ervoor. Het laagste nummer is het gebouw zelf."""
-    result = await client.process_from_list(["1659010000003181"])
+    """#70: de RCE noemt het adres van de Hervormde kerk in Pietersbierum bij
+    rijksmonument 8644, de kerk, en 512699, de kerktoren. Geen van beide heeft een
+    situering. Het numeriek laagste nummer telt; alfabetisch is "512699" lager."""
+    result = await client.process_from_list(["0070010000340109"])
 
-    assert result["1659010000003181"]["rijksmonument_nummer"] == "6936"
+    assert result["0070010000340109"]["rijksmonument_nummer"] == "8644"
+
+
+@pytest.mark.asyncio
+async def test_rce_koppeling_met_situering_telt_niet(client: MonumentenClient):
+    """De RCE koppelt een verblijfsobject soms met een situering ("bij" of
+    "tegenover") aan een monument. Het monument staat dan bij dat adres; het
+    verblijfsobject is het monument niet."""
+    kerk_elsloo = "0085010000048316"
+    woning_sneek = "0091010000034796"
+    crackstate_heerenveen = "0074010000390940"
+
+    result = await client.process_from_list(
+        [kerk_elsloo, woning_sneek, crackstate_heerenveen]
+    )
+
+    # 514113 is de kerk zelf; de klokkenstoel ernaast (31720) heeft situering "bij"
+    assert result[kerk_elsloo]["rijksmonument_nummer"] == "514113"
+
+    # Een woning uit 1985 bij een ophaalbrug (514100). Het Kadaster bevestigt niets.
+    assert result[woning_sneek]["rijksmonument"] is False
+    assert result[woning_sneek]["rijksmonument_bron"] is None
+    assert result[woning_sneek]["rijksmonument_nummer"] is None
+
+    # De RCE noemt Crackstate alleen "bij" monument 21169, maar het Kadaster bevestigt
+    # de status. De RCE is dan geen bron; het nummer komt via de akte.
+    assert result[crackstate_heerenveen]["rijksmonument"] is True
+    assert result[crackstate_heerenveen]["rijksmonument_bron"] == ["Kadaster"]
+    assert result[crackstate_heerenveen]["rijksmonument_nummer"] == "21169"
 
 
 @pytest.mark.asyncio
