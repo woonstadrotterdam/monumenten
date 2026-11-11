@@ -160,7 +160,9 @@ def test_waarschuwing_zonder_adrespunt():
     assert isinstance(waarschuwing, UserWarning)
     assert waarschuwing.verblijfsobject_ids == {BAG: sorted(ids)}
     melding = str(waarschuwing)
-    assert melding.startswith("12 verblijfsobject(en) staan niet in de BAG")
+    assert melding.startswith("Voor 12 verblijfsobject(en) heeft de BAG")
+    # Geen statuswaarden: die staan in het resultaat, en kunnen ook pd.NA zijn
+    assert "False" not in melding
     assert "0599010000000001" in melding
     assert "0599010000000011" not in melding
     assert melding.endswith("en 2 andere")

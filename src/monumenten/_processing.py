@@ -824,8 +824,8 @@ async def _query(
         # Ook in de log, voor wie warnings niet opvangt (zoals een pipeline die
         # alleen de log bewaart)
         logger.warning(
-            "%d van %d verblijfsobjecten staan niet in de BAG van PDOK en hebben geen "
-            "adrespunt; zie GeenAdrespuntWarning",
+            "Voor %d van %d verblijfsobjecten heeft de BAG van PDOK geen adrespunt "
+            "teruggegeven; zie GeenAdrespuntWarning",
             len(uitval.zonder_adrespunt),
             len(verblijfsobject_ids),
         )

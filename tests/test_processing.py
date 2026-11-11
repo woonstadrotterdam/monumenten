@@ -189,7 +189,10 @@ async def test_query_zonder_adrespunt_niet_bij_uitval_van_de_bag(
     assert uitval.zonder_adrespunt == {"onbekend"}
     assert "bag_fout" in uitval.mislukt[BAG]
     # Ook in de log, voor wie warnings niet opvangt
-    assert "1 van 3 verblijfsobjecten staan niet in de BAG van PDOK" in caplog.text
+    assert (
+        "Voor 1 van 3 verblijfsobjecten heeft de BAG van PDOK geen adrespunt"
+        in caplog.text
+    )
 
 
 def _make_cm_response(identificaties=None, fail=False, rijen=None):

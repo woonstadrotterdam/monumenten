@@ -173,10 +173,10 @@ class MonumentenClient:
                 gaf, de verwerking van een batch onverwacht mislukte of de monumenten
                 van de provincie niet opgehaald konden worden. In dat geval volgt ook
                 één ``MonumentStatusOnbepaaldWarning`` met per bron de betrokken ID's.
-                Een verblijfsobject dat niet in de BAG van PDOK staat (meestal
-                "Niet gerealiseerd verblijfsobject") krijgt ``False`` voor de
-                statussen die het adrespunt nodig hebben; die ID's noemt één
-                ``GeenAdrespuntWarning``.
+                Voor een verblijfsobject waarvoor de BAG van PDOK geen adrespunt
+                gaf (meestal "Niet gerealiseerd verblijfsobject"), kunnen de
+                statussen niet via de locatie worden gecontroleerd; die ID's noemt
+                één ``GeenAdrespuntWarning``.
 
         Raises:
             RuntimeError: Als de client niet als context manager wordt gebruikt

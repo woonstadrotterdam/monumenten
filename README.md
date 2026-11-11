@@ -322,7 +322,7 @@ De BAG staat overal bij omdat zij het adrespunt levert. Een rijksmonument dat de
 
 - De statuskolommen hebben het nullable pandas-dtype `boolean`. In `process_from_list` is een niet-bepaalde status `None`; in VERA-referentiedataformaat is dan de hele value van het verblijfsobject `None` in plaats van een lijst, omdat die lijst onvolledig zou zijn.
 - Blijft `rijksmonument` `True` doordat één bron de status geeft terwijl de andere geen antwoord gaf, dan noemt `rijksmonument_bron` alleen de bron die antwoord gaf.
-- Een ID dat niet in de BAG van PDOK voorkomt, meestal een verblijfsobject dat nooit gebouwd is, is geen fout maar een geldig leeg antwoord. Zonder adrespunt is `rijksmonument` alleen `True` als de RCE het verblijfsobject koppelt; de andere statussen zijn `False`. De ID's staan in een `GeenAdrespuntWarning`, onder `"BAG"` in `verblijfsobject_ids`.
+- Een ID waarvoor de BAG van PDOK geen adrespunt teruggeeft, meestal een verblijfsobject dat nooit gebouwd is, is geen fout maar een geldig leeg antwoord. Voor zo'n ID kunnen de statussen niet via de locatie worden gecontroleerd. Alleen een koppeling via de RCE kan `rijksmonument` `True` maken; lukt de verwerking, dan zijn de andere statussen `False`. Mislukt de verwerking ook na de herkansing, dan zijn de statussen `pd.NA` en volgt een `MonumentStatusOnbepaaldWarning`, zoals bij elk ander ID. De ID's zonder adrespunt staan in een `GeenAdrespuntWarning`, onder `"BAG"` in `verblijfsobject_ids`. Die waarschuwing noemt geen statuswaarden; die staan in het resultaat.
 
 Wie bij gedeeltelijk falen liever een fout krijgt dan een resultaat met `pd.NA`, maakt van de waarschuwing een fout:
 

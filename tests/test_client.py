@@ -734,6 +734,58 @@ async def test_zonder_adrespunt_geeft_false_en_waarschuwing(client: MonumentenCl
 
 
 @pytest.mark.asyncio
+async def test_zonder_adrespunt_en_mislukte_verwerking(client: MonumentenClient):
+    """Mislukt de verwerking van een ID zonder adrespunt ook na de herkansing, dan
+    zijn zijn statussen pd.NA. De GeenAdrespuntWarning noemt het ID; de
+    MonumentStatusOnbepaaldWarning meldt de mislukte verwerking."""
+    from monumenten import _processing
+
+    echte_process_batch = _processing._process_batch
+
+    async def process_batch(session, batch, brk_pb_adrespunten, uitval):
+        if _VO_ZONDER_ADRESPUNT in batch:
+            raise ValueError("onverwacht")
+        return await echte_process_batch(session, batch, brk_pb_adrespunten, uitval)
+
+    with (
+        _mock_api_met_voorbescherming(),
+        # Eén ID per batch, zodat alleen de batch met het ID zonder adrespunt faalt
+        patch("monumenten._processing._QUERY_BATCH_GROOTTE", 1),
+        patch("monumenten._processing._process_batch", side_effect=process_batch),
+        warnings.catch_warnings(record=True) as meldingen,
+    ):
+        warnings.simplefilter("always")
+        result = await client.process_from_df(
+            pd.DataFrame(
+                {"bag_verblijfsobject_id": [_VO_ALLEEN_EWE, _VO_ZONDER_ADRESPUNT]}
+            ),
+            "bag_verblijfsobject_id",
+        )
+
+    rijen = result.set_index("bag_verblijfsobject_id")
+    for status in (
+        "rijksmonument",
+        "rijksmonument_voorbescherming",
+        "gemeentelijk_monument",
+    ):
+        assert rijen.loc[_VO_ZONDER_ADRESPUNT, status] is pd.NA, status
+    assert bool(rijen.loc[_VO_ALLEEN_EWE, "rijksmonument"]) is True
+
+    zonder_adrespunt = [
+        m.message for m in meldingen if isinstance(m.message, GeenAdrespuntWarning)
+    ]
+    onbepaald = [
+        m.message
+        for m in meldingen
+        if isinstance(m.message, MonumentStatusOnbepaaldWarning)
+    ]
+    assert len(zonder_adrespunt) == 1
+    assert zonder_adrespunt[0].verblijfsobject_ids == {"BAG": [_VO_ZONDER_ADRESPUNT]}
+    assert len(onbepaald) == 1
+    assert onbepaald[0].verblijfsobject_ids == {"verwerking": [_VO_ZONDER_ADRESPUNT]}
+
+
+@pytest.mark.asyncio
 async def test_alle_adrespunten_geen_adrespunt_waarschuwing(client: MonumentenClient):
     with _mock_api_met_voorbescherming(), warnings.catch_warnings():
         warnings.simplefilter("error", GeenAdrespuntWarning)

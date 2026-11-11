@@ -97,14 +97,16 @@ class MonumentStatusOnbepaaldWarning(_MetVerblijfsobjectIds, UserWarning):
 
 
 class GeenAdrespuntWarning(_MetVerblijfsobjectIds, UserWarning):
-    """Een deel van de verblijfsobjecten staat niet in de BAG van PDOK.
+    """Voor een deel van de verblijfsobjecten gaf de BAG van PDOK geen adrespunt.
 
     De BAG gaf wel antwoord, maar zonder adrespunt: meestal is het verblijfsobject
     nooit gebouwd (status "Niet gerealiseerd verblijfsobject"), en die staan niet in
-    de BAG WFS. Zonder adrespunt zijn er geen Kadaster-beperkingen, geen
-    rijksbeschermd gezicht en geen provinciaal monument te vinden; die statussen
-    zijn ``False`` en niet ``pd.NA``, omdat de bron wel antwoord gaf.
-    ``rijksmonument`` kan nog ``True`` zijn via de RCE.
+    de BAG WFS. Voor deze ID's kunnen de monumentstatussen niet via de locatie
+    worden gecontroleerd. Een koppeling aan een rijksmonument via de RCE is wel
+    mogelijk.
+
+    De waarschuwing noemt geen statuswaarden: die staan in het resultaat. Mislukte
+    de verwerking van een ID, dan meldt ``MonumentStatusOnbepaaldWarning`` dat.
 
     Args:
         melding (str): Omschrijving van de waarschuwing
@@ -515,12 +517,10 @@ class Bronuitval:
         if len(ids) > _MAX_IDS_IN_MELDING:
             genoemd += f" en {len(ids) - _MAX_IDS_IN_MELDING} andere"
         return GeenAdrespuntWarning(
-            f"{len(ids)} verblijfsobject(en) staan niet in de BAG van PDOK, "
-            "meestal omdat ze nooit gebouwd zijn (status 'Niet gerealiseerd "
-            "verblijfsobject'). Zonder adrespunt zijn rijksbeschermd_gezicht, "
-            "gemeentelijk_monument, provinciaal_monument, "
-            "rijksmonument_voorbescherming en de Kadaster-bron van rijksmonument "
-            f"False; rijksmonument kan nog True zijn via de RCE: {genoemd}",
+            f"Voor {len(ids)} verblijfsobject(en) heeft de BAG van PDOK geen "
+            "adrespunt teruggegeven. Voor deze ID's kunnen monumentstatussen niet "
+            "via locatie worden gecontroleerd. Een koppeling aan een rijksmonument "
+            f"via de RCE is wel mogelijk. Betrokken ID's: {genoemd}",
             {BAG: ids},
         )
 
